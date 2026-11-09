@@ -869,6 +869,7 @@ std::atomic<int> protect_hearts{-1};
 // -1 disables the shortcut, 0 enables it on the ground, and 1 means flying.
 std::atomic<int> player_flight{-1};
 std::atomic<int> free_camera{0};
+std::atomic<int> infinite_ammo{0};
 std::atomic<int> cheat_action{0};
 std::atomic<int> link_age{-1};
 // (Movement speed: the choice, an index of link_speeds; the game side reads it in percent, HOS_OPT_CHEAT_SPEED)
@@ -2539,6 +2540,8 @@ void menu_init() {
     if (cheats_env) {
         const char* hearts = getenv("HOS_OOT_PROTECT_HEARTS");
         protect_hearts.store(hearts && !strcmp(hearts, "1"));
+        const char* ammo = getenv("HOS_OOT_INFINITE_AMMO");   // (as HOS_OOT_PROTECT_HEARTS: the row starts on)
+        infinite_ammo.store(ammo && !strcmp(ammo, "1"));
     }
     if (FILE* f = fopen(ini_path().c_str(), "r")) {
         has_options = true;

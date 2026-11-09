@@ -615,6 +615,33 @@ static void oot_inventory_edit(Ctx *c, int action) {
     hos_log("cheats: inventory %s %+d (had %d, now %d, event status %d)", name, delta, have, oot_item_count(c, name), result);
 }
 
+/* The Cheats page's Infinite ammo: twice a second each consumable is brought back to the most the pouch has held since
+   the row was turned on, through the same pouch edit the Inventory page uses. An item the pouch does not hold yet
+   (count 0 or unknown) is left alone, so the cheat never unlocks one. */
+static void oot_infinite_ammo(Ctx *c, int64_t now) {
+    int rx_option(int id, int otherwise);
+    static const char *const ammo[] = {"Item_DekuStick", "Item_DekuNut", "Item_DekuSeed", "Item_Bomb", "Item_Bombchu",
+                                       "Item_Arrow_Normal"};
+    enum { AMMO_COUNT = sizeof ammo / sizeof ammo[0] };
+    static int most[AMMO_COUNT];
+    static int64_t next;
+    if (rx_option(HOS_OPT_CHEAT_AMMO, 0) <= 0) {
+        memset(most, 0, sizeof most);
+        return;
+    }
+    if (now < next) return;
+    next = now + 500000000LL;
+    for (unsigned i = 0; i < AMMO_COUNT; i++) {
+        const int have = oot_pouch_count(c, ammo[i]);
+        if (have > most[i]) most[i] = have;
+        else if (have >= 0 && have < most[i]) {
+            static int logged;   /* (the first refills only: a test run reads them, play would fill the log) */
+            const int result = oot_pouch_change(c, ammo[i], most[i] - have);
+            if (logged < 8) logged++, hos_log("cheats: infinite ammo: %s %d -> %d (event status %d)", ammo[i], have, most[i], result);
+        }
+    }
+}
+
 static void oot_set_time(Ctx *c, unsigned hour) {
     // ExecuteWmSetTime passes seconds since midnight to the world manager.
     const uint64_t singleton = recomp_load64(c, 0x84c9e898ULL);
@@ -997,6 +1024,7 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     oot_teleport_followup(c);
     oot_inventory_refresh(c, now);
     oot_player_speed(c, components);
+    oot_infinite_ammo(c, now);
     if (action >= OOT_CHEAT_ITEM_ACTION && action < OOT_CHEAT_ITEM_ACTION + 256 * (int)OOT_ITEM_COUNT) {
         oot_inventory_edit(c, action);
     } else if (action == OOT_AGE_ACTION) {
