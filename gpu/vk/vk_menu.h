@@ -90,6 +90,8 @@ void menu_option_set(int id, int value);   // (from the game's side: 7 the mouse
 int menu_heart_protection();
 int menu_player_flight();
 int menu_infinite_ammo();
+int menu_time_lock();
+int menu_moon_jump();
 int menu_free_camera();
 int menu_link_speed();   // (Movement speed in percent, 100 while the tools are off)
 int menu_take_cheat_action();

@@ -906,6 +906,8 @@ static void npad_states(Ctx *c) {
         const int menu_open = rx_option(1, 0);
         const int free_camera = rx_option(HOS_OPT_CHEAT_CAMERA, 0);
         const int flying = flight_jump_shortcut(&buttons, rx_option(HOS_OPT_CHEAT_FLIGHT, -1), menu_open, free_camera);
+        extern volatile int hos_oot_jump_held;   /* host/hos_main.c: the Cheats page's Moon jump */
+        hos_oot_jump_held = !menu_open && !free_camera && (buttons >> B_B & 1);
         if (free_camera && !menu_open) {
             for (int i = 0; i < 4; i++) axes |= (uint64_t)(uint16_t)stick[i] << (16 * i);
             height = (int)(buttons >> B_R & 1) - (int)(buttons >> B_L & 1);

@@ -870,6 +870,8 @@ std::atomic<int> protect_hearts{-1};
 std::atomic<int> player_flight{-1};
 std::atomic<int> free_camera{0};
 std::atomic<int> infinite_ammo{0};
+std::atomic<int> time_lock{0};
+std::atomic<int> moon_jump{0};
 std::atomic<int> cheat_action{0};
 std::atomic<int> link_age{-1};
 // (Movement speed: the choice, an index of link_speeds; the game side reads it in percent, HOS_OPT_CHEAT_SPEED)
@@ -2542,6 +2544,9 @@ void menu_init() {
         protect_hearts.store(hearts && !strcmp(hearts, "1"));
         const char* ammo = getenv("HOS_OOT_INFINITE_AMMO");   // (as HOS_OOT_PROTECT_HEARTS: the row starts on)
         infinite_ammo.store(ammo && !strcmp(ammo, "1"));
+        const char* moon = getenv("HOS_OOT_MOON_JUMP");
+        moon_jump.store(moon && !strcmp(moon, "1"));
+        if (const char* lock = getenv("HOS_OOT_LOCK_TIME")) clock_hour = std::clamp(atoi(lock), 0, 23), time_lock.store(1);   // (the hour)
     }
     if (FILE* f = fopen(ini_path().c_str(), "r")) {
         has_options = true;
@@ -2693,6 +2698,15 @@ void menu_option_set(int id, int value) {
     if (id >= OOT_CHEAT_ITEM_BASE && id < OOT_CHEAT_ITEM_BASE + kItems) {   // (the game side's inventory counts)
         if (item_counts[id - OOT_CHEAT_ITEM_BASE].exchange(value, std::memory_order_relaxed) != value && page == 4)
             menu_refresh = true;
+        return;
+    }
+    // (the game side's Ctrl+number shortcuts: any value switches the row)
+    if (id == HOS_OPT_CHEAT_HEARTS || id == HOS_OPT_CHEAT_AMMO || id == HOS_OPT_CHEAT_TIMELOCK || id == HOS_OPT_CHEAT_MOONJUMP) {
+        if (!cheats_on()) return;
+        std::atomic<int>& row = id == HOS_OPT_CHEAT_HEARTS ? protect_hearts : id == HOS_OPT_CHEAT_AMMO ? infinite_ammo
+                              : id == HOS_OPT_CHEAT_TIMELOCK ? time_lock : moon_jump;
+        row.store(row.load() == 1 ? 0 : 1);
+        menu_refresh = true;
         return;
     }
     if (id == HOS_OPT_CHEAT_FLIGHT) {

@@ -423,6 +423,7 @@ static void load_hookshot_env(void) {
 }
 
 int hos_oot_protect_hearts;
+volatile int hos_oot_jump_held;   /* (the Cheats page's Moon jump) Jump is down: host/nn_hid.c */
 volatile int hos_oot_live_action;   /* (test runs) the live input file's "!cheat <action>": host/nn_hid.c */
 
 int hos_oot_hearts_enabled(void) {
@@ -657,6 +658,43 @@ static void oot_set_time(Ctx *c, unsigned hour) {
     set_time(c);
     *c = saved;
     hos_log("cheats: requested %02u:00", hour);
+}
+
+/* The Cheats page's Lock time: the clock goes back to the chosen hour every 5 s (ExecuteWmSetTime, as Set time). */
+static void oot_lock_time(Ctx *c, int64_t now) {
+    int rx_option(int id, int otherwise);
+    static int64_t next;
+    const int hour = rx_option(HOS_OPT_CHEAT_TIMELOCK, -1);
+    if (hour < 0 || hour > 23 || now < next) return;
+    next = now + 5000000000LL;
+    const uint64_t singleton = recomp_load64(c, 0x84c9e898ULL);
+    const uint64_t world = singleton ? recomp_load64(c, singleton) : 0;
+    A64Fn set_time = a64_lookup(0x834722d0ULL);
+    if (!set_time || !world || !recomp_load64(c, world + 0x510)) return;
+    const Ctx saved = *c;
+    c->x[0] = world;
+    c->x[1] = (uint64_t)hour * 3600;
+    set_time(c);
+    *c = saved;
+    static int told;
+    if (!told) told = 1, hos_log("cheats: clock held at %02d:00", hour);
+}
+
+/* Ctrl+1 hearts, Ctrl+3 ammo, Ctrl+4 moon jump, Ctrl+5 lock time: each switches its row while the game is in front. */
+static void oot_cheat_hotkeys(void) {
+    void rx_option_set(int id, int value);
+    int rx_option(int id, int otherwise);
+    static const int keys[] = {'1', '3', '4', '5'};
+    static const int ids[] = {HOS_OPT_CHEAT_HEARTS, HOS_OPT_CHEAT_AMMO, HOS_OPT_CHEAT_MOONJUMP, HOS_OPT_CHEAT_TIMELOCK};
+    static int held[4];
+    DWORD foreground = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
+    const int ctrl = foreground == GetCurrentProcessId() && !rx_option(1, 0) && GetAsyncKeyState(VK_CONTROL) < 0;
+    for (unsigned i = 0; i < 4; i++) {
+        const int down = ctrl && GetAsyncKeyState(keys[i]) < 0;
+        if (down && !held[i]) rx_option_set(ids[i], 1), hos_log("cheats: Ctrl+%c switched a row", keys[i]);
+        held[i] = down;
+    }
 }
 
 /* Cross-map teleport (build e0f3ccfa). Map changes in this game only run through an event: an entrance actor
@@ -1013,7 +1051,10 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     static uint64_t flying_actor, marked_actor, marked_controller;
     static int64_t last_tick, last_player_tick;
     static float target[3], velocity[3], mark[3], yaw;
-    const int flying = rx_option(HOS_OPT_CHEAT_FLIGHT, 0) > 0;
+    /* Moon jump: while Jump is held Link rises as in the flight, straight up, and falls when it is let go. */
+    const int flight_on = rx_option(HOS_OPT_CHEAT_FLIGHT, 0) > 0;
+    const int moon = !flight_on && rx_option(HOS_OPT_CHEAT_MOONJUMP, 0) > 0 && hos_oot_jump_held;
+    const int flying = flight_on || moon;
     if (!flying) flying_actor = 0;
     const int64_t now = hos_now_ns();
     __atomic_store_n(&flight_player_seen, now, __ATOMIC_RELAXED);
@@ -1025,6 +1066,8 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     oot_inventory_refresh(c, now);
     oot_player_speed(c, components);
     oot_infinite_ammo(c, now);
+    oot_lock_time(c, now);
+    oot_cheat_hotkeys();
     if (action >= OOT_CHEAT_ITEM_ACTION && action < OOT_CHEAT_ITEM_ACTION + 256 * (int)OOT_ITEM_COUNT) {
         oot_inventory_edit(c, action);
     } else if (action == OOT_AGE_ACTION) {
@@ -1094,6 +1137,11 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
             desired[0] = rx * right + rz * forward;
             desired[1] = vertical ? vertical : (int16_t)(axes >> 32);
             desired[2] = rz * right - rx * forward;
+        }
+        if (moon) {
+            static int64_t told;
+            desired[0] = desired[2] = 0, desired[1] = 1;
+            if (now - told > 1000000000LL) told = now, hos_log("cheats: moon jump at height %.2f", target[1]);
         }
         const float length = sqrtf(desired[0] * desired[0] + desired[1] * desired[1] + desired[2] * desired[2]);
         const float speed = 4.0f / fmaxf(1.0f, length);
