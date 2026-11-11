@@ -6061,6 +6061,10 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
         !at.depth || at.color_format[0] != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !s.ds.dt || !s.ds.dw || (s.color.blend_en & 1) ||
         s.nvattr < 1 || !temporal_scene_size(at.width, at.height))
         return;
+    // (drawn two-sided: leaves' cards, cloth. Without their textures the rays would cast the whole card: a small plant's
+    // shadow a large dark quad. Out of the rays; what of them casts a shadow comes back through the shadow maps' pass,
+    // where a cutout is told by its fragment stage and left to the game)
+    if (s.poly.cull == NVN_FACE_NONE) return;
     const auto attr = [&](int i) { return *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]); };
     const nvn_va_st pos = attr(0);
     if ((pos.fmt != NVN_FORMAT_RGB32F && pos.fmt != NVN_FORMAT_RGBA16F) || pos.stream != 0) return;
@@ -6079,7 +6083,10 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
 
 /// (miojo) A draw into a depth-only target: one of the sun's shadow maps? (vk_rt.cpp rt_note_shadow_draw: the sun's direction,
 /// the meshes out of view that cast shadows.) True: the rays draw this one's shadow, the game's map goes without it
-static bool rt_shadow_draw(const NvnState& s, const DrawArgs& d) {
+static bool rt_shadow_draw(const NvnState& s, const DrawArgs& d, const Program& p) {
+    // (a depth-only draw whose fragment stage samples a texture: cut by its alpha, a leaf's card)
+    bool cutout = false;
+    for (const Stage& st : p.stages) cutout = cutout || (st.nvn_stage == 1 && !st.info.texture_descriptors.empty());
     const bool plain = !d.mesh && d.indexed && !d.indirect && d.instances == 1 && d.prim == NVN_DRAW_PRIMITIVE_TRIANGLES && s.nvattr >= 1;
     const auto attr = [&](int i) { return *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]); };
     const nvn_va_st pos = attr(0);
@@ -6092,7 +6099,8 @@ static bool rt_shadow_draw(const NvnState& s, const DrawArgs& d) {
     k.object = s.ubo[0][1].addr;
     const bool have = plain && !skinned && (pos.fmt == NVN_FORMAT_RGB32F || pos.fmt == NVN_FORMAT_RGBA16F) && pos.stream == 0 && k.vbuf &&
                       k.ibuf && k.object && s.ubo[0][1].size >= 0x4c;
-    return rt_note_shadow_draw(have ? &k : nullptr, skinned, s.ubo[0][0].addr, s.ubo[0][0].size);
+    return rt_note_shadow_draw(have ? &k : nullptr, skinned, s.ubo[0][0].addr, s.ubo[0][0].size, cutout,
+                               s.ubo[0][1].size >= 0x4c ? s.ubo[0][1].addr : 0);
 }
 
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
@@ -6115,7 +6123,6 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         if (rt_on()) rt_scene_draw(s, d, at);
         fsr3_inputs::note_scene_draw(at.color[0], at.width, at.height, at.depth, s.ubo[0][0].addr, s.ubo[0][0].size);
     }
-    if (!at.n && at.depth && rt_on() && rt_shadow_draw(s, d)) SKIP_HERE();   // (miojo: the rays draw this shadow)
     uint8_t types[8];
     color_types_of(at, types);
     const Program* cp;
@@ -6128,6 +6135,8 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         static const int no_mesh = getenv("RX_VK_NO_MESH") ? atoi(getenv("RX_VK_NO_MESH")) : 0;
         if ((no_mesh == 1 && d.mesh) || (no_mesh == 2 && !d.mesh)) return;
     }
+    // (miojo: a shadow map's draw the rays have: they draw this shadow. After the program is known: a cutout's is the game's)
+    if (cp && cp->ready.load(std::memory_order_acquire) && !at.n && at.depth && rt_on() && rt_shadow_draw(s, d, *cp)) SKIP_HERE();
     if (!cp) {   // (hookshot) which draw has no program, 12 times: its stages' native code keys
         static std::atomic<int> told{0};
         if (told++ < 12) logf("vk: a draw without a program (frame %llu); its code:%s", (unsigned long long)texture_frame_no(),

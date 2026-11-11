@@ -70,8 +70,9 @@ struct Instance {
     float m[12];
     uint64_t same;   // (the mesh and the matrix as one number: the same twice is a second pass over the scene)
     uint64_t place;  // (the matrix alone)
-    bool shadow;     // (from a shadow map's pass: left out when the scene's own pass drew an object there, whose mesh
-                     // may be another level of detail of the same thing)
+    int kind;        // (0 the scene's; 1 from a shadow map's pass: left out when the scene's own pass drew an object
+                     // there, whose mesh may be another level of detail of the same thing; 2 no instance but a mark:
+                     // the object at this place is a cutout, kept out of the rays)
 };
 struct Dead {
     uint64_t frame;
@@ -154,7 +155,7 @@ struct Rt {
     Buf skin_ring[kRing];
     Mesh skin;
     uint32_t skin_cap = 0;   // (triangles the structure was made for)
-    uint64_t skin_triangles = 0, skin_draws = 0;
+    uint64_t skin_triangles = 0, skin_draws = 0, skin_dropped = 0;
     VkDescriptorSetLayout set = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkPipeline pipe = VK_NULL_HANDLE;
@@ -474,15 +475,21 @@ uint32_t build_skinned(Rt& r, VkCommandBuffer cmd, uint64_t now, int slot) {
     for (const Rt::Pose& p : r.poses) {
         const Rt::Model& m = r.models.find(p.key)->second;
         const uint32_t count = (uint32_t)(m.pos.size() / 3), nb = (uint32_t)(p.bones.size() / 12);
+        // (a vertex no bone moves (no weight, or joints the palette does not have) stays at the object's origin, far from
+        // the character: its triangles were spikes from the body to there, and their shadows stripes across the ground
+        // beside the character's own. Such a vertex's triangles are left out, and any triangle longer than a character is)
+        std::vector<float> at((size_t)count * 3);
+        std::vector<uint8_t> placed(count);
         for (uint32_t v = 0; v < count; v++, out += 3, normals += 3) {
             const float* x = &m.pos[(size_t)v * 3];
             const float* y = &m.normal[(size_t)v * 3];
-            float acc[3] = {p.origin[0], p.origin[1], p.origin[2]}, turned[3] = {0, 0, 0};
+            float acc[3] = {p.origin[0], p.origin[1], p.origin[2]}, turned[3] = {0, 0, 0}, weight = 0;
             for (int k = 0; k < 4 * m.sets; k++) {
                 const uint8_t w8 = m.weights[(size_t)v * 4 * m.sets + k];
                 const uint32_t j = m.joints[(size_t)v * 4 * m.sets + k];
                 if (!w8 || j >= nb) continue;
                 const float w = w8 / 255.0f;
+                weight += w;
                 const float* b = &p.bones[(size_t)j * 12];
                 for (int c = 0; c < 3; c++) {
                     acc[c] += w * (b[c * 4] * x[0] + b[c * 4 + 1] * x[1] + b[c * 4 + 2] * x[2] + b[c * 4 + 3]);
@@ -491,11 +498,29 @@ uint32_t build_skinned(Rt& r, VkCommandBuffer cmd, uint64_t now, int slot) {
             }
             const bool fine = std::isfinite(acc[0]) && std::isfinite(acc[1]) && std::isfinite(acc[2]);
             out[0] = fine ? acc[0] : 0.0f, out[1] = fine ? acc[1] : 0.0f, out[2] = fine ? acc[2] : 0.0f;
+            placed[v] = fine && weight > 0.5f;
+            for (int c = 0; c < 3; c++) at[(size_t)v * 3 + c] = fine ? acc[c] : 0.0f;
             const float len = std::sqrt(turned[0] * turned[0] + turned[1] * turned[1] + turned[2] * turned[2]);
             const bool has = std::isfinite(len) && len > 1e-12f;
             for (int c = 0; c < 3; c++) normals[c] = has ? turned[c] / len : 0.0f;
         }
-        for (uint32_t i : m.idx) *q++ = base + i;
+        for (size_t i = 0; i + 2 < m.idx.size(); i += 3) {
+            const uint32_t a = m.idx[i], b = m.idx[i + 1], c = m.idx[i + 2];
+            bool keep = placed[a] && placed[b] && placed[c];
+            const uint32_t pair[3][2] = {{a, b}, {b, c}, {c, a}};
+            for (int e = 0; e < 3 && keep; e++) {   // (an edge three times as long as the model has it: stretched)
+                const float* u = &at[(size_t)pair[e][0] * 3];
+                const float* w = &at[(size_t)pair[e][1] * 3];
+                const float* mu = &m.pos[(size_t)pair[e][0] * 3];
+                const float* mw = &m.pos[(size_t)pair[e][1] * 3];
+                const float dx = u[0] - w[0], dy = u[1] - w[1], dz = u[2] - w[2];
+                const float ex = mu[0] - mw[0], ey = mu[1] - mw[1], ez = mu[2] - mw[2];
+                keep = dx * dx + dy * dy + dz * dz < 9.0f * (ex * ex + ey * ey + ez * ez) + 0.0004f;
+            }
+            // (left out: its three corners the same one, a triangle of no area)
+            *q++ = base + a, *q++ = base + (keep ? b : a), *q++ = base + (keep ? c : a);
+            if (!keep) r.skin_dropped++;
+        }
         base += count;
     }
     flush_mapped(in.memory, bytes);
@@ -780,7 +805,7 @@ void rt_note_draw(const RtDraw& d, bool shadow_pass) {
         std::memcpy(&bits, &v, 4);
         place = (place ^ bits) * 0x100000001b3ull;
     }
-    in.place = place, in.same = (place ^ in.key) * 0x100000001b3ull, in.shadow = shadow_pass;
+    in.place = place, in.same = (place ^ in.key) * 0x100000001b3ull, in.kind = shadow_pass ? 1 : 0;
     bool look = false;   // (a built mesh drawn into the scene with no material yet: its colour texture looked for, once)
     {
         std::lock_guard lk(r.mu);
@@ -802,7 +827,7 @@ void rt_note_draw(const RtDraw& d, bool shadow_pass) {
     if (it != r.meshes.end()) it->second.material = slot;
 }
 
-bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size) {
+bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size, bool cutout, uint64_t object) {
     Rt& r = rt();
     if (!r.ok || camera_size < 0xb0) return false;
     const uint64_t now = texture_frame_no();
@@ -835,6 +860,22 @@ bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_
         }
         if (!r.light_is_sun) return false;
         built = k && r.meshes.count(key_of(*k));
+    }
+    if (cutout) {   // (its place marked: nothing drawn there is in the rays this frame; the game's map keeps its shadow)
+        float o[19];
+        if (!object || !memory_read_as_submitted(object, o, sizeof o)) return false;
+        o[3] += o[16], o[7] += o[17], o[11] += o[18];
+        Instance in{};
+        uint64_t place = 0xcbf29ce484222325ull;
+        for (int i = 0; i < 12; i++) {
+            uint32_t bits;
+            std::memcpy(&bits, &o[i], 4);
+            place = (place ^ bits) * 0x100000001b3ull;
+        }
+        in.place = place, in.same = place ^ 0x5bd1e995, in.kind = 2;
+        std::lock_guard lk(r.mu);
+        if (r.instances.size() < 4 * kMaxInstances) r.instances.push_back(in);
+        return false;
     }
     if (k) rt_note_draw(*k, true);
     // (left out of the game's map only while the rays draw their shadows: the row on, and rt_frame traced a moment ago)
@@ -915,15 +956,18 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     uint32_t n = 0;
     // (by place, the scene's own before the shadow maps': a shadow map's draw where the scene drew is left out)
     std::sort(r.instances.begin(), r.instances.end(), [](const Instance& a, const Instance& b) {
-        return a.place != b.place ? a.place < b.place : a.shadow != b.shadow ? b.shadow : a.same < b.same;
+        const int order[3] = {1, 2, 0};   // (a place's mark first, then the scene's, then the shadow maps')
+        return a.place != b.place ? a.place < b.place : a.kind != b.kind ? order[a.kind] < order[b.kind] : a.same < b.same;
     });
     r.instances.erase(std::unique(r.instances.begin(), r.instances.end(), [](const Instance& a, const Instance& b) { return a.same == b.same; }),
                       r.instances.end());
-    uint64_t scene_place = 0;
-    bool scene_there = false;
+    uint64_t scene_place = 0, cut_place = 0;
+    bool scene_there = false, cut_there = false;
     for (const Instance& in : r.instances) {
         if (n >= kMaxInstances - 1) break;
-        if (!in.shadow) scene_place = in.place, scene_there = true;
+        if (in.kind == 2) { cut_place = in.place, cut_there = true; continue; }
+        if (cut_there && cut_place == in.place) continue;
+        if (in.kind == 0) scene_place = in.place, scene_there = true;
         else if (scene_there && scene_place == in.place) continue;
         const auto it = r.meshes.find(in.key);
         if (it == r.meshes.end()) continue;
@@ -978,12 +1022,12 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
             }
         }
         logf("vk: rt: %u of %zu draws in the scene's structure; %zu meshes kept (%llu triangles, %llu MB), %llu built and %llu "
-             "unreadable since the start, %zu waiting; %zu skinned draws (%llu triangles); %.2f ms of CPU a frame and %.2f on its draws; builds: reads %.2f, conversion %.2f, structure %.2f, record %.2f ms a frame",
+             "unreadable since the start, %zu waiting; %zu skinned draws (%llu triangles, %llu left out a frame); %.2f ms of CPU a frame and %.2f on its draws; builds: reads %.2f, conversion %.2f, structure %.2f, record %.2f ms a frame",
              n, noted, r.meshes.size(), (unsigned long long)triangles, (unsigned long long)(bytes >> 20),
-             (unsigned long long)r.built, (unsigned long long)r.skipped, r.pending.size(), posed, (unsigned long long)r.skin_triangles, r.cpu_ms / 256.0,
+             (unsigned long long)r.built, (unsigned long long)r.skipped, r.pending.size(), posed, (unsigned long long)r.skin_triangles, (unsigned long long)(r.skin_dropped / 256), r.cpu_ms / 256.0,
              (double)r.note_ns.exchange(0) / 256e6, (double)r.phase_ns[0].exchange(0) / 256e6, (double)r.phase_ns[1].exchange(0) / 256e6,
              (double)r.phase_ns[2].exchange(0) / 256e6, (double)r.phase_ns[3].exchange(0) / 256e6);
-        r.cpu_ms = 0;
+        r.cpu_ms = 0, r.skin_dropped = 0;
     }
 
     static const int debug = getenv("RX_VK_RT_DEBUG") ? atoi(getenv("RX_VK_RT_DEBUG")) : 0;
@@ -1007,12 +1051,12 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         float pad3;
     } pc{};
     static_assert(sizeof pc == 224, "rt_debug.comp's push constants");
-    {   // (what a shadow takes: the sun over the sky's light, 2.3 for a sun of luminance 6 (the game's at noon), in the
-        // sun's own colour: a warm low sun leaves bluer shadows, a weak moon faint ones. Not known: the noon's, a little warm)
+    {   // (what a shadow takes: the sun over the sky's light, 3.5 whatever the hour (the sky dims with the sun: scaled by
+        // the sun's brightness, as it was first, a sunset's shadows were faint beside the game's own), in the sun's own
+        // colour: a warm low sun leaves bluer shadows. Not known: a little warm)
         const float* c = r.sun_colour;
         const float luma = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
-        const float level = 2.3f * std::min(luma / 6.0f, 1.5f);
-        for (int i = 0; i < 3; i++) pc.sun_share[i] = luma > 1e-4f ? std::min(level * c[i] / luma, 6.0f) : (i == 0 ? 2.6f : i == 1 ? 2.3f : 1.9f);
+        for (int i = 0; i < 3; i++) pc.sun_share[i] = luma > 1e-4f ? std::min(3.5f * c[i] / luma, 8.0f) : (i == 0 ? 3.9f : i == 1 ? 3.5f : 2.9f);
     }
     pc.skin_indices = r.skin_indices, pc.skin_normals = r.skin_normals;
     if (now - r.sun_frame < 4) pc.sun = (float)opts.sun / 100.0f, std::memcpy(pc.to_sun, r.to_sun, sizeof pc.to_sun);

@@ -192,7 +192,13 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
     const float open = 1.0 - pc.ao * sum / float(max(pc.rays, 1));
     light /= float(max(pc.rays, 1));
     const vec3 c = seen * open;
-    const vec3 lin = c * c / (1.0 + shade * max(facing, 0.0) * pc.sun_share);
+    // (how much of the light here is the sun's: not the cosine alone. With it a low sun's shadows on the ground were faint
+    // beside the game's own, still drawn for what the rays do not have: stripes of another darkness along a character's
+    // shadow. The game's shading keeps the sun strong at a slant: half the cosine and a half, squared, measured against
+    // its shadows at sunset and at noon; to nothing at the edge, where a facet's own neighbours shadow it)
+    const float slant = 0.5 * facing + 0.5;
+    const float sunlit = smoothstep(0.0, 0.15, facing) * slant * slant;
+    const vec3 lin = c * c / (1.0 + shade * sunlit * pc.sun_share);
     const vec3 lit = lin + pc.gi * albedo * light;
     if (pc.gi > 0.0) {   // (this surface's light for the frames to come; pixels of one cell write over each other: a mean of sorts)
         const ivec2 at = cell(p, n);
@@ -205,7 +211,7 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
     if (pc.mode == 5) shown = sqrt(light);
     if (pc.mode == 6) shown = sqrt(imageLoad(cache, cell(p, n)).rgb);
     if (pc.mode == 8) shown = mine.a > 0.5 ? sqrt(mine.rgb) : vec3(1.0, 0.0, 1.0) * 0.3;
-    if (pc.mode == 7) shown = 1.0 / (1.0 + shade * max(facing, 0.0) * pc.sun_share);
+    if (pc.mode == 7) shown = 1.0 / (1.0 + shade * sunlit * pc.sun_share);
     imageStore(color, g, vec4(shown, 1.0));
 }
 void main() {

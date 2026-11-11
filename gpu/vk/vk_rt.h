@@ -34,8 +34,10 @@ void rt_note_lights(uint64_t address, uint64_t size);
 /// A draw into a depth-only target with the vertex stage's camera at `camera`: when that is one of the game's sun shadow
 /// maps (an orthographic camera), the sun's direction is taken from it and the draw's mesh (k, or null when the rays
 /// cannot have it) is an instance for the rays, in view or not. True: the Sun shadows row is on and the rays have this
-/// draw (k, or `skinned`), so the game's shadow map is to go without it
-bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size);
+/// draw (k, or `skinned`), so the game's shadow map is to go without it. cutout: its fragment stage samples a texture (a
+/// leaf's card, cut by its alpha): the rays, which have no textures, would cast the whole card's shadow, so the object at
+/// `object` (its buffer) is kept out of the rays this frame and its shadow left to the game's map
+bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size, bool cutout, uint64_t object);
 /// A skinned draw into the scene (vk_draw.cpp's, as the upscaler's actor motion takes them): skinned on the CPU with this
 /// frame's bones, all of a frame's into one structure built anew
 void rt_note_skinned(const SkinnedDraw& k);
