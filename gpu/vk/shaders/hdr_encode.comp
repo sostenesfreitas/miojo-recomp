@@ -12,8 +12,10 @@ layout(push_constant) uniform P {
     float knee;    // where the highlights start to be expanded (0 to 1 of the picture's white)
     float pad;
 } pc;
+// (a 2.2 power, not sRGB's piecewise curve: an SDR display shows the game's picture with about 2.2, and the piecewise curve's
+// linear toe lifts the shadows above that, which read as a washed-out picture on an HDR display)
 vec3 srgb_to_linear(vec3 c) {
-    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), greaterThan(c, vec3(0.04045)));
+    return pow(c, vec3(2.2));
 }
 vec3 pq(vec3 nits) {
     const float m1 = 0.1593017578125, m2 = 78.84375, c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;

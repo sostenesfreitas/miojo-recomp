@@ -584,7 +584,9 @@ VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint
         }
         drop_img(scale.scaled);
         scale.scaled_w = scale.scaled_h = 0;
-        if (!make_img(scale.scaled, dw, dh, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        // (sampled too: with HDR on, framegen_hdr reads the scaled picture through a sampler; without the usage the read was black)
+        if (!make_img(scale.scaled, dw, dh, VK_FORMAT_R8G8B8A8_UNORM,
+                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) {
             drop_img(scale.scaled);
             return VK_NULL_HANDLE;
         }

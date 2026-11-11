@@ -133,7 +133,8 @@ int main() {
         CHECK(pipe_calls == 1 && sampler_calls == 1 && dispatches == 1 && image_calls == 1);
         CHECK(dispatched_mode == mode && dispatched_sharp == (mode ? 0.0f : 0.37f));
         CHECK(dispatched_w == 2560 && dispatched_h == 1440 && sampled_view == 12);
-        CHECK(made_usage == (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+        // (sampled too: framegen_hdr reads the scaled picture through a sampler)
+        CHECK(made_usage == (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT));
         CHECK(draw()); CHECK(pipe_calls == 1 && sampler_calls == 1 && image_calls == 1);
         CHECK(!fg.init && !fg.thread_started && !framegen_on());
         opts.upscale = opts.sharpness = 0; CHECK(!draw());
