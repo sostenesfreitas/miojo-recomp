@@ -900,7 +900,7 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     prep();
     full_barrier(cmd);
     rt_frame(cmd, cam.current, s.color.view, dview, s.point, rw, rh, (float)opts.ao / 100.0f,
-             cam.jitter[0] * (float)rw * 47.0f + cam.jitter[1] * (float)rh * 91.0f, in_view, (float)opts.gi / 100.0f);   // (miojo: the scene's ray-tracing structures, RX_VK_RT)
+             cam.jitter[0] * (float)rw * 47.0f + cam.jitter[1] * (float)rh * 91.0f, in_view, (float)opts.gi / 100.0f, s.depth.view);   // (miojo: the scene's ray-tracing structures, RX_VK_RT)
     // (what moves by itself: the skinned draws drawn again over the camera's motion, with their own)
     const int actors = actor_motion(cmd, cam, previous, rw, rh, dview, motion);
     if (actors) full_barrier(cmd);

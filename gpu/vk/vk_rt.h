@@ -25,6 +25,7 @@ struct RtDraw {
     uint64_t ibuf = 0;              // (the first index's address)
     int itype = 0, count = 0, base_vertex = 0;
     uint64_t object = 0;
+    bool front_ccw = false;         // (the draw's front face: the rays pass a triangle's back)
     uint64_t tex[4]{};              // (the fragment stage's first texture handles: the colour texture is among them)
 };
 void rt_note_draw(const RtDraw& d, bool shadow_pass = false);
@@ -37,6 +38,11 @@ void rt_note_lights(uint64_t address, uint64_t size);
 /// draw (k, or `skinned`), so the game's shadow map is to go without it. cutout: its fragment stage samples a texture (a
 /// leaf's card, cut by its alpha): the rays, which have no textures, would cast the whole card's shadow, so the object at
 /// `object` (its buffer) is kept out of the rays this frame and its shadow left to the game's map
+/// The object whose buffer is at `object` is a cutout (a card cut by its texture's alpha: a grate, a leaf, a banner's
+/// fringe): kept out of the rays, which have no textures and would take the whole card as solid, for 240 frames
+void rt_note_cutout(uint64_t object);
+/// The object whose buffer is at `object` is drawn two-sided: kept for 240 frames, its instance one a ray starting on it passes
+void rt_note_two_sided(uint64_t object);
 bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size, bool cutout, uint64_t object);
 /// A skinned draw into the scene (vk_draw.cpp's, as the upscaler's actor motion takes them): skinned on the CPU with this
 /// frame's bones, all of a frame's into one structure built anew
@@ -46,8 +52,26 @@ void rt_note_skinned(const SkinnedDraw& k);
 /// instances into the top-level one, and with RX_VK_RT_DEBUG=1 or 2 the check drawn over `color` (rgba16f, w x h, GENERAL);
 /// else, ao > 0 or gi > 0, the ray-traced ambient occlusion and one bounce of light over it (their strengths to 1; seed: a
 /// number that changes each frame; scene: the scene's colour as the upscaler samples it, where the bounce's light is read).
-/// view_proj: the camera's, row major; depth: the scene's depth as a sampled view
+/// view_proj: the camera's, row major; depth: the scene's depth as a sampled view; depth_kept: a copy of it that stays as it
+/// is until the next frame's call (the upscaler's own float image of it), for rt_ao_replace at the start of the next frame
 void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color, VkImageView depth, VkSampler point,
-              uint32_t w, uint32_t h, float ao, float seed, VkImageView scene, float gi);
+              uint32_t w, uint32_t h, float ao, float seed, VkImageView scene, float gi, VkImageView depth_kept);
+
+/// The game's own ambient occlusion pass (a compute dispatch at the start of a frame, from the frame before's depth, into
+/// an R8 image w x h that the game then blurs and lights with): written from rays instead, into `out`. True: done, the
+/// game's dispatch is to be left out. False (Ray tracing off, the Ambient occlusion row at 0, no scene of the frame before
+/// yet): the game's own runs
+bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h);
+
+/// The game's shadow mask (a screen-size RGBA8 target without depth, its green what of the sun reaches a pixel: drawn
+/// from the shadow maps before the scene is lit) was drawn into: its view and size, the largest of the frame kept
+void rt_note_mask(VkImageView view, uint32_t w, uint32_t h);
+/// The scene's camera (the vertex stage's uniform buffer 0 of a scene draw: its view-projection at 0x30), once a frame
+void rt_note_camera(uint64_t address, uint64_t size);
+/// Whether rt_sun_shadows has something to do now: the Sun shadows row on, a mask drawn this frame and not traced yet
+bool rt_sun_pending();
+/// The sun's shadows traced into this frame's mask (outside a render pass), from this frame's depth (`depth`: the scene's,
+/// as the draw about to light it has it) and the structure of the frame before
+void rt_sun_shadows(VkCommandBuffer cmd, VkImageView depth);
 
 } // namespace mkwvk

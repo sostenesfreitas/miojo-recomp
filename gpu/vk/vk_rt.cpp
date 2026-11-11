@@ -33,7 +33,9 @@
 
 #include "dlss_actor.h"
 #include "dlss_math.h"
+#include "shaders/rt_ao_comp_spv.h"
 #include "shaders/rt_debug_comp_spv.h"
+#include "shaders/rt_sun_comp_spv.h"
 #include "vk_menu.h"
 #include "vk_paths.h"
 #include "vk_state.h"
@@ -70,6 +72,7 @@ struct Instance {
     float m[12];
     uint64_t same;   // (the mesh and the matrix as one number: the same twice is a second pass over the scene)
     uint64_t place;  // (the matrix alone)
+    bool ccw;        // (its triangles' front is counter-clockwise, the mirroring of its matrix counted)
     int kind;        // (0 the scene's; 1 from a shadow map's pass: left out when the scene's own pass drew an object
                      // there, whose mesh may be another level of detail of the same thing; 2 no instance but a mark:
                      // the object at this place is a cutout, kept out of the rays)
@@ -110,13 +113,17 @@ struct Rt {
 
     std::mutex mu;
     std::unordered_map<uint64_t, Mesh> meshes;
-    // (meshes seen and not built yet: built once the same one was drawn in 4 frames, so what the game makes anew each
+    // (meshes seen and not built yet: built once the same one was drawn in 2 frames, so what the game makes anew each
     // frame at another address (particles, cloth, batches) is never read and built: thousands a minute, the lag of the
     // first version)
     struct Pending { RtDraw d; uint64_t last = 0; int frames = 0; };
     std::unordered_map<uint64_t, Pending> pending;
     std::unordered_set<uint64_t> bad, seen;   // (meshes that could not be read; this frame's instances, by mesh and matrix)
     std::vector<Instance> instances;
+    std::unordered_map<uint64_t, uint64_t> casters;    // (a place drawn into a shadow map, and the frame it last was)
+    std::unordered_map<uint64_t, uint64_t> two_sided;  // (a place drawn two-sided in the scene, and its frame)
+    std::unordered_map<uint64_t, uint64_t> cut_seen;   // (a cutout's place, and the frame it was last marked)
+    std::unordered_map<uint64_t, std::pair<Instance, uint64_t>> shadow_kept;   // (a shadow map's instance, and its frame)
     std::vector<Dead> dead;
     Buf scratch, ring[kRing];
     Buf stage[kRing];   // (a frame's new meshes' vertices and indices, for their builds)
@@ -167,9 +174,37 @@ struct Rt {
     uint64_t light_camera = 0, light_frame = 0, sun_frame = 0;
     bool light_is_sun = false;
     float to_sun[3]{};
+    // (the orthographic shadow cameras seen of late, each its way to its light: the game draws more than the sun's, on
+    // turns, and taking the last one's was a sun that turned every frame, its traced shadows with it)
+    struct Seen { float d[3]; uint64_t frame; } seen_lights[8]{};
+    uint64_t sun_from_lights = 0;   // (the frame the lights' buffer last gave the sun's direction)
+    float last_to_sun[3]{};
+    uint32_t sun_turns = 0;         // (frames whose sun was more than a degree from the frame before's, since the last line)
     std::atomic<uint64_t> lights_frame{0};   // (the frame the lights' buffer was last read)
     float sun_colour[3]{};   // (the game's, before its exposure; 0: not known)
     std::atomic<uint64_t> traced_frame{0};   // (the frame rt_frame last drew its effects)
+    // (the game's own occlusion pass, traced: rt_ao_replace. The frame before's camera and depth, kept by rt_frame)
+    float prev_inv[16]{};
+    VkImageView prev_depth = VK_NULL_HANDLE;
+    VkSampler prev_sampler = VK_NULL_HANDLE;
+    uint64_t prev_gen = 0, prev_frame = 0;
+    VkDescriptorSetLayout ao_set = VK_NULL_HANDLE;
+    VkPipelineLayout ao_layout = VK_NULL_HANDLE;
+    VkPipeline ao_pipe = VK_NULL_HANDLE;
+    bool ao_tried = false;
+    std::atomic<uint64_t> ao_frame{0};   // (the frame the game's occlusion was last written from rays)
+    // (the sun's shadows traced into the game's shadow mask: rt_sun_shadows. This frame's mask and camera)
+    VkImageView mask = VK_NULL_HANDLE;
+    uint32_t mask_w = 0, mask_h = 0;
+    uint64_t mask_frame = 0;
+    bool mask_done = false;
+    std::atomic<uint64_t> mask_wanted{0}, camera_frame{0};
+    float camera[16]{};
+    bool camera_fine = false;
+    VkDescriptorSetLayout sun_set = VK_NULL_HANDLE;
+    VkPipelineLayout sun_layout = VK_NULL_HANDLE;
+    VkPipeline sun_pipe = VK_NULL_HANDLE;
+    bool sun_tried = false;
     double cpu_ms = 0;   // (rt_frame's time on the CPU since the last line: the builds, the skinning)
 };
 Rt& rt() {
@@ -325,7 +360,7 @@ int build_mesh(Rt& r, VkCommandBuffer cmd, const RtDraw& d, Mesh& out) {
         } else {
             std::memcpy(p, at, 12);
         }
-        if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) p[0] = p[1] = p[2] = 0.0f;
+        if (!(std::fabs(p[0]) < 1e6f) || !(std::fabs(p[1]) < 1e6f) || !(std::fabs(p[2]) < 1e6f)) p[0] = p[1] = p[2] = 0.0f;   // (not finite, or no position)
     }
     std::memcpy(in.map, made.data(), vbytes);
     for (uint32_t i = 0; i < n; i++) idx[i] = (uint32_t)((int64_t)idx[i] + d.base_vertex - lo);
@@ -496,7 +531,7 @@ uint32_t build_skinned(Rt& r, VkCommandBuffer cmd, uint64_t now, int slot) {
                     turned[c] += w * (b[c * 4] * y[0] + b[c * 4 + 1] * y[1] + b[c * 4 + 2] * y[2]);
                 }
             }
-            const bool fine = std::isfinite(acc[0]) && std::isfinite(acc[1]) && std::isfinite(acc[2]);
+            const bool fine = std::fabs(acc[0]) < 1e6f && std::fabs(acc[1]) < 1e6f && std::fabs(acc[2]) < 1e6f;   // (finite, and a position)
             out[0] = fine ? acc[0] : 0.0f, out[1] = fine ? acc[1] : 0.0f, out[2] = fine ? acc[2] : 0.0f;
             placed[v] = fine && weight > 0.5f;
             for (int c = 0; c < 3; c++) at[(size_t)v * 3 + c] = fine ? acc[c] : 0.0f;
@@ -741,10 +776,19 @@ void rt_note_lights(uint64_t address, uint64_t size) {
     float f[20];
     if (!memory_read_as_submitted(address, f, sizeof f)) return;
     std::lock_guard lk(r.mu);
-    // (the light travels along f[0..2]: the buffer is the lights' when that is the way from the sun the shadow maps gave)
-    const float along = -(f[0] * r.to_sun[0] + f[1] * r.to_sun[1] + f[2] * r.to_sun[2]);
-    const bool fine = now - r.sun_frame < 4 && along > 0.99f && std::isfinite(f[16] + f[17] + f[18]) && f[16] >= 0.0f && f[17] >= 0.0f &&
-                      f[18] >= 0.0f && f[16] + f[17] + f[18] < 1000.0f;
+    // (the light travels along f[0..2]: the buffer is the lights' when that is a direction, and one of the shadow cameras seen
+    // of late looks along it. Then it is the sun's direction, the same every frame, whichever shadow map was drawn last)
+    const float norm = f[0] * f[0] + f[1] * f[1] + f[2] * f[2];
+    bool fine = std::isfinite(norm) && std::fabs(norm - 1.0f) < 0.02f && std::isfinite(f[16] + f[17] + f[18]) && f[16] >= 0.0f &&
+                f[17] >= 0.0f && f[18] >= 0.0f && f[16] + f[17] + f[18] < 1000.0f;
+    bool looked = false;
+    for (const Rt::Seen& e : r.seen_lights)
+        looked = looked || (e.frame && now - e.frame < 120 && -(f[0] * e.d[0] + f[1] * e.d[1] + f[2] * e.d[2]) > 0.99f);
+    fine = fine && looked;
+    if (fine) {
+        for (int i = 0; i < 3; i++) r.to_sun[i] = -f[i];
+        r.sun_from_lights = now;
+    }
     for (int i = 0; i < 3; i++) r.sun_colour[i] = fine ? f[16 + i] : 0.0f;
     static int told = 0;
     if (fine && told < 3 && now % 900 == 0) told++, logf("vk: rt: the game's sun: colour %.2f %.2f %.2f", f[16], f[17], f[18]);
@@ -806,6 +850,20 @@ void rt_note_draw(const RtDraw& d, bool shadow_pass) {
         place = (place ^ bits) * 0x100000001b3ull;
     }
     in.place = place, in.same = (place ^ in.key) * 0x100000001b3ull, in.kind = shadow_pass ? 1 : 0;
+    {   // (a mirroring matrix turns the winding around on the screen, and the game sets the draw's front face for that:
+        // the rays tell a front in the mesh's own space, so the mirroring is taken back out)
+        const float* m = in.m;
+        const float det = m[0] * (m[5] * m[10] - m[6] * m[9]) - m[1] * (m[4] * m[10] - m[6] * m[8]) + m[2] * (m[4] * m[9] - m[5] * m[8]);
+        // (what guest memory holds is not always a matrix yet, an area just entered: a flat or a huge one is left out. A
+        // structure of such instances is not the driver's to make sense of)
+        float most = 0.0f;
+        for (int i = 0; i < 12; i++) most = std::max(most, std::fabs(m[i]));
+        if (!(std::fabs(det) > 1e-9f) || most > 1e6f) return;
+        static const bool flip = getenv("RX_VK_RT_FLIP") != nullptr;
+        // (the rays' clockwise is the other way round from the game's on its screen, whose y runs up: found by the check
+        // view, where the wrong way let every ray through the walls. RX_VK_RT_FLIP: the other way, to see that again)
+        in.ccw = (d.front_ccw == (det < 0.0f)) != flip;
+    }
     bool look = false;   // (a built mesh drawn into the scene with no material yet: its colour texture looked for, once)
     {
         std::lock_guard lk(r.mu);
@@ -813,7 +871,11 @@ void rt_note_draw(const RtDraw& d, bool shadow_pass) {
         r.instances.push_back(in);
         const auto it = r.meshes.find(in.key);
         if (it != r.meshes.end()) {
-            look = !shadow_pass && it->second.material == 0;
+            // (the materials are a stub, nothing reads them yet, and off unless RX_VK_RT_MATERIALS: their copies read a
+            // game texture by a pointer kept since the draw, and the GPU device was lost entering an area about one run in
+            // six with them on; suspected, not proven, to be a texture the game let go in between)
+            static const bool materials = getenv("RX_VK_RT_MATERIALS") != nullptr;
+            look = materials && !shadow_pass && it->second.material == 0;
         } else if (!r.bad.count(in.key) && r.pending.size() < 16384) {
             Rt::Pending& w = r.pending[in.key];
             const uint64_t now = texture_frame_no();
@@ -825,6 +887,27 @@ void rt_note_draw(const RtDraw& d, bool shadow_pass) {
     std::lock_guard lk(r.mu);
     const auto it = r.meshes.find(in.key);
     if (it != r.meshes.end()) it->second.material = slot;
+}
+
+static void note_place(uint64_t object, int kind);
+void rt_note_cutout(uint64_t object) { note_place(object, 2); }
+void rt_note_two_sided(uint64_t object) { note_place(object, 3); }
+/// A mark for the object's place: 2 a cutout, 3 two-sided
+static void note_place(uint64_t object, int kind) {
+    Rt& r = rt();
+    float o[19];
+    if (!r.ok || !object || !memory_read_as_submitted(object, o, sizeof o)) return;
+    o[3] += o[16], o[7] += o[17], o[11] += o[18];
+    Instance in{};
+    uint64_t place = 0xcbf29ce484222325ull;
+    for (int i = 0; i < 12; i++) {
+        uint32_t bits;
+        std::memcpy(&bits, &o[i], 4);
+        place = (place ^ bits) * 0x100000001b3ull;
+    }
+    in.place = place, in.same = place ^ (kind == 2 ? 0x5bd1e995 : 0x1b873593), in.kind = kind;
+    std::lock_guard lk(r.mu);
+    if (r.instances.size() < 4 * kMaxInstances) r.instances.push_back(in);
 }
 
 bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size, bool cutout, uint64_t object) {
@@ -845,7 +928,18 @@ bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_
                 const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                 if (std::isfinite(len) && len > 1e-6f) {
                     const float sign = d[1] < 0.0f ? -1.0f : 1.0f;
-                    for (int i = 0; i < 3; i++) r.to_sun[i] = sign * d[i] / len;
+                    // (kept among the cameras seen; the sun's direction itself is the lights' buffer's, rt_note_lights,
+                    // when that is known, and this camera's only until then)
+                    Rt::Seen* slot = &r.seen_lights[0];
+                    for (Rt::Seen& e : r.seen_lights) {
+                        const float same = sign * (d[0] * e.d[0] + d[1] * e.d[1] + d[2] * e.d[2]) / len;
+                        if (e.frame && same > 0.999f) { slot = &e; break; }
+                        if (e.frame < slot->frame) slot = &e;
+                    }
+                    for (int i = 0; i < 3; i++) slot->d[i] = sign * d[i] / len;
+                    slot->frame = now;
+                    if (now - r.sun_from_lights > 30)
+                        for (int i = 0; i < 3; i++) r.to_sun[i] = slot->d[i];
                     r.sun_frame = now, r.light_is_sun = true;
                     static int told = 0;
                     if (told < 6 && (now % 600 == 0 || !told)) {
@@ -861,25 +955,204 @@ bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_
         if (!r.light_is_sun) return false;
         built = k && r.meshes.count(key_of(*k));
     }
-    if (cutout) {   // (its place marked: nothing drawn there is in the rays this frame; the game's map keeps its shadow)
-        float o[19];
-        if (!object || !memory_read_as_submitted(object, o, sizeof o)) return false;
-        o[3] += o[16], o[7] += o[17], o[11] += o[18];
-        Instance in{};
-        uint64_t place = 0xcbf29ce484222325ull;
-        for (int i = 0; i < 12; i++) {
-            uint32_t bits;
-            std::memcpy(&bits, &o[i], 4);
-            place = (place ^ bits) * 0x100000001b3ull;
-        }
-        in.place = place, in.same = place ^ 0x5bd1e995, in.kind = 2;
-        std::lock_guard lk(r.mu);
-        if (r.instances.size() < 4 * kMaxInstances) r.instances.push_back(in);
-        return false;
-    }
+    if (cutout) return rt_note_cutout(object), false;   // (the game's map keeps its shadow)
     if (k) rt_note_draw(*k, true);
     // (left out of the game's map only while the rays draw their shadows: the row on, and rt_frame traced a moment ago)
-    return (built || skinned) && opts.sun > 0 && now - r.traced_frame.load(std::memory_order_relaxed) < 4;
+    // (the first try left this draw out of the game's map when the rays had it and darkened the picture instead: double
+    // shadows, missing ones. Now the rays write into the game's shadow mask, rt_sun_shadows, and its maps stay whole)
+    (void)built, (void)skinned;
+    return false;
+}
+
+bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h) {
+    Rt& r = rt();
+    if (!r.ok || opts.ao <= 0 || !out || !w || !h) return false;
+    static const bool off = getenv("RX_VK_RT_AO_POST") != nullptr;   // (a test: the multiply over the picture, as it was)
+    if (off) return false;
+    std::lock_guard lk(r.mu);
+    const uint64_t now = texture_frame_no();
+    // (the frame before's scene: its structure, camera and depth. Its depth's view is the upscaler's, good while no texture
+    // was destroyed since)
+    if (!r.top.as || !r.prev_depth || now - r.prev_frame > 2 || r.prev_gen != texture_destroy_generation()) return false;
+    if (!r.ao_pipe) {
+        if (r.ao_tried) return false;
+        r.ao_tried = true;
+        const VkDescriptorType types[3] = {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                           VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+        VkDescriptorSetLayoutBinding b[3]{};
+        for (uint32_t i = 0; i < 3; i++) b[i] = {i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, li.bindingCount = 3, li.pBindings = b;
+        const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 92};
+        VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pi.setLayoutCount = 1, pi.pSetLayouts = &r.ao_set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
+        VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        mi.codeSize = sizeof RT_AO_COMP_SPV, mi.pCode = RT_AO_COMP_SPV;
+        VkShaderModule m{};
+        if (vkCreateDescriptorSetLayout(dev.device, &li, nullptr, &r.ao_set) != VK_SUCCESS ||
+            vkCreatePipelineLayout(dev.device, &pi, nullptr, &r.ao_layout) != VK_SUCCESS ||
+            vkCreateShaderModule(dev.device, &mi, nullptr, &m) != VK_SUCCESS)
+            return logf("vk: rt: the occlusion pass's layout was not made: the game's own"), false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", nullptr};
+        ci.layout = r.ao_layout;
+        if (vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &ci, nullptr, &r.ao_pipe) != VK_SUCCESS) r.ao_pipe = VK_NULL_HANDLE;
+        vkDestroyShaderModule(dev.device, m, nullptr);
+        if (!r.ao_pipe) return logf("vk: rt: the occlusion pass's pipeline was not made: the game's own"), false;
+        logf("vk: rt: the game's ambient occlusion is traced (%ux%u, its own blur and lighting after)", w, h);
+    }
+    struct {
+        float inv[16];
+        int32_t size[2];
+        float strength, radius, seed;
+        int32_t rays;
+        float skin;
+    } pc{};
+    static_assert(sizeof pc == 92, "rt_ao.comp's push constants");
+    static const float radius = getenv("RX_VK_RT_RADIUS") ? (float)atof(getenv("RX_VK_RT_RADIUS")) : 1.5f;
+    static const int rays = getenv("RX_VK_RT_RAYS") ? std::clamp(atoi(getenv("RX_VK_RT_RAYS")), 1, 16) : 6;
+    static const float skin = getenv("RX_VK_RT_SKIN") ? (float)atof(getenv("RX_VK_RT_SKIN")) : 0.12f;
+    std::memcpy(pc.inv, r.prev_inv, sizeof pc.inv);
+    pc.size[0] = (int32_t)w, pc.size[1] = (int32_t)h;
+    pc.strength = (float)opts.ao / 50.0f;   // (the row's 50%: a ray's hit counts whole)
+    // (the same noise every frame: with another each frame, what a few rays found in a narrow place (under a rug's edge)
+    // changed from frame to frame, and the game's blur of one frame does not average frames: small shadows flickered)
+    pc.radius = radius, pc.rays = rays, pc.skin = skin, pc.seed = 0.0f;
+    full_barrier(cmd, "barrier (rt occlusion)");
+    VkWriteDescriptorSetAccelerationStructureKHR wa{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    wa.accelerationStructureCount = 1, wa.pAccelerationStructures = &r.top.as;
+    const VkDescriptorImageInfo info[2] = {{r.prev_sampler, r.prev_depth, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, out, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[3]{};
+    for (uint32_t i = 0; i < 3; i++) wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, wr[i].dstBinding = i, wr[i].descriptorCount = 1;
+    wr[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, wr[0].pNext = &wa;
+    wr[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, wr[1].pImageInfo = &info[0];
+    wr[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, wr[2].pImageInfo = &info[1];
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r.ao_pipe);
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r.ao_layout, 0, 3, wr);
+    vkCmdPushConstants(cmd, r.ao_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
+    full_barrier(cmd, "barrier (rt occlusion)");
+    r.ao_frame.store(now, std::memory_order_relaxed);
+    return true;
+}
+
+void rt_note_mask(VkImageView view, uint32_t w, uint32_t h) {
+    Rt& r = rt();
+    if (!r.ok || opts.sun <= 0 || !view) return;
+    const uint64_t now = texture_frame_no();
+    std::lock_guard lk(r.mu);
+    if (r.mask_frame != now) r.mask_frame = now, r.mask_w = r.mask_h = 0, r.mask_done = false;
+    if ((uint64_t)w * h >= (uint64_t)r.mask_w * r.mask_h) r.mask = view, r.mask_w = w, r.mask_h = h, r.mask_done = false;
+    r.mask_wanted.store(now, std::memory_order_relaxed);
+}
+
+void rt_note_camera(uint64_t address, uint64_t size) {
+    Rt& r = rt();
+    const uint64_t now = texture_frame_no();
+    if (!r.ok || size < 0xb0 || r.camera_frame.exchange(now, std::memory_order_relaxed) == now) return;
+    float c[0xb0 / 4];
+    if (!memory_read_as_submitted(address, c, sizeof c)) return;
+    std::lock_guard lk(r.mu);
+    // (a perspective camera: the projection's w row at 0xa0 is 0, 0, -1, 0)
+    r.camera_fine = c[0xa0 / 4] == 0.0f && c[0xa4 / 4] == 0.0f && c[0xa8 / 4] == -1.0f && c[0xac / 4] == 0.0f;
+    std::memcpy(r.camera, c + 0x30 / 4, sizeof r.camera);
+    if (!r.camera_fine) r.camera_frame.store(0, std::memory_order_relaxed);   // (a shadow map's or a mirror's: the next draw's)
+}
+
+bool rt_sun_pending() {
+    Rt& r = rt();
+    const uint64_t now = texture_frame_no();
+    if (!r.ok || opts.sun <= 0 || r.mask_wanted.load(std::memory_order_relaxed) != now) return false;
+    // (only when the pass is sure to run. The caller ends the open render pass for it, and ending one for nothing in the
+    // first frames of an area, with no scene of the frame before to trace yet, lost the GPU device about one start in
+    // eight with the row on (never with it off: 0 of 16 against 4 of 40). So everything rt_sun_shadows asks is asked here)
+    std::lock_guard lk(r.mu);
+    int ways = 0;
+    for (const Rt::Seen& e : r.seen_lights) ways += e.frame && now - e.frame < 120;
+    const bool can = r.mask_frame == now && !r.mask_done && r.mask && r.top.as && r.prev_sampler && now - r.sun_frame <= 3 &&
+                     r.camera_fine && now - r.prev_frame <= 2 && ways == 1 && (r.sun_pipe || !r.sun_tried);
+    if (!can) r.mask_wanted.store(0, std::memory_order_relaxed);   // (not asked again for this mask)
+    return can;
+}
+
+void rt_sun_shadows(VkCommandBuffer cmd, VkImageView depth) {
+    Rt& r = rt();
+    const uint64_t now = texture_frame_no();
+    std::lock_guard lk(r.mu);
+    r.mask_wanted.store(0, std::memory_order_relaxed);
+    if (!r.ok || r.mask_frame != now || r.mask_done || !r.mask || !depth || !r.top.as || !r.prev_sampler) return;
+    r.mask_done = true;
+    // (the sun and this frame's camera known, and a scene of the frame before to trace)
+    if (now - r.sun_frame > 3 || !r.camera_fine || now - r.prev_frame > 2) return;
+    {   // (one sun: with shadow cameras looking more than one way of late (Goron City's halls, each lit from its own
+        // side) no single ray is every pixel's, and a shadow traced towards another hall's light is one the game does not
+        // have. There the game's mask stays as it is)
+        int ways = 0;
+        for (const Rt::Seen& e : r.seen_lights) ways += e.frame && now - e.frame < 120;
+        if (ways != 1) return;
+    }
+    struct {
+        float inv[16];
+        int32_t size[2];
+        float strength, seed;
+        float to_sun[3];
+        float skin;
+    } pc{};
+    static_assert(sizeof pc == 96, "rt_sun.comp's push constants");
+    static const float one[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    if (!dlss_math::reprojection(r.camera, one, pc.inv)) return;
+    if (!r.sun_pipe) {
+        if (r.sun_tried) return;
+        r.sun_tried = true;
+        const VkDescriptorType types[3] = {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                           VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+        VkDescriptorSetLayoutBinding b[3]{};
+        for (uint32_t i = 0; i < 3; i++) b[i] = {i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, li.bindingCount = 3, li.pBindings = b;
+        const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 96};
+        VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pi.setLayoutCount = 1, pi.pSetLayouts = &r.sun_set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
+        VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        mi.codeSize = sizeof RT_SUN_COMP_SPV, mi.pCode = RT_SUN_COMP_SPV;
+        VkShaderModule m{};
+        if (vkCreateDescriptorSetLayout(dev.device, &li, nullptr, &r.sun_set) != VK_SUCCESS ||
+            vkCreatePipelineLayout(dev.device, &pi, nullptr, &r.sun_layout) != VK_SUCCESS ||
+            vkCreateShaderModule(dev.device, &mi, nullptr, &m) != VK_SUCCESS) {
+            logf("vk: rt: the sun shadows' layout was not made: the game's own alone");
+            return;
+        }
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", nullptr};
+        ci.layout = r.sun_layout;
+        if (vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &ci, nullptr, &r.sun_pipe) != VK_SUCCESS) r.sun_pipe = VK_NULL_HANDLE;
+        vkDestroyShaderModule(dev.device, m, nullptr);
+        if (!r.sun_pipe) {
+            logf("vk: rt: the sun shadows' pipeline was not made: the game's own alone");
+            return;
+        }
+        logf("vk: rt: the sun's shadows are traced into the game's shadow mask (%ux%u)", r.mask_w, r.mask_h);
+    }
+    static const float skin = getenv("RX_VK_RT_SKIN") ? (float)atof(getenv("RX_VK_RT_SKIN")) : 0.12f;
+    if (r.to_sun[0] * r.last_to_sun[0] + r.to_sun[1] * r.last_to_sun[1] + r.to_sun[2] * r.last_to_sun[2] < 0.99985f) r.sun_turns++;
+    std::memcpy(r.last_to_sun, r.to_sun, sizeof r.last_to_sun);
+    pc.size[0] = (int32_t)r.mask_w, pc.size[1] = (int32_t)r.mask_h;
+    pc.strength = std::min((float)opts.sun / 100.0f, 1.0f), pc.seed = 0.0f, pc.skin = skin;   // (the same noise every frame, as the occlusion's)
+    std::memcpy(pc.to_sun, r.to_sun, sizeof pc.to_sun);
+    full_barrier(cmd, "barrier (rt sun)");
+    VkWriteDescriptorSetAccelerationStructureKHR wa{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
+    wa.accelerationStructureCount = 1, wa.pAccelerationStructures = &r.top.as;
+    const VkDescriptorImageInfo info[2] = {{r.prev_sampler, depth, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, r.mask, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[3]{};
+    for (uint32_t i = 0; i < 3; i++) wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, wr[i].dstBinding = i, wr[i].descriptorCount = 1;
+    wr[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, wr[0].pNext = &wa;
+    wr[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, wr[1].pImageInfo = &info[0];
+    wr[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, wr[2].pImageInfo = &info[1];
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r.sun_pipe);
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r.sun_layout, 0, 3, wr);
+    vkCmdPushConstants(cmd, r.sun_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    vkCmdDispatch(cmd, (r.mask_w + 7) / 8, (r.mask_h + 7) / 8, 1);
+    full_barrier(cmd, "barrier (rt sun)");
 }
 
 void rt_note_skinned(const SkinnedDraw& k) {
@@ -912,7 +1185,7 @@ void rt_note_skinned(const SkinnedDraw& k) {
 }
 
 void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color, VkImageView depth, VkSampler point, uint32_t w,
-              uint32_t h, float ao, float seed, VkImageView scene, float gi) {
+              uint32_t h, float ao, float seed, VkImageView scene, float gi, VkImageView depth_kept) {
     Rt& r = rt();
     if (!r.ok) return;
     std::lock_guard lk(r.mu);
@@ -926,7 +1199,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     uint32_t budget = 600000;
     for (auto it = r.pending.begin(); it != r.pending.end();) {
         if (now - it->second.last > 2) { it = r.pending.erase(it); continue; }   // (not drawn any more)
-        if (it->second.frames < 4 || budget == 0 ||
+        if (it->second.frames < 2 || budget == 0 ||
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() >= build_ms) {
             ++it;
             continue;
@@ -954,31 +1227,54 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     }
     auto* out = (VkAccelerationStructureInstanceKHR*)ring.map;
     uint32_t n = 0;
-    // (by place, the scene's own before the shadow maps': a shadow map's draw where the scene drew is left out)
-    std::sort(r.instances.begin(), r.instances.end(), [](const Instance& a, const Instance& b) {
-        const int order[3] = {1, 2, 0};   // (a place's mark first, then the scene's, then the shadow maps')
-        return a.place != b.place ? a.place < b.place : a.kind != b.kind ? order[a.kind] < order[b.kind] : a.same < b.same;
-    });
+    std::sort(r.instances.begin(), r.instances.end(), [](const Instance& a, const Instance& b) { return a.same < b.same; });
     r.instances.erase(std::unique(r.instances.begin(), r.instances.end(), [](const Instance& a, const Instance& b) { return a.same == b.same; }),
                       r.instances.end());
-    uint64_t scene_place = 0, cut_place = 0;
-    bool scene_there = false, cut_there = false;
+    uint32_t missing = 0;   // (drawn, its mesh not built yet)
+    // (the game draws a shadow map's far parts every other frame or less: what only those draws tell, a cutout's mark and
+    // an object out of view, came and went with them, and with it a grate's whole card in the rays: its shadow flickered at
+    // the game's frame rate. A mark is kept for 240 frames, a shadow map's instance for 8)
+    std::unordered_set<uint64_t> scene_places;
     for (const Instance& in : r.instances) {
-        if (n >= kMaxInstances - 1) break;
-        if (in.kind == 2) { cut_place = in.place, cut_there = true; continue; }
-        if (cut_there && cut_place == in.place) continue;
-        if (in.kind == 0) scene_place = in.place, scene_there = true;
-        else if (scene_there && scene_place == in.place) continue;
+        if (in.kind == 2) r.cut_seen[in.place] = now;
+        else if (in.kind == 3) r.two_sided[in.place] = now;
+        else if (in.kind == 1) r.shadow_kept[in.same] = {in, now};
+        else scene_places.insert(in.place);
+    }
+    for (auto it = r.cut_seen.begin(); it != r.cut_seen.end();) it = now - it->second > 240 ? r.cut_seen.erase(it) : std::next(it);
+    for (auto it = r.two_sided.begin(); it != r.two_sided.end();) it = now - it->second > 240 ? r.two_sided.erase(it) : std::next(it);
+    for (auto it = r.shadow_kept.begin(); it != r.shadow_kept.end();) it = now - it->second.second > 8 ? r.shadow_kept.erase(it) : std::next(it);
+    // (what casts the sun's shadow: the places the game drew into its shadow maps of late, 60 frames. A cave's shell and
+    // its rocks are not in them, the game lights its halls through them, and the sun's rays stopping at them were black
+    // patches on a banner the game has lit, another shape each frame. Those instances get the casters' bit of the mask,
+    // which rt_sun.comp's rays ask for; the occlusion's and the bounce's rays take every instance)
+    for (const Instance& in : r.instances)
+        if (in.kind == 1) r.casters[in.place] = now;
+    for (auto it = r.casters.begin(); it != r.casters.end();) it = now - it->second > 60 ? r.casters.erase(it) : std::next(it);
+    const auto add = [&](const Instance& in) {
+        if (n >= kMaxInstances - 1 || r.cut_seen.count(in.place)) return;
         const auto it = r.meshes.find(in.key);
-        if (it == r.meshes.end()) continue;
+        if (it == r.meshes.end()) { missing++; return; }
         it->second.used = now;
         VkAccelerationStructureInstanceKHR& a = out[n];
         std::memcpy(a.transform.matrix, in.m, sizeof in.m);
-        a.instanceCustomIndex = it->second.material, a.mask = 0xff, a.instanceShaderBindingTableRecordOffset = 0;
-        a.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        a.instanceCustomIndex = it->second.material, a.instanceShaderBindingTableRecordOffset = 0;
+        a.mask = r.casters.count(in.place) ? 0x03 : 0x01;
+        // (its triangles one-sided for the rays that ask (rt_ao.comp, rt_debug.comp): while the game fades between two
+        // levels of detail both are drawn, the one seen lies inside the other in places, and a ray leaving it hit the
+        // other's back at once: black triangles on a cave's walls while walking)
+        a.flags = in.ccw ? VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR : 0;
+        // (two-sided: told to the rays by a bit of its number. rt_ao.comp starts a ray in front of such an instance when
+        // the surface seen lies just behind where the rays have it: a banner swung by the wind in its vertex shader)
+        if (r.two_sided.count(in.place)) a.instanceCustomIndex |= 0x100000;
         a.accelerationStructureReference = it->second.address;
         n++;
-    }
+    };
+    for (const Instance& in : r.instances)
+        if (in.kind == 0) add(in);
+    // (the shadow maps': left out where the scene's own pass drew an object, whose mesh may be another level of detail)
+    for (const auto& kept : r.shadow_kept)
+        if (!scene_places.count(kept.second.first.place)) add(kept.second.first);
     // (the characters: one more instance, where the world is)
     r.skin_indices = r.skin_normals = 0;
     if (n < kMaxInstances && build_skinned(r, cmd, now, r.ring_at)) {
@@ -1009,6 +1305,21 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     note_work();
     full_barrier(cmd, "barrier (rt scene)");
 
+    {   // (for the game's occlusion pass at the start of the next frame: this frame's camera and depth)
+        static const float one[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+        // (not while most of the scene is still to be built, an area just entered: rays into half a scene find it open, and
+        // the game's own occlusion is better than none for those frames. Only then: walking, a tenth of the draws are new
+        // meshes each moment (levels of detail), and going back to the game's occlusion for them, darker in every crease,
+        // was shadows that went dark while moving and came back when standing)
+        const bool fine = n > 0 && missing <= n && dlss_math::reprojection(view_proj, one, r.prev_inv);
+        // (the upscaler's copy, not the game's depth target: the game clears that at the start of the next frame, some
+        // frames before its occlusion pass and some after, and read cleared it was all sky: a frame with no occlusion at
+        // all between frames with it, every shadow of the occlusion flickering)
+        r.prev_depth = fine ? depth_kept : VK_NULL_HANDLE, r.prev_sampler = point;
+        r.prev_gen = texture_destroy_generation(), r.prev_frame = now;
+    }
+    // (the occlusion: the game's own pass was written from rays this frame, so not over the picture again)
+    if (now - r.ao_frame.load(std::memory_order_relaxed) <= 1) ao = 0.0f;
     r.cpu_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (++r.frames % 256 == 0) {   // (meshes not drawn for a while go; and a line of what there is)
         uint64_t triangles = 0, bytes = 0;
@@ -1022,17 +1333,17 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
             }
         }
         logf("vk: rt: %u of %zu draws in the scene's structure; %zu meshes kept (%llu triangles, %llu MB), %llu built and %llu "
-             "unreadable since the start, %zu waiting; %zu skinned draws (%llu triangles, %llu left out a frame); %.2f ms of CPU a frame and %.2f on its draws; builds: reads %.2f, conversion %.2f, structure %.2f, record %.2f ms a frame",
+             "unreadable since the start, %zu waiting; %zu skinned draws (%llu triangles, %llu left out a frame); %.2f ms of CPU a frame and %.2f on its draws; the sun turned in %u frames; builds: reads %.2f, conversion %.2f, structure %.2f, record %.2f ms a frame",
              n, noted, r.meshes.size(), (unsigned long long)triangles, (unsigned long long)(bytes >> 20),
              (unsigned long long)r.built, (unsigned long long)r.skipped, r.pending.size(), posed, (unsigned long long)r.skin_triangles, (unsigned long long)(r.skin_dropped / 256), r.cpu_ms / 256.0,
-             (double)r.note_ns.exchange(0) / 256e6, (double)r.phase_ns[0].exchange(0) / 256e6, (double)r.phase_ns[1].exchange(0) / 256e6,
+             (double)r.note_ns.exchange(0) / 256e6, r.sun_turns, (double)r.phase_ns[0].exchange(0) / 256e6, (double)r.phase_ns[1].exchange(0) / 256e6,
              (double)r.phase_ns[2].exchange(0) / 256e6, (double)r.phase_ns[3].exchange(0) / 256e6);
-        r.cpu_ms = 0, r.skin_dropped = 0;
+        r.cpu_ms = 0, r.skin_dropped = 0, r.sun_turns = 0;
     }
 
     static const int debug = getenv("RX_VK_RT_DEBUG") ? atoi(getenv("RX_VK_RT_DEBUG")) : 0;
     if (dev.props.limits.maxPushConstantsSize < 224) return;
-    if ((!debug && !(ao > 0.0f) && !(gi > 0.0f) && opts.sun <= 0) || !n || !make_pipeline(r) || !make_cache(r, cmd) ||
+    if ((!debug && !(ao > 0.0f) && !(gi > 0.0f)) || !n || !make_pipeline(r) || !make_cache(r, cmd) ||
         !make_atlas(r, cmd))
         return;
     copy_materials(r, cmd);
@@ -1059,7 +1370,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         for (int i = 0; i < 3; i++) pc.sun_share[i] = luma > 1e-4f ? std::min(3.5f * c[i] / luma, 8.0f) : (i == 0 ? 3.9f : i == 1 ? 3.5f : 2.9f);
     }
     pc.skin_indices = r.skin_indices, pc.skin_normals = r.skin_normals;
-    if (now - r.sun_frame < 4) pc.sun = (float)opts.sun / 100.0f, std::memcpy(pc.to_sun, r.to_sun, sizeof pc.to_sun);
+    std::memcpy(pc.to_sun, r.to_sun, sizeof pc.to_sun);   // (pc.sun stays 0: the shadows go into the game's mask, rt_sun_shadows)
     r.traced_frame.store(now, std::memory_order_relaxed);
     static const float skin = getenv("RX_VK_RT_SKIN") ? (float)atof(getenv("RX_VK_RT_SKIN")) : 0.12f;
     pc.skin = skin;

@@ -1,0 +1,72 @@
+#version 460
+#extension GL_EXT_ray_query : require
+// (miojo) The sun's shadows, traced into the game's own shadow mask (vk_rt.cpp rt_sun_shadows). OoT resolves its shadow
+// maps into a screen-size RGBA8 image before it lights the scene: red its ambient occlusion, green what of the sun reaches
+// each pixel. Its lighting reads that, so a shadow written there is lit exactly as the game's own are: by its sun's share,
+// its colours, its shading. This pass takes the least of what the game put there and what a ray towards the sun finds:
+// the game's shadows stay (leaves, a fairy's wings, a flag: what the rays do not have), and the rays add theirs, sharp
+// where things touch. Nothing is shadowed twice, the mask holds one value. The first try at this darkened the finished
+// picture by a guessed share and took the game's own shadow draws out: double shadows, missing ones, a wrong darkness.
+// The structure is the frame before's (this frame's is built at its end): a moving character's traced shadow is a frame late.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform accelerationStructureEXT tlas;
+layout(binding = 1) uniform sampler2D scene_depth;
+layout(binding = 2, rgba8) uniform image2D mask;
+layout(push_constant, row_major) uniform P {
+    mat4 inv;       // (clip space to the world)
+    ivec2 size;
+    float strength; // (the row: 1 a traced shadow whole)
+    float seed;
+    vec3 to_sun;
+    float skin;     // (a character's own surface nearer than this does not shadow it: rt_debug.comp)
+} pc;
+vec3 world(vec2 uv, float d) {
+    const vec4 p = pc.inv * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d * 2.0 - 1.0, 1.0);
+    return p.xyz / p.w;
+}
+vec3 surface(vec2 uv) { return world(uv, textureLod(scene_depth, uv, 0.0).r); }
+float noise(vec2 p) {
+    uvec2 q = uvec2(ivec2(p * 8.0)) * uvec2(1597334673u, 3812015801u);
+    uint n = (q.x ^ q.y) * 1597334673u;
+    n ^= n >> 15, n *= 2246822519u, n ^= n >> 13;
+    return float(n) * (1.0 / 4294967296.0);
+}
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, pc.size))) return;
+    const vec2 uv = (vec2(g) + 0.5) / vec2(pc.size);
+    const float d = textureLod(scene_depth, uv, 0.0).r;
+    if (!(d > 0.0 && d < 1.0)) return;   // (the sky)
+    const vec4 was = imageLoad(mask, g);
+    if (was.g <= 0.0) return;            // (in the game's shadow already)
+    const vec2 px = 1.0 / vec2(textureSize(scene_depth, 0));
+    const vec3 p = world(uv, d), eye = world(uv, 0.0);
+    const vec3 r = surface(uv + vec2(px.x, 0.0)) - p, l = p - surface(uv - vec2(px.x, 0.0));
+    const vec3 u = surface(uv - vec2(0.0, px.y)) - p, dn = p - surface(uv + vec2(0.0, px.y));
+    vec3 n = normalize(cross(dot(r, r) < dot(l, l) ? r : l, dot(u, u) < dot(dn, dn) ? u : dn));
+    if (dot(n, eye - p) < 0.0) n = -n;
+    // (a surface turned from the sun is dark by the game's own shading; nearly edge-on, a facet's neighbours shadow it)
+    if (dot(n, pc.to_sun) < 0.08) return;
+    float skip = 0.0;
+    {
+        rayQueryEXT q;
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT, 0xFF, p + n * 0.03, 0.0, -n, 0.08);
+        while (rayQueryProceedEXT(q)) {}
+        if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT &&
+            rayQueryGetIntersectionInstanceCustomIndexEXT(q, true) == 0xfffffe)
+            skip = pc.skin;
+    }
+    // (towards the sun, a little off its centre by the noise: the upscaler's frames make the edge soft)
+    const vec2 s = vec2(g) + pc.seed;
+    const float a = 6.2831853 * noise(s), rr = 0.01 * sqrt(noise(s.yx + 3.0));
+    const vec3 su = normalize(abs(pc.to_sun.y) < 0.99 ? cross(pc.to_sun, vec3(0.0, 1.0, 0.0)) : cross(pc.to_sun, vec3(1.0, 0.0, 0.0)));
+    const vec3 dir = normalize(pc.to_sun + (su * cos(a) + cross(pc.to_sun, su) * sin(a)) * rr);
+    rayQueryEXT q;
+    // (only what the game's shadow maps hold stops it: the mask's second bit, vk_rt.cpp)
+    rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0x02,
+                          p + n * (0.004 * distance(eye, p) + 0.01), 0.0, dir, 400.0);
+    while (rayQueryProceedEXT(q))
+        if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
+    if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return;
+    imageStore(mask, g, vec4(was.r, min(was.g, 1.0 - pc.strength), was.b, was.a));
+}

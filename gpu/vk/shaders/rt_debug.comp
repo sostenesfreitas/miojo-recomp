@@ -145,7 +145,7 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
         const float a = 6.2831853 * noise(s), z2 = noise(s.yx + 11.0), rr = sqrt(1.0 - z2);
         const vec3 dir = t * (cos(a) * rr) + b * (sin(a) * rr) + n * sqrt(z2);
         rayQueryEXT q;
-        rayQueryInitializeEXT(q, tlas, gl_RayFlagsNoneEXT, 0xFF, from, 0.0, dir, far);
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, 0.0, dir, far);
         while (rayQueryProceedEXT(q))
             if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
         if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
@@ -183,7 +183,7 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
         const vec3 su = normalize(abs(pc.to_sun.y) < 0.99 ? cross(pc.to_sun, vec3(0.0, 1.0, 0.0)) : cross(pc.to_sun, vec3(1.0, 0.0, 0.0)));
         const vec3 dir = normalize(pc.to_sun + (su * cos(a) + cross(pc.to_sun, su) * sin(a)) * rr);
         rayQueryEXT q;
-        rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, from, 0.0, dir, 400.0);
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, 0.0, dir, 400.0);
         while (rayQueryProceedEXT(q))
             if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
         if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
@@ -227,7 +227,7 @@ void main() {
     const vec3 o = world(ndc, -1.0), far = world(ndc, 1.0);
     const float tmax = distance(far, o);
     rayQueryEXT q;
-    rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT, 0xFF, o, 0.0, (far - o) / tmax, tmax);
+    rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, o, 0.0, (far - o) / tmax, tmax);
     while (rayQueryProceedEXT(q)) {}
     const bool hit = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
     const bool drawn = d < 1.0;

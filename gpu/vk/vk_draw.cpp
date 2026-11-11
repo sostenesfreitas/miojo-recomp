@@ -6056,7 +6056,7 @@ static void skin_check(const NvnState& s, const Program& p, const DrawArgs& d, c
 }
 
 /// (miojo) An opaque, unskinned triangle-list draw into the scene, for the ray-tracing structures (vk_rt.cpp)
-static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& at) {
+static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& at, const Program& p) {
     if (d.mesh || !d.indexed || d.indirect || d.instances != 1 || d.prim != NVN_DRAW_PRIMITIVE_TRIANGLES || !at.n || !at.color[0] ||
         !at.depth || at.color_format[0] != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !s.ds.dt || !s.ds.dw || (s.color.blend_en & 1) ||
         s.nvattr < 1 || !temporal_scene_size(at.width, at.height))
@@ -6064,7 +6064,11 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
     // (drawn two-sided: leaves' cards, cloth. Without their textures the rays would cast the whole card: a small plant's
     // shadow a large dark quad. Out of the rays; what of them casts a shadow comes back through the shadow maps' pass,
     // where a cutout is told by its fragment stage and left to the game)
-    if (s.poly.cull == NVN_FACE_NONE) return;
+    // (its place noted as two-sided: its shadow map's draw brings it into the rays all the same (a cave's walls are such
+    // too), and vk_rt.cpp then lets a ray that starts on it pass it: a banner's cloth moves in the wind by its vertex shader,
+    // the rays have it as it hangs still, and where the cloth seen swung behind that copy every ray from it hit at once:
+    // black patches over the banner, another shape each frame)
+    if (s.poly.cull == NVN_FACE_NONE) return rt_note_two_sided(s.ubo[0][1].size >= 0x4c ? s.ubo[0][1].addr : 0);
     const auto attr = [&](int i) { return *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]); };
     const nvn_va_st pos = attr(0);
     if ((pos.fmt != NVN_FORMAT_RGB32F && pos.fmt != NVN_FORMAT_RGBA16F) || pos.stream != 0) return;
@@ -6075,9 +6079,11 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
     k.itype = d.itype, k.count = d.count, k.base_vertex = d.base_vertex;
     k.ibuf = d.ibuf + (uint64_t)d.first * (d.itype == 0 ? 1 : d.itype == 1 ? 2 : 4);
     k.object = s.ubo[0][1].addr;
+    k.front_ccw = s.poly.front == NVN_FRONT_FACE_CCW;
     if (!k.vbuf || !k.ibuf || !k.object || s.ubo[0][1].size < 0x4c) return;
     for (int i = 0; i < 4; i++) k.tex[i] = s.tex[1][i];   // (the fragment stage's: the colour texture, vk_rt.cpp material_of)
     rt_note_lights(s.ubo[1][4].addr, s.ubo[1][4].size);
+    rt_note_camera(s.ubo[0][0].addr, s.ubo[0][0].size);
     rt_note_draw(k);
 }
 
@@ -6097,6 +6103,7 @@ static bool rt_shadow_draw(const NvnState& s, const DrawArgs& d, const Program& 
     k.itype = d.itype, k.count = d.count, k.base_vertex = d.base_vertex;
     k.ibuf = d.ibuf + (uint64_t)d.first * (d.itype == 0 ? 1 : d.itype == 1 ? 2 : 4);
     k.object = s.ubo[0][1].addr;
+    k.front_ccw = s.poly.front == NVN_FRONT_FACE_CCW;
     const bool have = plain && !skinned && (pos.fmt == NVN_FORMAT_RGB32F || pos.fmt == NVN_FORMAT_RGBA16F) && pos.stream == 0 && k.vbuf &&
                       k.ibuf && k.object && s.ubo[0][1].size >= 0x4c;
     return rt_note_shadow_draw(have ? &k : nullptr, skinned, s.ubo[0][0].addr, s.ubo[0][0].size, cutout,
@@ -6120,7 +6127,6 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     // FSR 3.1 (vk_fsr3_inputs.cpp). The vertex stage's uniform buffer 3 (NVN's binding 0)
     if (at.n && at.color[0] && at.depth) {
         temporal_note_scene_draw(at.color[0], at.width, at.height, at.depth, s.ubo[0][0].addr, s.ubo[0][0].size);
-        if (rt_on()) rt_scene_draw(s, d, at);
         fsr3_inputs::note_scene_draw(at.color[0], at.width, at.height, at.depth, s.ubo[0][0].addr, s.ubo[0][0].size);
     }
     uint8_t types[8];
@@ -6134,6 +6140,17 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     {   // (hookshot, a test) RX_VK_NO_MESH=1: task / mesh draws left out, to see what they draw; =2: the others left out
         static const int no_mesh = getenv("RX_VK_NO_MESH") ? atoi(getenv("RX_VK_NO_MESH")) : 0;
         if ((no_mesh == 1 && d.mesh) || (no_mesh == 2 && !d.mesh)) return;
+    }
+    if (rt_on() && cp && cp->ready.load(std::memory_order_acquire) && at.n && at.color[0] && at.depth) rt_scene_draw(s, d, at, *cp);
+    if (rt_on()) {   // (miojo: the sun's shadows into the game's shadow mask, between its last draw and the scene's lighting)
+        if (at.n == 1 && !at.depth && at.color[0] && at.color_format[0] == VK_FORMAT_R8G8B8A8_UNORM && temporal_scene_size(at.width, at.height)) {
+            rt_note_mask(at.color_view[0], at.width, at.height);
+        } else if (at.n && at.depth && at.depth_view && at.color_format[0] == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && rt_sun_pending()) {
+            end_pass(cmd);
+            rt_sun_shadows(cmd, at.depth_view);
+            last_dyn_valid = false, last_desc_valid = false, last_vb_valid = false, last_pipeline = VK_NULL_HANDLE;
+            vertex_set.on = false, last_ib.on = false;
+        }
     }
     // (miojo: a shadow map's draw the rays have: they draw this shadow. After the program is known: a cutout's is the game's)
     if (cp && cp->ready.load(std::memory_order_acquire) && !at.n && at.depth && rt_on() && rt_shadow_draw(s, d, *cp)) SKIP_HERE();
@@ -7178,6 +7195,29 @@ bool fsr3_stand_in(VkCommandBuffer cmd, const NvnState& s, const Program& p) {
 }
 /// (hookshot) A temporal upscaler (NVIDIA DLSS, AMD FSR 4: vk_temporal.cpp) in place of the gameplay upscale network, when
 /// one is on and its inputs are as expected: the network's input as it samples it, its output's storage view
+/// (miojo) OoT's ambient occlusion (the compute program 171c34b219c9c1a5: one sampled depth, one R8 image, at the start of a
+/// frame): written from rays instead when Ray tracing is on (vk_rt.cpp rt_ao_replace), the game's blur and lighting after it
+bool rt_ao_stand_in(VkCommandBuffer cmd, const NvnState& s, const Program& p) {
+    if (p.key != 0x171c34b219c9c1a5ull || !rt_on() || p.stages.empty()) return false;
+    const Stage& st = p.stages[0];
+    if (st.info.texture_descriptors.empty() || st.info.image_descriptors.empty()) return false;
+    size_t ntex = 0;
+    for (const auto& d : st.info.texture_descriptors) ntex += d.count;
+    if (dw().imgs.size() <= ntex || !dw().imgs[ntex].imageView) return false;
+    const auto& od = st.info.image_descriptors[0];
+    Texture* out = nullptr;
+    uint32_t level = 0;
+    const uint32_t out_handle = handle_of(s, st, od, 0);
+    if (out_handle) texture_view_of(out_handle, VK_IMAGE_VIEW_TYPE_2D, ViewUse::Storage, image_format(od.format), &out, &level);
+    if (!out || out->format != VK_FORMAT_R8_UNORM) return false;
+    const bool done = rt_ao_replace(cmd, dw().imgs[ntex].imageView, std::max(1u, out->width >> level), std::max(1u, out->height >> level));
+    if (done) {   // (as the game's dispatch would have: its image is written)
+        last_dyn_valid = false, last_desc_valid = false, last_vb_valid = false, last_pipeline = VK_NULL_HANDLE;
+        vertex_set.on = false, last_ib.on = false;
+    }
+    return done;
+}
+
 bool temporal_stand_in(VkCommandBuffer cmd, const NvnState& s, const Program& p) {
     // (the 4/3 network and the full-size pass by their keys; the game's other gameplay upscales, one network for each fixed
     // share of the Render resolution row (67%: 6676619641320ba7, 58% f10782f9e58b6a7c, 50% 72ba090c70fe2614, 33%
@@ -8242,6 +8282,7 @@ void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t
     }
     if (fsr3_stand_in(cmd, s, p)) return void(st_dispatches++);
     if (temporal_stand_in(cmd, s, p)) return void(st_dispatches++);
+    if (rt_ao_stand_in(cmd, s, p)) return void(st_dispatches++);
     if (taau_stand_in(cmd, s, p)) return void(st_dispatches++);
     if (!p.compute_pipeline) SKIP_HERE();
     dump_ssbos(cmd, p, "before");

@@ -1,0 +1,86 @@
+#version 460
+#extension GL_EXT_ray_query : require
+// (miojo) The game's own ambient occlusion, traced (vk_rt.cpp rt_ao_replace). OoT computes its occlusion at the start of a
+// frame from the frame before's depth, at half size, into an R8 image (1: open); four blur passes of its own follow, and its
+// lighting reads the result where it belongs, on the ambient light alone. This pass stands in for that first one (program
+// 171c34b219c9c1a5): the same image written from rays into the scene's structure of the frame before, with that frame's
+// camera and depth. So the occlusion is the game's in every way but where it comes from: blurred by the game, applied by
+// the game, and not doubled, as a multiply over the finished picture was (rt_debug.comp's, which this replaces).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform accelerationStructureEXT tlas;
+layout(binding = 1) uniform sampler2D scene_depth;   // (the frame before's, full size)
+layout(binding = 2, r8) uniform writeonly image2D occlusion;
+layout(push_constant, row_major) uniform P {
+    mat4 inv;       // (the frame before's clip space to the world)
+    ivec2 size;     // (the occlusion image's)
+    float strength; // (1: a ray's hit at no distance closes it whole)
+    float radius;   // (how far a ray looks, in the world's units)
+    float seed;
+    int rays;
+    float skin;     // (a character's own surface nearer than this does not occlude it: rt_debug.comp)
+} pc;
+vec3 world(vec2 uv, float d) {
+    const vec4 p = pc.inv * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d * 2.0 - 1.0, 1.0);
+    return p.xyz / p.w;
+}
+vec3 surface(vec2 uv) { return world(uv, textureLod(scene_depth, uv, 0.0).r); }
+// (white noise by pixel and ray: the game's blur after this takes it out; a gradient noise left diagonal streaks through it)
+float noise(vec2 p) {
+    uvec2 q = uvec2(ivec2(p * 8.0)) * uvec2(1597334673u, 3812015801u);
+    uint n = (q.x ^ q.y) * 1597334673u;
+    n ^= n >> 15, n *= 2246822519u, n ^= n >> 13;
+    return float(n) * (1.0 / 4294967296.0);
+}
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, pc.size))) return;
+    const vec2 uv = (vec2(g) + 0.5) / vec2(pc.size);
+    const float d = textureLod(scene_depth, uv, 0.0).r;
+    if (!(d > 0.0 && d < 1.0)) {   // (the sky)
+        imageStore(occlusion, g, vec4(1.0));
+        return;
+    }
+    const vec2 px = 1.0 / vec2(textureSize(scene_depth, 0));
+    const vec3 p = world(uv, d), eye = world(uv, 0.0);
+    // (the normal: on each axis the neighbour nearer in depth, so an edge does not bend it; towards the camera)
+    const vec3 r = surface(uv + vec2(px.x, 0.0)) - p, l = p - surface(uv - vec2(px.x, 0.0));
+    const vec3 u = surface(uv - vec2(0.0, px.y)) - p, dn = p - surface(uv + vec2(0.0, px.y));
+    vec3 n = normalize(cross(dot(r, r) < dot(l, l) ? r : l, dot(u, u) < dot(dn, dn) ? u : dn));
+    if (dot(n, eye - p) < 0.0) n = -n;
+    // (what the rays have under the pixel. A character: its own layers within pc.skin are passed. Nothing within a few
+    // centimetres: the surface seen is not where the rays have it. When a two-sided instance lies up to 0.4 in front (a
+    // banner the wind swung back in its vertex shader, the rays having it as it hangs still) the rays start in front of
+    // that copy: from behind it every one hit it at once, black patches over the banner, another shape each frame)
+    float skip = 0.0, lift = 0.0;
+    {
+        rayQueryEXT q;
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT, 0xFF, p + n * 0.03, 0.0, -n, 0.08);
+        while (rayQueryProceedEXT(q)) {}
+        if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+            if (rayQueryGetIntersectionInstanceCustomIndexEXT(q, true) == 0xfffffe) skip = pc.skin;
+        } else {
+            rayQueryEXT far;
+            rayQueryInitializeEXT(far, tlas, gl_RayFlagsOpaqueEXT, 0xFF, p + n * 0.4, 0.0, -n, 0.4);
+            while (rayQueryProceedEXT(far)) {}
+            if (rayQueryGetIntersectionTypeEXT(far, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+                const int id = rayQueryGetIntersectionInstanceCustomIndexEXT(far, true);
+                if (id != 0xfffffe && (id & 0x100000) != 0) lift = 0.4 - rayQueryGetIntersectionTEXT(far, true) + 0.02;
+            }
+        }
+    }
+    const vec3 t = normalize(abs(n.y) < 0.99 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0))), b = cross(n, t);
+    const vec3 from = p + n * (0.004 * distance(eye, p) + 0.01 + lift);
+    float sum = 0.0;
+    for (int i = 0; i < pc.rays; i++) {
+        const vec2 s = vec2(g) + pc.seed + float(i) * vec2(37.0, 17.0);
+        const float a = 6.2831853 * noise(s), z2 = noise(s.yx + 11.0), rr = sqrt(1.0 - z2);
+        const vec3 dir = t * (cos(a) * rr) + b * (sin(a) * rr) + n * sqrt(z2);
+        rayQueryEXT q;
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, 0.0, dir, pc.radius);
+        while (rayQueryProceedEXT(q))
+            if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
+        if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
+            sum += 1.0 - rayQueryGetIntersectionTEXT(q, true) / pc.radius;
+    }
+    imageStore(occlusion, g, vec4(clamp(1.0 - pc.strength * sum / float(max(pc.rays, 1)), 0.0, 1.0)));
+}
