@@ -37,6 +37,7 @@
 #include "upscaler_rows.h"    // (upscale_lod_bias: which upscalers draw the 3D smaller)
 #include "dlss_actor.h"
 #include "vk_temporal.h"
+#include "vk_rt.h"
 #include "vk_fsr3.h"          // (AMD FSR 3.1 in the gameplay upscale's place)
 #include "vk_fsr3_inputs.h"
 #include "vk_dump.h"
@@ -5917,6 +5918,106 @@ static void dlss_trace_draw(const NvnState& s, const Program& p, const DrawArgs&
             if (s.ssbo[ns][u].addr) n += snprintf(line + n, sizeof line - n, " s%d=%llx/%llu", u, (unsigned long long)s.ssbo[ns][u].addr,
                                                   (unsigned long long)s.ssbo[ns][u].size);
     }
+    {   // (miojo, the path tracing census: the object's buffer, vertex uniform buffer 1, its first 0x70 bytes as floats, a line of its own)
+        float o[28];
+        char t[512];
+        int m = snprintf(t, sizeof t, "vk: obj-trace prog %016llx n%d u1=%llx", (unsigned long long)p.key, d.count, (unsigned long long)s.ubo[0][1].addr);
+        if (s.ubo[0][1].size >= sizeof o && memory_read_as_submitted(s.ubo[0][1].addr, o, sizeof o)) {
+            for (int k = 0; k < 28; k++) m += snprintf(t + m, sizeof t - m, " %.4g", o[k]);
+            logf("%s", t);
+        }
+        // (miojo, the materials' census: the fragment stage's textures, their sizes and formats, and the vertex attributes)
+        if (p.key == 0xffb53ed102dd9908ull) {   // (the world's main program: where is its material array's layer?)
+            {   // (the object's number and the storage buffers both stages see; the big table's start, once a traced frame)
+                char big[3600];
+                uint32_t o[20] = {};
+                memory_read_as_submitted(s.ubo[0][1].addr, o, sizeof o);
+                int q = snprintf(big, sizeof big, "vk: id-trace n%d id %u %u %u %u |", d.count, o[12], o[14], o[19], o[23 % 20]);
+                for (int st = 0; st < 2; st++)
+                    for (int u = 0; u < 16; u++)
+                        if (s.ssbo[st][u].addr) q += snprintf(big + q, sizeof big - q, " st%d.s%d=%llx/%llu", st, u, (unsigned long long)s.ssbo[st][u].addr, (unsigned long long)s.ssbo[st][u].size);
+                logf("%s", big);
+                for (int which = 0; which < 2; which++) {   // (the table's entry by each candidate number)
+                    const uint32_t id = which ? o[19] : o[14];
+                    const nvn_p_bind_buf& t2 = s.ssbo[1][1].size > 1000000 ? s.ssbo[1][1] : s.ssbo[0][0];
+                    uint32_t e[8];
+                    float ef[4];
+                    if (!id || (uint64_t)id * 32 + 32 > t2.size || !memory_read_as_submitted(t2.addr + (uint64_t)id * 32, e, sizeof e)) continue;
+                    memcpy(ef, e, 16);
+                    logf("vk: ent-trace n%d o%d id %u: %.4f %.4f %.4f %.4f %08x %08x %08x %08x", d.count, which ? 19 : 14, id, ef[0], ef[1], ef[2],
+                         ef[3], e[4], e[5], e[6], e[7]);
+                }
+                static uint64_t dumped = ~0ull;
+                const nvn_p_bind_buf& tb = s.ssbo[0][0].size > 1000000 ? s.ssbo[0][0] : s.ssbo[0][1];
+                if (dumped != f && tb.size > 1000000) {
+                    dumped = f;
+                    static uint32_t w[16384];
+                    if (memory_read_as_submitted(tb.addr, w, sizeof w))
+                        for (int row = 0; row < 16384; row += 256) {
+                            q = snprintf(big, sizeof big, "vk: tab-trace %d:", row);
+                            for (int k = row; k < row + 256 && q < 3500; k++) {
+                                float fl;
+                                memcpy(&fl, &w[k], 4);
+                                if (w[k] < 65536) q += snprintf(big + q, sizeof big - q, " %u", w[k]);
+                                else q += snprintf(big + q, sizeof big - q, " %.3g", fl);
+                            }
+                            logf("%s", big);
+                        }
+                }
+            }
+            {   // (the vertices' byte attributes: layers and weights?)
+                char big[900];
+                int q = snprintf(big, sizeof big, "vk: vtx-trace n%d bv%d stride %u:", d.count, d.base_vertex, s.vstream[0].stride);
+                for (int at = 8; at < s.nvattr && at < 16; at++) {
+                    const nvn_va_st a = *reinterpret_cast<const nvn_va_st*>(&s.vattr[at]);
+                    if (!a.fmt || a.stream) continue;
+                    q += snprintf(big + q, sizeof big - q, " a%d/%x@%u", at, a.fmt, a.offset);
+                    for (int v = 0; v < 4; v++) {
+                        uint8_t b[4] = {};
+                        memory_read_as_submitted(s.vbuf[0].address + (uint64_t)(d.base_vertex + v * 37) * s.vstream[0].stride + a.offset, b, 4);
+                        q += snprintf(big + q, sizeof big - q, " [%u %u %u %u]", b[0], b[1], b[2], b[3]);
+                    }
+                }
+                logf("%s", big);
+            }
+            for (int st = 0; st < 2; st++)
+                for (int u = 1; u <= 4; u++) {
+                    uint32_t w[40];
+                    if (st == 1 && u == 2) {   // (the material's buffer whole, as small integers or floats)
+                        uint32_t all[244];
+                        char big[3000];
+                        if (s.ubo[1][2].size >= sizeof all && memory_read_as_submitted(s.ubo[1][2].addr, all, sizeof all)) {
+                            int q = snprintf(big, sizeof big, "vk: matall n%d u1=%llx:", d.count, (unsigned long long)s.ubo[0][1].addr);
+                            for (int k = 0; k < 244 && q < 2900; k++) {
+                                float f;
+                                memcpy(&f, &all[k], 4);
+                                if (all[k] < 4096) q += snprintf(big + q, sizeof big - q, " %u", all[k]);
+                                else q += snprintf(big + q, sizeof big - q, " %.3g", f);
+                            }
+                            logf("%s", big);
+                        }
+                    }
+                    if (s.ubo[st][u].size < sizeof w || !memory_read_as_submitted(s.ubo[st][u].addr, w, sizeof w)) continue;
+                    m = snprintf(t, sizeof t, "vk: mat-trace n%d st%d u%d/%llu:", d.count, st, u, (unsigned long long)s.ubo[st][u].size);
+                    for (int k = 0; k < 40; k++) {
+                        float f;
+                        memcpy(&f, &w[k], 4);
+                        if (w[k] < 4096) m += snprintf(t + m, sizeof t - m, " %u", w[k]);
+                        else m += snprintf(t + m, sizeof t - m, " %.3g", f);
+                    }
+                    logf("%s", t);
+                }
+        }
+        m = snprintf(t, sizeof t, "vk: tex-trace prog %016llx n%d", (unsigned long long)p.key, d.count);
+        for (int i = 0; i < 24 && m < 440; i++) {
+            nvn_tex x;
+            nvn_view v;
+            bool hv = false;
+            if (s.tex[1][i] && texture_of((int)(s.tex[1][i] & 0xFFFFF), &x, &v, &hv))
+                m += snprintf(t + m, sizeof t - m, " t%d=%dx%d/%x", i, (int)x.d.width, (int)x.d.height, (int)x.d.format);
+        }
+        logf("%s", t);
+    }
     logf("%s", line);
 }
 
@@ -5951,6 +6052,47 @@ static void skin_check(const NvnState& s, const Program& p, const DrawArgs& d, c
     k.bones = bones.addr, k.bones_size = bones.size, k.object = s.ubo[0][1].addr, k.object_size = s.ubo[0][1].size;
     k.program = p.key;
     temporal_note_skinned_draw(k);
+    if (rt_on()) rt_note_skinned(k);   // (miojo: the characters in the ray-tracing scene, vk_rt.cpp)
+}
+
+/// (miojo) An opaque, unskinned triangle-list draw into the scene, for the ray-tracing structures (vk_rt.cpp)
+static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& at) {
+    if (d.mesh || !d.indexed || d.indirect || d.instances != 1 || d.prim != NVN_DRAW_PRIMITIVE_TRIANGLES || !at.n || !at.color[0] ||
+        !at.depth || at.color_format[0] != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !s.ds.dt || !s.ds.dw || (s.color.blend_en & 1) ||
+        s.nvattr < 1 || !temporal_scene_size(at.width, at.height))
+        return;
+    const auto attr = [&](int i) { return *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]); };
+    const nvn_va_st pos = attr(0);
+    if ((pos.fmt != NVN_FORMAT_RGB32F && pos.fmt != NVN_FORMAT_RGBA16F) || pos.stream != 0) return;
+    if (s.nvattr >= 7 && (attr(6).fmt == NVN_FORMAT_RGBA16UI || attr(6).fmt == NVN_FORMAT_RGBA8UI)) return;   // (skinned)
+    RtDraw k;
+    k.vbuf = s.vbuf[0].address, k.vsize = s.vbuf[0].size, k.stride = s.vstream[0].stride, k.pos = pos.offset;
+    k.half = pos.fmt == NVN_FORMAT_RGBA16F;
+    k.itype = d.itype, k.count = d.count, k.base_vertex = d.base_vertex;
+    k.ibuf = d.ibuf + (uint64_t)d.first * (d.itype == 0 ? 1 : d.itype == 1 ? 2 : 4);
+    k.object = s.ubo[0][1].addr;
+    if (!k.vbuf || !k.ibuf || !k.object || s.ubo[0][1].size < 0x4c) return;
+    for (int i = 0; i < 4; i++) k.tex[i] = s.tex[1][i];   // (the fragment stage's: the colour texture, vk_rt.cpp material_of)
+    rt_note_lights(s.ubo[1][4].addr, s.ubo[1][4].size);
+    rt_note_draw(k);
+}
+
+/// (miojo) A draw into a depth-only target: one of the sun's shadow maps? (vk_rt.cpp rt_note_shadow_draw: the sun's direction,
+/// the meshes out of view that cast shadows.) True: the rays draw this one's shadow, the game's map goes without it
+static bool rt_shadow_draw(const NvnState& s, const DrawArgs& d) {
+    const bool plain = !d.mesh && d.indexed && !d.indirect && d.instances == 1 && d.prim == NVN_DRAW_PRIMITIVE_TRIANGLES && s.nvattr >= 1;
+    const auto attr = [&](int i) { return *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]); };
+    const nvn_va_st pos = attr(0);
+    const bool skinned = plain && s.nvattr >= 7 && (attr(6).fmt == NVN_FORMAT_RGBA16UI || attr(6).fmt == NVN_FORMAT_RGBA8UI);
+    RtDraw k;
+    k.vbuf = s.vbuf[0].address, k.vsize = s.vbuf[0].size, k.stride = s.vstream[0].stride, k.pos = pos.offset;
+    k.half = pos.fmt == NVN_FORMAT_RGBA16F;
+    k.itype = d.itype, k.count = d.count, k.base_vertex = d.base_vertex;
+    k.ibuf = d.ibuf + (uint64_t)d.first * (d.itype == 0 ? 1 : d.itype == 1 ? 2 : 4);
+    k.object = s.ubo[0][1].addr;
+    const bool have = plain && !skinned && (pos.fmt == NVN_FORMAT_RGB32F || pos.fmt == NVN_FORMAT_RGBA16F) && pos.stream == 0 && k.vbuf &&
+                      k.ibuf && k.object && s.ubo[0][1].size >= 0x4c;
+    return rt_note_shadow_draw(have ? &k : nullptr, skinned, s.ubo[0][0].addr, s.ubo[0][0].size);
 }
 
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
@@ -5970,8 +6112,10 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     // FSR 3.1 (vk_fsr3_inputs.cpp). The vertex stage's uniform buffer 3 (NVN's binding 0)
     if (at.n && at.color[0] && at.depth) {
         temporal_note_scene_draw(at.color[0], at.width, at.height, at.depth, s.ubo[0][0].addr, s.ubo[0][0].size);
+        if (rt_on()) rt_scene_draw(s, d, at);
         fsr3_inputs::note_scene_draw(at.color[0], at.width, at.height, at.depth, s.ubo[0][0].addr, s.ubo[0][0].size);
     }
+    if (!at.n && at.depth && rt_on() && rt_shadow_draw(s, d)) SKIP_HERE();   // (miojo: the rays draw this shadow)
     uint8_t types[8];
     color_types_of(at, types);
     const Program* cp;

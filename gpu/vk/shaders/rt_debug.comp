@@ -1,0 +1,240 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_ray_tracing_position_fetch : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+// (miojo) The ray-traced scene's check (vk_rt.cpp, RX_VK_RT_DEBUG): a ray from the camera through each pixel into the
+// acceleration structure made of the frame's draws, held against the scene's own depth. Where a ray hits at the depth the
+// game drew, the object's colour (a tint by instance, darker with distance); a hit in front of the game's surface is mixed
+// with blue, one behind it with yellow, and a surface the game drew that no ray hit with red (geometry the structure does
+// not have: skinned draws, mesh shaders, the terrain). pc.mode 2: the game's picture kept, only the misses marked.
+// pc.mode 3, the first effect: ray-traced ambient occlusion (the menu's Ambient occlusion row with Ray tracing on). From each
+// pixel's surface (its world position from the depth, its normal from the depth's neighbours) pc.rays rays over the
+// hemisphere, cosine weighted, turned by a noise that changes each frame (the temporal upscaler averages it), pc.radius
+// long: a hit darkens by how near it is. pc.mode 4: the occlusion alone (RX_VK_AO_DEBUG).
+// The same rays carry one bounce of light (pc.gi > 0, the Bounce light row), looking pc.reach far: where a ray's hit is a
+// surface the picture shows (its point projected back with pc.vp lands on that surface's depth), that surface's colour is
+// light arriving here, added through this pixel's own hue as its albedo. A hit the picture does not show gives none.
+// pc.mode 5: the arriving light alone (RX_VK_AO_DEBUG=2). The colours are the scene's square roots: squared for the sum.
+// A hit the picture does not show takes its light from the world's cache: a hashed grid of half-unit cells, by the side
+// the surface faces, where every pixel leaves its lit colour as it is drawn (a running mean). So a wall lit a moment ago
+// still lights the room with the camera turned from it, and since what is kept has the bounce in it, the light goes on
+// to a second and a third bounce over the frames. pc.mode 6: the cache as each pixel reads it (RX_VK_AO_DEBUG=3).
+// The sun's shadows (pc.sun > 0, the Sun shadows row): from a surface that faces the sun (pc.to_sun, from the camera of
+// the game's own shadow maps) one more ray towards it, a little off its centre by the noise so the edge is soft; a hit
+// takes the sun's share of the colour away. The game's shadow-map draws of what the rays have are left out meanwhile
+// (vk_draw.cpp), so its own shadows of them are not there under these. pc.mode 7: the shadow alone (RX_VK_AO_DEBUG=4).
+// ponytail: the sun's share of a pixel's colour is not known (the game's lighting is in its shaders). Taken as a sun
+// 2.3 times the sky's light at a surface square to it and less by the cosine: lit / (1 + 2.3 cos), a little less of
+// the blue taken, as a clear sky leaves it. No step at the terminator, where a fixed share left a dark band and facets.
+// The game's light buffers for the real share.
+// Materials (binding 5): each instance carries its material's slot in a small image of mean albedos, one texel a colour
+// texture (vk_rt.cpp blits each texture's smallest level there). The pixel's own material sets how much of the arriving
+// light it gives back (its hue still from the picture, so the texture's detail stays); a hit the picture and the cache
+// know nothing of gives its material's colour under the light this pixel itself stands in. pc.mode 8: each pixel's
+// material (RX_VK_AO_DEBUG=5).
+// ponytail: one colour a material (no texture coordinates at a hit yet), none for the characters, and that last light is
+// the receiver's own, not the hit's: the game's lights for it.
+// ponytail: the cache never ages (a cell keeps its colour until seen again: wrong after the time of day or a door
+// changes), two cells can share a slot, and the albedo is a guess from the lit colour; materials and the game's lights
+// for hits take reading its shaders' buffers.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform accelerationStructureEXT tlas;
+layout(binding = 1) uniform sampler2D scene_depth;
+layout(binding = 2, rgba16f) uniform image2D color;
+layout(binding = 3) uniform sampler2D scene;
+layout(binding = 4, rgba16f) uniform image2D cache;
+layout(binding = 5) uniform sampler2D materials;
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Words { uint w[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Floats { float f[]; };
+layout(push_constant, row_major) uniform P {
+    mat4 inv;     // (clip space to the camera's world: the inverse of its view-projection)
+    mat4 vp;      // (the world to clip space)
+    ivec2 size;
+    int mode;
+    float ao;       // (the occlusion's strength, 0 to 1)
+    float radius;   // (how far a ray looks, in the world's units)
+    float seed;
+    int rays;
+    float gi;       // (the bounce's strength, 0 to 1)
+    float reach;    // (how far a ray looks for it)
+    float skin;     // (a character's own surface nearer than this does not occlude it: the layers of a face)
+    float sun;      // (the sun's shadows' strength, 0 to 1)
+    vec3 to_sun;    // (the direction to it, in the world)
+    uint64_t skin_indices;   // (the characters' structure's indices and smooth normals, 0 for none this frame)
+    uint64_t skin_normals;
+    vec3 sun_share;   // (the sun's light over the sky's at a surface square to it, by channel: what a shadow takes)
+} pc;
+vec3 world(vec2 ndc, float z) {
+    const vec4 p = pc.inv * vec4(ndc, z, 1.0);
+    return p.xyz / p.w;
+}
+vec3 surface(vec2 uv) {
+    return world(vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0), textureLod(scene_depth, uv, 0.0).r * 2.0 - 1.0);
+}
+/// The cache's slot for a surface at p facing n
+ivec2 cell(vec3 p, vec3 n) {
+    const vec3 a = abs(n);
+    const uint axis = a.x > a.y && a.x > a.z ? (n.x > 0.0 ? 0u : 1u) : a.y > a.z ? (n.y > 0.0 ? 2u : 3u) : (n.z > 0.0 ? 4u : 5u);
+    const ivec3 c = ivec3(floor((p + n * 0.05) * 2.0));
+    uint h = uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u ^ axis * 2654435761u;
+    h ^= h >> 15, h *= 0x2c1b3c6du, h ^= h >> 12;
+    return ivec2(h & 1023u, (h >> 10) & 1023u);
+}
+/// An instance's material's mean albedo, linear; a < 0.5: not known (slots 0 and 1, the characters, a texture not copied yet)
+vec4 material(int id) {
+    if (id < 2 || id > 0xffff) return vec4(0.0);
+    const vec3 a = texelFetch(materials, ivec2(id & 255, id >> 8), 0).rgb;
+    return vec4(a, dot(a, vec3(1.0)) > 0.0 ? 1.0 : 0.0);
+}
+float noise(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
+    const vec2 px = 1.0 / vec2(pc.size);
+    const vec3 p = surface(uv), eye = world(ndc, -1.0);
+    // (the normal: on each axis the neighbour nearer in depth, so an edge does not bend it; towards the camera)
+    const vec3 r = surface(uv + vec2(px.x, 0.0)) - p, l = p - surface(uv - vec2(px.x, 0.0));
+    const vec3 u = surface(uv - vec2(0.0, px.y)) - p, dn = p - surface(uv + vec2(0.0, px.y));
+    vec3 n = normalize(cross(dot(r, r) < dot(l, l) ? r : l, dot(u, u) < dot(dn, dn) ? u : dn));
+    const float dist = distance(eye, p);
+    if (dot(n, eye - p) < 0.0) n = -n;
+    // (a character's pixel: its eyes, lashes and brows are layers a hair above the face, and hair and clothes lie on the
+    // body. The characters' structure is not opaque, so a ray from one passes what is within pc.skin of it; the scene's
+    // own geometry, and a character seen from the ground it stands on, occlude from the first millimetre.
+    // And its normal: the depth's is each triangle's own, which showed a face as facets in every light here. The
+    // characters' vertices come with smooth normals (vk_rt.cpp skins them with the positions): the triangle under the pixel
+    // gives the one to use)
+    float skip = 0.0;
+    vec4 mine = vec4(0.0);   // (this pixel's material)
+    {
+        rayQueryEXT q;
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT, 0xFF, p + n * 0.03, 0.0, -n, 0.08);
+        while (rayQueryProceedEXT(q)) {}
+        const bool on = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+        if (on) mine = material(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true));
+        if (on && rayQueryGetIntersectionInstanceCustomIndexEXT(q, true) == 0xfffffe) {
+            skip = pc.skin;
+            if (pc.skin_normals != 0ul) {
+                const uint prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)) * 3u;
+                const vec2 bc = rayQueryGetIntersectionBarycentricsEXT(q, true);
+                const vec3 share = vec3(1.0 - bc.x - bc.y, bc.x, bc.y);
+                Words ib = Words(pc.skin_indices);
+                Floats nb = Floats(pc.skin_normals);
+                vec3 ns = vec3(0.0);
+                for (uint k = 0u; k < 3u; k++) {
+                    const uint v = ib.w[prim + k] * 3u;
+                    ns += share[k] * vec3(nb.f[v], nb.f[v + 1u], nb.f[v + 2u]);
+                }
+                if (dot(ns, ns) > 1e-6 && dot(normalize(ns), n) > 0.2) n = normalize(ns);
+            }
+        }
+    }
+    const vec3 t = normalize(abs(n.y) < 0.99 ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0))), b = cross(n, t);
+    const vec3 from = p + n * (0.004 * dist + 0.01);
+    // (the picture's colour here, and what this surface gives back of the light on it: the picture's hue, at its
+    // material's level when that is known, else at a half)
+    const vec3 seen = imageLoad(color, g).rgb;
+    const vec3 seen_lin = seen * seen;
+    const float top = max(max(seen_lin.r, max(seen_lin.g, seen_lin.b)), 0.02);
+    const vec3 albedo = seen_lin / top * (mine.a > 0.5 ? clamp(max(mine.r, max(mine.g, mine.b)), 0.04, 0.9) : 0.5);
+    const vec3 standing = min(seen_lin / max(albedo, vec3(0.04)), vec3(4.0));   // (the light this pixel stands in)
+    float sum = 0.0;
+    vec3 light = vec3(0.0);
+    const float far = pc.gi > 0.0 ? max(pc.radius, pc.reach) : pc.radius;
+    for (int i = 0; i < pc.rays; i++) {
+        const vec2 s = vec2(g) + pc.seed + float(i) * vec2(37.0, 17.0);
+        const float a = 6.2831853 * noise(s), z2 = noise(s.yx + 11.0), rr = sqrt(1.0 - z2);
+        const vec3 dir = t * (cos(a) * rr) + b * (sin(a) * rr) + n * sqrt(z2);
+        rayQueryEXT q;
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsNoneEXT, 0xFF, from, 0.0, dir, far);
+        while (rayQueryProceedEXT(q))
+            if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
+        if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+            const float len = rayQueryGetIntersectionTEXT(q, true);
+            sum += max(1.0 - len / pc.radius, 0.0);
+            if (pc.gi > 0.0) {
+                const vec3 hit = from + dir * len;
+                const vec4 clip = pc.vp * vec4(hit, 1.0);
+                const vec2 at = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+                if (clip.w > 0.0 && all(greaterThan(at, vec2(0.0))) && all(lessThan(at, vec2(1.0))) &&
+                    distance(surface(at), hit) < 0.03 * distance(eye, hit) + 0.08) {
+                    const vec3 c = textureLod(scene, at, 0.0).rgb;
+                    light += min(c * c, vec3(4.0));
+                } else {   // (not in the picture: what the world's cache has of it)
+                    vec3 v[3];
+                    rayQueryGetIntersectionTriangleVertexPositionsEXT(q, true, v);
+                    vec3 ng = normalize(mat3(rayQueryGetIntersectionObjectToWorldEXT(q, true)) * cross(v[1] - v[0], v[2] - v[0]));
+                    if (dot(ng, dir) > 0.0) ng = -ng;
+                    const vec4 kept = imageLoad(cache, cell(hit, ng));
+                    if (kept.a > 0.0) {
+                        light += kept.rgb;
+                    } else {   // (never seen: its material, under half the light here)
+                        const vec4 there = material(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true));
+                        if (there.a > 0.5) light += there.rgb * standing * 0.5;
+                    }
+                }
+            }
+        }
+    }
+    float shade = 0.0;
+    const float facing = dot(n, pc.to_sun);
+    if (pc.sun > 0.0 && facing > 0.0) {
+        const vec2 s = vec2(g) + pc.seed + vec2(5.0, 23.0);
+        const float a = 6.2831853 * noise(s), rr = 0.012 * sqrt(noise(s.yx + 3.0));
+        const vec3 su = normalize(abs(pc.to_sun.y) < 0.99 ? cross(pc.to_sun, vec3(0.0, 1.0, 0.0)) : cross(pc.to_sun, vec3(1.0, 0.0, 0.0)));
+        const vec3 dir = normalize(pc.to_sun + (su * cos(a) + cross(pc.to_sun, su) * sin(a)) * rr);
+        rayQueryEXT q;
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, from, 0.0, dir, 400.0);
+        while (rayQueryProceedEXT(q))
+            if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
+        if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
+            shade = pc.sun;
+    }
+    const float open = 1.0 - pc.ao * sum / float(max(pc.rays, 1));
+    light /= float(max(pc.rays, 1));
+    const vec3 c = seen * open;
+    const vec3 lin = c * c / (1.0 + shade * max(facing, 0.0) * pc.sun_share);
+    const vec3 lit = lin + pc.gi * albedo * light;
+    if (pc.gi > 0.0) {   // (this surface's light for the frames to come; pixels of one cell write over each other: a mean of sorts)
+        const ivec2 at = cell(p, n);
+        const vec4 kept = imageLoad(cache, at);
+        const vec3 now = min(lit, vec3(4.0));
+        imageStore(cache, at, vec4(kept.a > 0.0 ? mix(kept.rgb, now, 0.1) : now, 1.0));
+    }
+    vec3 shown = sqrt(lit);
+    if (pc.mode == 4) shown = vec3(open * open);
+    if (pc.mode == 5) shown = sqrt(light);
+    if (pc.mode == 6) shown = sqrt(imageLoad(cache, cell(p, n)).rgb);
+    if (pc.mode == 8) shown = mine.a > 0.5 ? sqrt(mine.rgb) : vec3(1.0, 0.0, 1.0) * 0.3;
+    if (pc.mode == 7) shown = 1.0 / (1.0 + shade * max(facing, 0.0) * pc.sun_share);
+    imageStore(color, g, vec4(shown, 1.0));
+}
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, pc.size))) return;
+    const vec2 uv = (vec2(g) + 0.5) / vec2(pc.size);
+    const vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    const float d = textureLod(scene_depth, uv, 0.0).r;
+    if (pc.mode >= 3) {
+        if (d > 0.0 && d < 1.0) occlusion(g, uv, ndc);   // (not the sky)
+        return;
+    }
+    const vec3 o = world(ndc, -1.0), far = world(ndc, 1.0);
+    const float tmax = distance(far, o);
+    rayQueryEXT q;
+    rayQueryInitializeEXT(q, tlas, gl_RayFlagsOpaqueEXT, 0xFF, o, 0.0, (far - o) / tmax, tmax);
+    while (rayQueryProceedEXT(q)) {}
+    const bool hit = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+    const bool drawn = d < 1.0;
+    vec3 c = imageLoad(color, g).rgb;
+    if (hit) {
+        const float t = rayQueryGetIntersectionTEXT(q, true);
+        const float id = float(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true));
+        const float tr = drawn ? distance(world(ndc, d * 2.0 - 1.0), o) : tmax;
+        const bool same = abs(t - tr) < 0.03 * tr + 0.05;
+        if (pc.mode != 2) c = (fract(id * vec3(0.1031, 0.3030, 0.5973) + 0.2) * 0.6 + 0.4) * (0.25 + 0.75 * exp(-t * 0.02));
+        if (!same) c = mix(c, t < tr ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 1.0, 0.0), 0.6);
+    } else if (drawn) {
+        c = mix(c, vec3(1.0, 0.0, 0.0), 0.6);
+    }
+    imageStore(color, g, vec4(c, 1.0));
+}

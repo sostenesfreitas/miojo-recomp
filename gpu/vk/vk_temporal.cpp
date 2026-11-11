@@ -56,6 +56,7 @@
 #include "vk_fsr3.h"   // (fsr3_wanted: AMD FSR 3.1 upscales with inputs of its own)
 #include "vk_fsr4.h"
 #include "vk_menu.h"
+#include "vk_rt.h"
 #include "vk_texture.h"
 
 #include "shaders/dlss_actor_frag_spv.h"
@@ -118,6 +119,7 @@ struct Camera {
     float current[16]{};      // (its view-projection)
     float jitter[2]{};        // (the projection's offset of the picture's centre, in clip space: nx2/oot_jitter.py)
     float near_z = 0, far_z = 0, fov_y = 0;   // (its projection's, 0 when it is not a plain perspective one)
+    float proj[4]{};          // (miojo: the projection's [0][0], [1][1], [2][2], [2][3]: dlss_prep.comp's ambient occlusion)
     uint32_t width = 0, height = 0;
     Texture* depth = nullptr;
     uint64_t depth_gen = 0;   // (texture_destroy_generation when taken: a depth texture destroyed since is not used)
@@ -328,7 +330,7 @@ bool make_pipelines() {
     if (!dev.push_descriptor || !vkCmdPushDescriptorSetKHR) return false;
     const VkDescriptorType S = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, I = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     const VkDescriptorType prep_types[5] = {S, S, I, I, I}, out_types[2] = {S, I};
-    if (!s.prep && !make_pipeline(DLSS_PREP_COMP_SPV, sizeof DLSS_PREP_COMP_SPV, prep_types, 5, 84, s.prep_set, s.prep_layout, s.prep))
+    if (!s.prep && !make_pipeline(DLSS_PREP_COMP_SPV, sizeof DLSS_PREP_COMP_SPV, prep_types, 5, 104, s.prep_set, s.prep_layout, s.prep))
         return false;
     if (!s.out && !make_pipeline(DLSS_OUT_COMP_SPV, sizeof DLSS_OUT_COMP_SPV, out_types, 2, 8, s.out_set, s.out_layout, s.out))
         return false;
@@ -651,6 +653,7 @@ void temporal_note_scene_draw(const Texture* color0, uint32_t width, uint32_t he
     const bool plain = std::isfinite(n) && n > 0.0f && p11 > 0.0f && (!std::isfinite(f) || f > n);
     k.near_z = plain ? n : 0.0f, k.far_z = plain ? (std::isfinite(f) ? f : 1e9f) : 0.0f;
     k.fov_y = plain ? 2.0f * std::atan(1.0f / p11) : 0.0f;
+    k.proj[0] = c[0x70 / 4], k.proj[1] = p11, k.proj[2] = p22, k.proj[3] = p23;
     k.width = width, k.height = height, k.depth = depth, k.depth_gen = texture_destroy_generation(), k.frame = now;
     k.valid = true;
 }
@@ -857,6 +860,8 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
         float jitter[2];
         int32_t size[2];
         int32_t flags;
+        float ao;         // (miojo: the menu's Ambient occlusion row, 0 to 1)
+        float proj[4];
     } pc{};
     static const bool show_motion = getenv("RX_VK_DLSS_DEBUG") && !strcmp(getenv("RX_VK_DLSS_DEBUG"), "motion");
     // (the motion without the jitter: from this frame's jittered clip space to the frame before's without its jitter.
@@ -869,6 +874,10 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     if (!motion) reset = true;   // (without a valid reprojection, prior history has no mapping to this camera)
     pc.jitter[0] = cam.jitter[0], pc.jitter[1] = cam.jitter[1];
     pc.size[0] = (int32_t)rw, pc.size[1] = (int32_t)rh, pc.flags = (motion ? 1 : 0) | (show_motion ? 2 : 0);
+    static const bool show_ao = getenv("RX_VK_AO_DEBUG") != nullptr;   // (miojo: the occlusion alone)
+    if (show_ao) pc.flags |= 8;
+    pc.ao = cam.near_z > 0.0f && cam.proj[0] > 0.0f && !rt_on() ? (float)opts.ao / 100.0f : 0.0f;   // (traced with Ray tracing on: rt_frame)
+    std::memcpy(pc.proj, cam.proj, sizeof pc.proj);
 
     const auto prep = [&] {
         const VkDescriptorImageInfo info[5] = {{s.point, in_view, VK_IMAGE_LAYOUT_GENERAL},
@@ -890,6 +899,8 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     full_barrier(cmd);   // (the scene's colour and depth, written before)
     prep();
     full_barrier(cmd);
+    rt_frame(cmd, cam.current, s.color.view, dview, s.point, rw, rh, (float)opts.ao / 100.0f,
+             cam.jitter[0] * (float)rw * 47.0f + cam.jitter[1] * (float)rh * 91.0f, in_view, (float)opts.gi / 100.0f);   // (miojo: the scene's ray-tracing structures, RX_VK_RT)
     // (what moves by itself: the skinned draws drawn again over the camera's motion, with their own)
     const int actors = actor_motion(cmd, cam, previous, rw, rh, dview, motion);
     if (actors) full_barrier(cmd);

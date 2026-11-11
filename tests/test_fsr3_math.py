@@ -19,9 +19,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default="g++")
     args = parser.parse_args()
-    # (fsr3_prep.comp keeps dlss_prep.comp's push constants, which vk_fsr3_inputs.cpp pushes as 84 bytes)
+    # (fsr3_prep.comp keeps dlss_prep.comp's push constants, which vk_fsr3_inputs.cpp pushes as 84 bytes; dlss_prep.comp's
+    # ambient occlusion terms come after them and are DLSS's alone)
     block = lambda text: re.sub(r"\s+", " ", re.sub(r"//[^\n]*", "", text[text.index("uniform P {"):text.index("} pc;")]))
-    if block((SHADERS / "fsr3_prep.comp").read_text(encoding="utf-8")) != block((SHADERS / "dlss_prep.comp").read_text(encoding="utf-8")):
+    if block((SHADERS / "fsr3_prep.comp").read_text(encoding="utf-8")) != block((SHADERS / "dlss_prep.comp").read_text(encoding="utf-8")).replace("float ao; float proj[4]; ", ""):
         raise SystemExit("fsr3_prep.comp's push constants are not dlss_prep.comp's")
     inputs = (ROOT / "gpu" / "vk" / "vk_fsr3_inputs.cpp").read_text(encoding="utf-8")
     if "static_assert(sizeof pc == 84" not in inputs or "{VK_SHADER_STAGE_COMPUTE_BIT, 0, 84}" not in inputs:
