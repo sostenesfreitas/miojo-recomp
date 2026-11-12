@@ -191,6 +191,8 @@ struct Rt {
     float sun_colour[3]{};   // (the game's, before its exposure; 0: not known)
     std::atomic<uint64_t> local_lights{0}, local_frame_buffer{0}, local_frame{0};   // (rt_note_local_lights)
     Buf light_list;   // (the frame's lights for rt_debug.comp: kRing frames of kLights lights, 20 floats each)
+    uint64_t lamps_at = 0, lamps_frame = 0;   // (the last frame's list, for the next frame's traced ambient: rt_ao_replace)
+    int32_t lamps_count = 0;
     std::atomic<uint64_t> traced_frame{0};   // (the frame rt_frame last drew its effects)
     // (the game's own occlusion pass, traced: rt_ao_replace. The frame before's camera and depth, kept by rt_frame)
     float prev_inv[16]{};
@@ -1173,7 +1175,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
         for (uint32_t i = 0; i < 4; i++) b[i] = {i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, li.bindingCount = 4, li.pBindings = b;
-        const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 128};
+        const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 144};
         VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pi.setLayoutCount = 1, pi.pSetLayouts = &r.ao_set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
         VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -1200,8 +1202,11 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
         float ambient, sky_reach;
         float pad[3];   // (to_sun is a vec4 in the block: at a multiple of 16)
         float to_sun[4];
+        uint64_t light_list;
+        int32_t light_count;
+        float sky;
     } pc{};
-    static_assert(sizeof pc == 128, "rt_ao.comp's push constants");
+    static_assert(sizeof pc == 144, "rt_ao.comp's push constants");
     static const float radius = getenv("RX_VK_RT_RADIUS") ? (float)atof(getenv("RX_VK_RT_RADIUS")) : 1.5f;
     static const int rays = getenv("RX_VK_RT_RAYS") ? std::clamp(atoi(getenv("RX_VK_RT_RAYS")), 1, 16) : 6;
     static const float skin = getenv("RX_VK_RT_SKIN") ? (float)atof(getenv("RX_VK_RT_SKIN")) : 0.12f;
@@ -1211,12 +1216,15 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     static const float sky_reach = getenv("RX_VK_RT_AMBIENT_FAR") ? (float)atof(getenv("RX_VK_RT_AMBIENT_FAR")) : 40.0f;
     pc.ambient = std::clamp((float)opts.ambient / 100.0f, 0.0f, 1.0f), pc.sky_reach = sky_reach;
     if (pc.ambient > 0.0f) {   // (the game's sun, as rt_frame reads it for the bounce: the lit draws' frame buffer at 0x40)
-        float f[3];
+        float f[7];   // (its colour too, at 0x50: a third of what it gives a surface stands for the sky's light)
         if (memory_read_as_submitted(r.local_frame_buffer.load(std::memory_order_relaxed) + 0x40, f, sizeof f)) {
             const float len = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
             if (std::fabs(len - 1.0f) < 0.02f) {
                 for (int i = 0; i < 3; i++) pc.to_sun[i] = -f[i] / len;
                 pc.to_sun[3] = 1.0f;
+                const float sun = (0.2126f * f[4] + 0.7152f * f[5] + 0.0722f * f[6]) / 3.14159265f;
+                if (sun > 1e-4f && sun < 1e4f && now - r.lamps_frame <= 2 && r.lamps_count > 0)
+                    pc.sky = sun / 3.0f, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;
             }
         }
     }
@@ -1606,7 +1614,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     pc.ao = ao, pc.radius = radius, pc.seed = seed, pc.rays = ao > 0.0f || gi > 0.0f || debug ? rays : 0;
     static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     if (!dlss_math::reprojection(view_proj, identity, pc.inv)) return;   // (identity * inverse(view_proj))
-    if (lamps && (lights || gi > 0.0f) && (r.light_list.buffer || make_buf(r.light_list, kRing * kLights * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true))) {
+    if (lamps && (lights || gi > 0.0f || opts.ambient > 0) && (r.light_list.buffer || make_buf(r.light_list, kRing * kLights * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true))) {
         // (the game's lights, 96 bytes each, as its lighting shader reads them: the type at 16 (1 a spot, 100 a point
         // light), the colour at 32 with one over its reach after it, the place at 48 with a spot's cone's inner cosine
         // after it, the falloff's constant, linear and square terms at 64 with the cone's outer cosine after them, a
@@ -1660,6 +1668,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
                      eye[0], eye[1], eye[2]);
             }
         pc.light_count = (int32_t)found.size(), pc.light_list = r.light_list.address + at;
+        r.lamps_at = pc.light_list, r.lamps_count = pc.light_count, r.lamps_frame = now;
         pc.lights = found.empty() || !lights ? 0.0f : std::min((float)opts.lights / 100.0f, 1.0f);   // (the shadows' strength; the bounce reads the list too)
         static int told = 0;
         if (!found.empty() && told < 4 && now % 600 == 0) {

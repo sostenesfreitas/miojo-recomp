@@ -1,5 +1,7 @@
 #version 460
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 // (miojo) The game's own ambient occlusion, traced (vk_rt.cpp rt_ao_replace). OoT computes its occlusion at the start of a
 // frame from the frame before's depth, at half size, into an R8 image (1: open); four blur passes of its own follow, and its
 // lighting reads the result where it belongs, on the ambient light alone. This pass stands in for that first one (program
@@ -22,7 +24,32 @@ layout(push_constant, row_major) uniform P {
     float ambient;  // (the Traced ambient row, 0 to 1: how much the sky's reach shapes the game's ambient light)
     float far;      // (how far its rays look for the sky)
     vec4 to_sun;    // (the way to the game's sun or moon; w > 0: known)
+    uint64_t light_list;   // (the game's lamps nearest the camera, 20 floats each: rt_debug.comp's list of the frame before)
+    int light_count;
+    float sky;      // (the sky's light as the picture has it, to weigh a lamp's against: a share of the sun's)
 } pc;
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Floats { float f[]; };
+/// What of the light at pc.light_list's float o reaches the point p, no cosine: the game's own falloff, as rt_debug.comp's
+/// light_fall has it
+float lamp_fall(uint o, vec3 p) {
+    Floats lb = Floats(pc.light_list);
+    const vec4 at = vec4(lb.f[o], lb.f[o + 1u], lb.f[o + 2u], lb.f[o + 3u]);
+    const float near = lb.f[o + 7u];
+    const vec4 facing = vec4(lb.f[o + 8u], lb.f[o + 9u], lb.f[o + 10u], lb.f[o + 11u]);
+    const vec3 to = at.xyz - p;
+    const float d = length(to), x = d * at.w;
+    if (!(x < 1.0 && d > 0.08)) return 0.0;
+    const float x2 = x * x, reach = clamp(1.0 - x2 * x2, 0.0, 1.0);
+    if (facing.w > 0.5) {
+        const float inner = lb.f[o + 12u], outer = lb.f[o + 13u], c = dot(facing.xyz, -to) / d;
+        const float cone = c > inner ? 1.0 : pow(clamp((c - outer) / max(inner - outer, 1e-4), 0.0, 1.0), lb.f[o + 14u]);
+        const float nx = near > 0.0 ? clamp(d / near, 0.0, 1.0) : 1.0, nx2 = nx * nx;
+        return cone * reach * reach * (near > 0.0 ? nx2 * nx2 * nx2 * (7.0 - 6.0 * nx) : 1.0) /
+               max(lb.f[o + 18u] * d * d + lb.f[o + 17u] * d + lb.f[o + 16u], 1e-3);
+    }
+    const float past = max(d - near, 0.001);
+    return reach / (past * past + 1.0);
+}
 vec3 world(vec2 uv, float d) {
     const vec4 p = pc.inv * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d * 2.0 - 1.0, 1.0);
     return p.xyz / p.w;
@@ -92,8 +119,10 @@ void main() {
     // its material's lightness (0.3 when not known) times how lit it is: whole when a ray from it reaches the sun,
     // three tenths of that in its shadow, where only the sky lights it. Their mean scales this image, never under a
     // fifth, so the game lights by its own ambient, its colours and textures, as far as light reaches the place.
-    // ponytail: the sky and the sun count the same, the lamps not at all, and a cave's hand-set ambient is not the
-    // sky's: it goes to that fifth. The bounce's light at the hit for those)
+    // And lit by the game's lamps: each one's light at the wall by its own falloff, against the sky's (pc.sky), so a
+    // room with a lantern keeps its ambient and a cave's lit corner too.
+    // ponytail: the sky and the sun count the same, no ray from the wall to a lamp, and a cave's hand-set ambient is
+    // not the sky's: where no lamp reaches it goes to that fifth)
     float wide = 1.0;
     if (pc.ambient > 0.0) {
         float open = 0.0;
@@ -118,6 +147,16 @@ void main() {
                                       from + dir * max(rayQueryGetIntersectionTEXT(q, true) - 0.05, 0.0), 0.0, pc.to_sun.xyz, 400.0);
                 while (rayQueryProceedEXT(sq)) {}
                 if (rayQueryGetIntersectionTypeEXT(sq, true) != gl_RayQueryCommittedIntersectionTriangleEXT) lit = 1.0;
+            }
+            if (pc.sky > 0.0) {
+                const vec3 hit = from + dir * rayQueryGetIntersectionTEXT(q, true);
+                float lamps = 0.0;
+                for (int k = 0; k < pc.light_count; k++) {
+                    Floats lb = Floats(pc.light_list);
+                    const uint o = uint(k) * 20u;
+                    lamps += dot(vec3(lb.f[o + 4u], lb.f[o + 5u], lb.f[o + 6u]), vec3(0.2126, 0.7152, 0.0722)) * lamp_fall(o, hit);
+                }
+                lit = min(lit + lamps / pc.sky, 2.0);
             }
             open += light * lit;
         }
