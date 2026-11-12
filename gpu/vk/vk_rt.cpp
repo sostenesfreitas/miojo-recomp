@@ -1223,9 +1223,14 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
             if (std::fabs(len - 1.0f) < 0.02f) {
                 for (int i = 0; i < 3; i++) pc.to_sun[i] = -f[i] / len;
                 pc.to_sun[3] = 1.0f;
+                // (the lamps are weighed against the sky. A place with no sun, a cave, has none to weigh by: the last
+                // place's stands, so its lamps still light its walls; and with Path tracing no sun is asked for there)
+                static float sky_level = 0.0f;
                 const float sun = (0.2126f * f[4] + 0.7152f * f[5] + 0.0722f * f[6]) / 3.14159265f;
-                if (sun > 1e-4f && sun < 1e4f && now - r.lamps_frame <= 2 && r.lamps_count > 0)
-                    pc.sky = sun / 3.0f, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;
+                if (sun > 1e-4f && sun < 1e4f) sky_level = sun / 3.0f;
+                else if (opts.pt) pc.to_sun[3] = 0.0f;
+                if (sky_level > 0.0f && now - r.lamps_frame <= 2 && r.lamps_count > 0)
+                    pc.sky = sky_level, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;
             }
         }
     }
