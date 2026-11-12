@@ -6036,6 +6036,22 @@ static void dlss_trace_draw(const NvnState& s, const Program& p, const DrawArgs&
                     logf("%s", t);
                 }
         }
+        {   // (miojo, the materials: each fragment texture by where its handle is read, constant buffer and offset)
+            char big[1600];
+            int q = snprintf(big, sizeof big, "vk: desc-trace prog %016llx n%d dw%d", (unsigned long long)p.key, d.count, (int)s.ds.dw);
+            for (const Stage& st : p.stages)
+                if (st.nvn_stage == 1)
+                    for (const auto& td : st.info.texture_descriptors) {
+                        nvn_tex x;
+                        nvn_view v;
+                        bool hv = false;
+                        const uint32_t h = handle_of(s, st, td, 0);
+                        if (q < 1500 && h && texture_of((int)(h & 0xFFFFF), &x, &v, &hv))
+                            q += snprintf(big + q, sizeof big - q, " c%u+%x=%dx%dx%d/%x", td.cbuf_index, td.cbuf_offset, (int)x.d.width, (int)x.d.height,
+                                          (int)x.d.depth, (int)x.d.format);
+                    }
+            logf("%s", big);
+        }
         m = snprintf(t, sizeof t, "vk: tex-trace prog %016llx n%d", (unsigned long long)p.key, d.count);
         for (int i = 0; i < 24 && m < 440; i++) {
             nvn_tex x;
@@ -6114,9 +6130,12 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
         }
     }
     if (d.mesh || !d.indexed || d.indirect || d.instances != 1 || (d.prim != NVN_DRAW_PRIMITIVE_TRIANGLES && !strip) || !at.n || !at.color[0] ||
-        !at.depth || at.color_format[0] != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !s.ds.dt || !s.ds.dw || (s.color.blend_en & 1) ||
+        !at.depth || at.color_format[0] != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !s.ds.dt || (s.color.blend_en & 1) ||
         s.nvattr < 1 || !temporal_scene_size(at.width, at.height))
         return;
+    // (the lit pass draws each mesh again without writing depth: nothing for the structure, but its material's colour
+    // texture is bound there and not in the depth pass. The same mesh by the same numbers: rt_note_material)
+    const bool lit = !s.ds.dw;
     // (drawn two-sided: leaves' cards, cloth. Without their textures the rays would cast the whole card: a small plant's
     // shadow a large dark quad. Out of the rays; what of them casts a shadow comes back through the shadow maps' pass,
     // where a cutout is told by its fragment stage and left to the game)
@@ -6134,7 +6153,7 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
     // (and one-sided or not, a depth pass that samples a texture is a cutout's: a grate, a leaf. Marked, as a shadow map's
     // pass marks it, which may draw another level of detail of it from another buffer)
     const uint64_t object = s.ubo[0][1].size >= 0x4c ? s.ubo[0][1].addr : 0;
-    if (s.poly.cull == NVN_FACE_NONE) rt_note_two_sided(object, s.vbuf[0].address);
+    if (s.poly.cull == NVN_FACE_NONE && !lit) rt_note_two_sided(object, s.vbuf[0].address);
     const auto attr = [&](int i) { return *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]); };
     const nvn_va_st pos = attr(0);
     RtDraw k;
@@ -6155,7 +6174,7 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
         k.strip = strip, k.restart_on = s.restart, k.restart = s.restart_index;
         k.patch = s.ubo[0][5].addr, k.ground = s.ubo[0][4].addr;
     } else {
-        if (sampled) return rt_note_cutout(object, s.vbuf[0].address);   // (not the terrain: its depth pass has a texture bound and is solid)
+        if (sampled && !lit) return rt_note_cutout(object, s.vbuf[0].address);   // (not the terrain: its depth pass has a texture bound and is solid)
         if (strip || (pos.fmt != NVN_FORMAT_RGB32F && pos.fmt != NVN_FORMAT_RGBA16F) || pos.stream != 0) return;
         if (s.nvattr >= 7 && (attr(6).fmt == NVN_FORMAT_RGBA16UI || attr(6).fmt == NVN_FORMAT_RGBA8UI)) return;   // (skinned)
     }
@@ -6166,7 +6185,14 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
     k.object = s.ubo[0][1].addr;
     k.front_ccw = s.poly.front == NVN_FRONT_FACE_CCW;
     if (!k.vbuf || !k.ibuf || (!k.terrain && (!k.object || s.ubo[0][1].size < 0x4c))) return;
-    for (int i = 0; i < 4; i++) k.tex[i] = s.tex[1][i];   // (the fragment stage's: the colour texture, vk_rt.cpp material_of)
+    if (lit) {
+        for (const Stage& st : p.stages)
+            if (st.nvn_stage == 1)
+                for (const auto& td : st.info.texture_descriptors)
+                    if (td.cbuf_index == 2 && td.cbuf_offset == 0x20) k.tex[0] = handle_of(s, st, td, 0);
+        if (!k.terrain && k.tex[0]) rt_note_material(k);
+        return;
+    }
     rt_note_lights(s.ubo[1][4].addr, s.ubo[1][4].size);
     rt_note_camera(s.ubo[0][0].addr, s.ubo[0][0].size);
     rt_note_draw(k);

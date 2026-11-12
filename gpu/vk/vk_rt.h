@@ -41,9 +41,11 @@ struct RtDraw {
     bool meshlets = false;
     uint32_t lod = 0;
     bool front_ccw = false;         // (the draw's front face: the rays pass a triangle's back)
-    uint64_t tex[4]{};              // (the fragment stage's first texture handles: the colour texture is among them)
+    uint64_t tex[4]{};              // (tex[0]: the colour texture's handle, from the lit pass; rt_note_material)
 };
 void rt_note_draw(const RtDraw& d, bool shadow_pass = false);
+/// The same draw in the scene's lit pass, d.tex[0] its colour texture's handle: the mesh's material, looked for once
+void rt_note_material(const RtDraw& d);
 /// A scene draw's fragment uniform buffer 4, the game's lights: the sun's direction at 0 and its colour at 0x40 (read once a
 /// frame, and taken only when its direction is the shadow maps')
 void rt_note_lights(uint64_t address, uint64_t size);

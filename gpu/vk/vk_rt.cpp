@@ -962,18 +962,16 @@ void rt_note_local_lights(uint64_t lights, uint64_t frame_buffer) {
 }
 
 static uint32_t material_of(Rt& r, const RtDraw& d) {
-    // (the world's main program keeps its colours in an array of 90 textures, the layer chosen by its material: with an
-    // array among the first textures the sRGB one beside it is a shared tint, the same tan for every wall and rock.
-    // ponytail: no material for those until the layer is read from the material's buffer (fragment uniform buffer 2))
-    for (int i = 0; i < 4; i++) {
+    // (d.tex[0]: the texture whose handle the lit draw's fragment stage reads at 0x20 of its material's buffer, constant
+    // buffer 2. That is the colour texture in every material seen (the normals at 0x28, the roughness and the rest at
+    // 0x30), a plain 2D one; the terrain has an array of 90 there, its layers picked by a map: none for it yet)
+    for (int i = 0; i < 1; i++) {
         nvn_tex x;
         nvn_view v;
         bool has_view = false;
-        if (!d.tex[i] || !texture_of((int)(d.tex[i] & 0xFFFFF), &x, &v, &has_view) || x.d.depth <= 1) continue;
-        const int f = x.d.format;   // (an array of colour textures: the atlas. Arrays of other things, noise and masks, are no sign of it)
-        if ((f >= 0x45 && f <= 0x48) || f == 0x4e || (f >= 0x87 && f <= 0x94)) return 1;
+        if (!d.tex[i] || !texture_of((int)(d.tex[i] & 0xFFFFF), &x, &v, &has_view) || x.d.depth > 1) return 1;
     }
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 1; i++) {
         nvn_tex x;
         nvn_view v;
         bool has_view = false;
@@ -1045,28 +1043,30 @@ void rt_note_draw(const RtDraw& given, bool shadow_pass) {
         // view, where the wrong way let every ray through the walls. RX_VK_RT_FLIP: the other way, to see that again)
         in.ccw = (d.front_ccw == (det < 0.0f)) != flip;
     }
-    bool look = false;   // (a built mesh drawn into the scene with no material yet: its colour texture looked for, once)
-    {
-        std::lock_guard lk(r.mu);
-        if (r.instances.size() >= 4 * kMaxInstances) r.instances.clear();   // (no upscale for a while: stale)
-        r.instances.push_back(in);
-        const auto it = r.meshes.find(in.key);
-        if (it != r.meshes.end()) {
-            // (the materials are a stub, nothing reads them yet, and off unless RX_VK_RT_MATERIALS: their copies read a
-            // game texture by a pointer kept since the draw, and the GPU device was lost entering an area about one run in
-            // six with them on; suspected, not proven, to be a texture the game let go in between)
-            static const bool materials = getenv("RX_VK_RT_MATERIALS") != nullptr;
-            look = materials && !shadow_pass && it->second.material == 0;
-        } else if (!r.bad.count(in.key) && r.pending.size() < 16384) {
-            Rt::Pending& w = r.pending[in.key];
-            const uint64_t now = texture_frame_no();
-            if (w.last != now) w.d = d, w.last = now, w.frames++;
-        }
+    std::lock_guard lk(r.mu);
+    if (r.instances.size() >= 4 * kMaxInstances) r.instances.clear();   // (no upscale for a while: stale)
+    r.instances.push_back(in);
+    if (!r.meshes.count(in.key) && !r.bad.count(in.key) && r.pending.size() < 16384) {
+        Rt::Pending& w = r.pending[in.key];
+        const uint64_t now = texture_frame_no();
+        if (w.last != now) w.d = d, w.last = now, w.frames++;
     }
-    if (!look) return;
+}
+
+void rt_note_material(const RtDraw& d) {
+    Rt& r = rt();
+    if (!r.ok) return;
+    static const bool off = getenv("RX_VK_RT_NO_MATERIALS") != nullptr;   // (a test: the guessed albedo, as it was)
+    if (off) return;
+    const uint64_t key = key_of(d);
+    {   // (a built mesh with no material yet: its colour texture looked for, once)
+        std::lock_guard lk(r.mu);
+        const auto it = r.meshes.find(key);
+        if (it == r.meshes.end() || it->second.material != 0) return;
+    }
     const uint32_t slot = material_of(r, d);
     std::lock_guard lk(r.mu);
-    const auto it = r.meshes.find(in.key);
+    const auto it = r.meshes.find(key);
     if (it != r.meshes.end()) it->second.material = slot;
 }
 
