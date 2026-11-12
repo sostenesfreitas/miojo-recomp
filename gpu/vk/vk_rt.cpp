@@ -847,7 +847,7 @@ bool make_pipeline(Rt& r) {
     for (uint32_t i = 0; i < 6; i++) b[i] = {i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, li.bindingCount = 6, li.pBindings = b;
-    const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 200};
+    const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 240};
     VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pi.setLayoutCount = 1, pi.pSetLayouts = &r.set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
     VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -957,7 +957,7 @@ void rt_note_lights(uint64_t address, uint64_t size) {
 void rt_note_local_lights(uint64_t lights, uint64_t frame_buffer) {
     Rt& r = rt();
     const uint64_t now = texture_frame_no();
-    if (!r.ok || opts.lights <= 0 || r.local_frame.exchange(now, std::memory_order_relaxed) == now) return;
+    if (!r.ok || r.local_frame.exchange(now, std::memory_order_relaxed) == now) return;
     r.local_lights.store(lights, std::memory_order_relaxed), r.local_frame_buffer.store(frame_buffer, std::memory_order_relaxed);
 }
 
@@ -1538,7 +1538,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     }
 
     static const int debug = getenv("RX_VK_RT_DEBUG") ? atoi(getenv("RX_VK_RT_DEBUG")) : 0;
-    if (dev.props.limits.maxPushConstantsSize < 200) return;
+    if (dev.props.limits.maxPushConstantsSize < 240) return;
     const bool lights = opts.lights > 0 && now - r.local_frame.load(std::memory_order_relaxed) <= 2;
     if ((!debug && !(ao > 0.0f) && !(gi > 0.0f) && !lights) || !n || !make_pipeline(r) || !make_cache(r, cmd) ||
         !make_atlas(r, cmd))
@@ -1555,9 +1555,27 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         int32_t light_count;
         uint64_t light_list;
         uint64_t skin_indices, skin_normals;
+        uint64_t pad;   // (to_sun is a vec4 in the block: at a multiple of 16)
+        float to_sun[4], sun[4];
     } pc{};
-    static_assert(sizeof pc == 200, "rt_debug.comp's push constants");
+    static_assert(sizeof pc == 240, "rt_debug.comp's push constants");
     pc.skin_indices = r.skin_indices, pc.skin_normals = r.skin_normals;
+    if (gi > 0.0f && now - r.local_frame.load(std::memory_order_relaxed) <= 2) {
+        // (the game's sun for a bounce's hit the picture has not seen: the lit draws' frame buffer has the way its light
+        // travels at 0x40 and its colour at 0x50, as bright as the picture takes it; over pi for a surface's share.
+        // RX_VK_RT_SUN_K: that times this, a test)
+        static const float gain = getenv("RX_VK_RT_SUN_K") ? (float)atof(getenv("RX_VK_RT_SUN_K")) : 1.0f;
+        float f[8];
+        if (memory_read_as_submitted(r.local_frame_buffer.load(std::memory_order_relaxed) + 0x40, f, sizeof f)) {
+            const float len = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+            bool fine = std::fabs(len - 1.0f) < 0.02f;
+            for (int i = 4; i < 7; i++) fine = fine && f[i] >= 0.0f && f[i] < 1e4f;
+            if (fine) {
+                for (int i = 0; i < 3; i++) pc.to_sun[i] = -f[i] / len, pc.sun[i] = f[4 + i] * gain / 3.14159265f;
+                pc.to_sun[3] = 1.0f;
+            }
+        }
+    }
     r.traced_frame.store(now, std::memory_order_relaxed);
     static const float skin = getenv("RX_VK_RT_SKIN") ? (float)atof(getenv("RX_VK_RT_SKIN")) : 0.12f;
     pc.skin = skin;

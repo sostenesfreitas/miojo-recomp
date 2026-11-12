@@ -61,6 +61,8 @@ layout(push_constant, row_major) uniform P {
                            // constant, linear and square terms)
     uint64_t skin_indices;   // (the characters' structure's indices and smooth normals, 0 for none this frame)
     uint64_t skin_normals;
+    vec4 to_sun;   // (the way to the game's sun, or its moon; w > 0: known)
+    vec4 sun;      // (what it gives a surface square to it, as the picture has it)
 } pc;
 vec3 world(vec2 ndc, float z) {
     const vec4 p = pc.inv * vec4(ndc, z, 1.0);
@@ -164,9 +166,24 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
                     const vec4 kept = imageLoad(cache, cell(hit, ng));
                     if (kept.a > 0.0) {
                         light += kept.rgb;
-                    } else {   // (never seen: its material, under half the light here)
+                    } else {
+                        // (never seen: lit here and now. Its material's colour (a dull grey when not known) under the
+                        // game's sun, by a ray of its own to it, which a cave's shell or a roof stops, and under a
+                        // third of the light this pixel itself stands in, for the sky and all the rest.
+                        // ponytail: no local lights at the hit and the sky is that guess; the game's lights' table
+                        // and its sky's colour for those)
                         const vec4 there = material(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true));
-                        if (there.a > 0.5) light += there.rgb * standing * 0.5;
+                        const vec3 its = there.a > 0.5 ? there.rgb : vec3(0.3);
+                        float sunlit = 0.0;
+                        const float turned = dot(ng, pc.to_sun.xyz);
+                        if (pc.to_sun.w > 0.0 && turned > 0.0) {
+                            rayQueryEXT sq;
+                            rayQueryInitializeEXT(sq, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, hit + ng * 0.03, 0.0,
+                                                  pc.to_sun.xyz, 400.0);
+                            while (rayQueryProceedEXT(sq)) {}
+                            if (rayQueryGetIntersectionTypeEXT(sq, true) != gl_RayQueryCommittedIntersectionTriangleEXT) sunlit = turned;
+                        }
+                        light += min(its * (pc.sun.rgb * sunlit + standing * 0.33), vec3(4.0));
                     }
                 }
             }
