@@ -29,6 +29,7 @@ struct Options {
     int sharpness = 0;    // 0 to 100
     int rt = 0;           // (miojo) Ray tracing: the scene as acceleration structures (gpu/vk/vk_rt.cpp); read once, at the start
     int gi = 0;           // (miojo) Bounce light's strength in percent, 0 off: one traced bounce (vk_rt.cpp), with Ray tracing on
+    int lights = 0;       // (miojo) Light shadows' strength in percent, 0 off: a point light's shadow traced (vk_rt.cpp), with Ray tracing on
     int sun = 0;          // (miojo) Sun shadows' strength in percent, 0 the game's own shadow maps: traced (vk_rt.cpp), with Ray tracing on
     int ao = 0;           // (miojo) ambient occlusion's strength in percent, 0 off (gpu/vk/shaders/dlss_prep.comp: with a temporal upscaler)
     int anisotropy = 4;   // (hookshot) Anisotropic filtering: 0 the game's own (1x or 2x), 1 2x, 2 4x, 3 8x, 4 16x (the

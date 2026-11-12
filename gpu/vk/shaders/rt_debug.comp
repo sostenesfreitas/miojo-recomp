@@ -20,14 +20,8 @@
 // the surface faces, where every pixel leaves its lit colour as it is drawn (a running mean). So a wall lit a moment ago
 // still lights the room with the camera turned from it, and since what is kept has the bounce in it, the light goes on
 // to a second and a third bounce over the frames. pc.mode 6: the cache as each pixel reads it (RX_VK_AO_DEBUG=3).
-// The sun's shadows (pc.sun > 0, the Sun shadows row): from a surface that faces the sun (pc.to_sun, from the camera of
-// the game's own shadow maps) one more ray towards it, a little off its centre by the noise so the edge is soft; a hit
-// takes the sun's share of the colour away. The game's shadow-map draws of what the rays have are left out meanwhile
-// (vk_draw.cpp), so its own shadows of them are not there under these. pc.mode 7: the shadow alone (RX_VK_AO_DEBUG=4).
-// ponytail: the sun's share of a pixel's colour is not known (the game's lighting is in its shaders). Taken as a sun
-// 2.3 times the sky's light at a surface square to it and less by the cosine: lit / (1 + 2.3 cos), a little less of
-// the blue taken, as a clear sky leaves it. No step at the terminator, where a fixed share left a dark band and facets.
-// The game's light buffers for the real share.
+// The local light's shadow (pc.lights > 0, the Light shadows row): see occlusion(). pc.mode 7: what it takes alone
+// (RX_VK_AO_DEBUG=4). The sun's shadows are not here: rt_sun.comp writes them into the game's own shadow mask.
 // Materials (binding 5): each instance carries its material's slot in a small image of mean albedos, one texel a colour
 // texture (vk_rt.cpp blits each texture's smallest level there). The pixel's own material sets how much of the arriving
 // light it gives back (its hue still from the picture, so the texture's detail stays); a hit the picture and the cache
@@ -59,11 +53,11 @@ layout(push_constant, row_major) uniform P {
     float gi;       // (the bounce's strength, 0 to 1)
     float reach;    // (how far a ray looks for it)
     float skin;     // (a character's own surface nearer than this does not occlude it: the layers of a face)
-    float sun;      // (the sun's shadows' strength, 0 to 1)
-    vec3 to_sun;    // (the direction to it, in the world)
+    float lights;   // (the local light's shadow's strength, 0 to 1)
+    vec4 light_at;  // (the nearest point light: where it is, and one over how far it reaches)
     uint64_t skin_indices;   // (the characters' structure's indices and smooth normals, 0 for none this frame)
     uint64_t skin_normals;
-    vec3 sun_share;   // (the sun's light over the sky's at a surface square to it, by channel: what a shadow takes)
+    vec4 light_colour;   // (its colour as the picture has it, the game's exposure in; w: its own radius)
 } pc;
 vec3 world(vec2 ndc, float z) {
     const vec4 p = pc.inv * vec4(ndc, z, 1.0);
@@ -175,30 +169,35 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
             }
         }
     }
-    float shade = 0.0;
-    const float facing = dot(n, pc.to_sun);
-    if (pc.sun > 0.0 && facing > 0.0) {
-        const vec2 s = vec2(g) + pc.seed + vec2(5.0, 23.0);
-        const float a = 6.2831853 * noise(s), rr = 0.012 * sqrt(noise(s.yx + 3.0));
-        const vec3 su = normalize(abs(pc.to_sun.y) < 0.99 ? cross(pc.to_sun, vec3(0.0, 1.0, 0.0)) : cross(pc.to_sun, vec3(1.0, 0.0, 0.0)));
-        const vec3 dir = normalize(pc.to_sun + (su * cos(a) + cross(pc.to_sun, su) * sin(a)) * rr);
-        rayQueryEXT q;
-        rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, 0.0, dir, 400.0);
-        while (rayQueryProceedEXT(q))
-            if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
-        if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
-            shade = pc.sun;
+    // (the local light's shadow, the Light shadows row: the game lights by its point lights (a fairy, a torch) with no
+    // shadow at all. A ray from the surface to the nearest one; where it is stopped, what that light gave this pixel is
+    // taken back out: the light's colour by the game's own falloff (rt as its shader has it: over the distance squared,
+    // faded to nothing at its reach) and the cosine, through the albedo, never more than nine tenths of what is there.
+    // ponytail: one light, the nearest to the camera, and the albedo is the bounce's guess: the shadow's darkness is an
+    // estimate. The game's lighting shaders taking a visibility for each light would be the real thing)
+    vec3 taken = vec3(0.0);
+    if (pc.lights > 0.0) {
+        const vec3 to = pc.light_at.xyz - p;
+        const float d = length(to), x = d * pc.light_at.w, nl = dot(n, to) / max(d, 1e-4);
+        if (nl > 0.0 && x < 1.0 && d > 0.08) {
+            const vec2 s = vec2(g) + pc.seed + vec2(5.0, 23.0);
+            const float a = 6.2831853 * noise(s), rr = 0.04 * sqrt(noise(s.yx + 3.0));   // (a small lamp: a soft edge)
+            const vec3 L = to / d, su = normalize(abs(L.y) < 0.99 ? cross(L, vec3(0.0, 1.0, 0.0)) : cross(L, vec3(1.0, 0.0, 0.0)));
+            const vec3 dir = normalize(to + (su * cos(a) + cross(L, su) * sin(a)) * rr);
+            rayQueryEXT q;
+            rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, 0.0, dir, max(d - 0.1, 0.01));
+            while (rayQueryProceedEXT(q))
+                if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
+            if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+                const float x2 = x * x, fade = (1.0 - x2 * x2) * (1.0 - x2 * x2), near = max(d - pc.light_colour.w, 0.05);
+                taken = pc.lights * pc.light_colour.rgb * (fade * nl / (near * near));
+            }
+        }
     }
     const float open = 1.0 - pc.ao * sum / float(max(pc.rays, 1));
     light /= float(max(pc.rays, 1));
     const vec3 c = seen * open;
-    // (how much of the light here is the sun's: not the cosine alone. With it a low sun's shadows on the ground were faint
-    // beside the game's own, still drawn for what the rays do not have: stripes of another darkness along a character's
-    // shadow. The game's shading keeps the sun strong at a slant: half the cosine and a half, squared, measured against
-    // its shadows at sunset and at noon; to nothing at the edge, where a facet's own neighbours shadow it)
-    const float slant = 0.5 * facing + 0.5;
-    const float sunlit = smoothstep(0.0, 0.15, facing) * slant * slant;
-    const vec3 lin = c * c / (1.0 + shade * sunlit * pc.sun_share);
+    const vec3 lin = c * c - min(albedo * taken, 0.9 * c * c);
     const vec3 lit = lin + pc.gi * albedo * light;
     if (pc.gi > 0.0) {   // (this surface's light for the frames to come; pixels of one cell write over each other: a mean of sorts)
         const ivec2 at = cell(p, n);
@@ -211,7 +210,7 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
     if (pc.mode == 5) shown = sqrt(light);
     if (pc.mode == 6) shown = sqrt(imageLoad(cache, cell(p, n)).rgb);
     if (pc.mode == 8) shown = mine.a > 0.5 ? sqrt(mine.rgb) : vec3(1.0, 0.0, 1.0) * 0.3;
-    if (pc.mode == 7) shown = 1.0 / (1.0 + shade * sunlit * pc.sun_share);
+    if (pc.mode == 7) shown = sqrt(taken);
     imageStore(color, g, vec4(shown, 1.0));
 }
 void main() {

@@ -6227,6 +6227,9 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         if ((no_mesh == 1 && d.mesh) || (no_mesh == 2 && !d.mesh)) return;
     }
     if (rt_on() && cp && cp->ready.load(std::memory_order_acquire) && at.n && at.color[0] && at.depth) rt_scene_draw(s, d, at, *cp);
+    // (miojo: a lit draw's lights and frame buffer, by their sizes: vk_rt.cpp rt_note_local_lights)
+    if (rt_on() && s.ssbo[1][1].size == 98368 && s.ubo[1][3].size == 16960 && at.n && at.depth)
+        rt_note_local_lights(s.ssbo[1][1].addr, s.ubo[1][3].addr);
     if (rt_on()) {   // (miojo: the sun's shadows into the game's shadow mask, between its last draw and the scene's lighting)
         if (at.n == 1 && !at.depth && at.color[0] && at.color_format[0] == VK_FORMAT_R8G8B8A8_UNORM && temporal_scene_size(at.width, at.height)) {
             rt_note_mask(at.color_view[0], at.width, at.height);

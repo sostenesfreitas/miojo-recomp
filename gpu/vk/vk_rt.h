@@ -47,6 +47,9 @@ void rt_note_draw(const RtDraw& d, bool shadow_pass = false);
 /// A scene draw's fragment uniform buffer 4, the game's lights: the sun's direction at 0 and its colour at 0x40 (read once a
 /// frame, and taken only when its direction is the shadow maps')
 void rt_note_lights(uint64_t address, uint64_t size);
+/// A lit draw's fragment storage buffer 1 (98368 bytes: the game's lights, 96 bytes each) and uniform buffer 3 (its
+/// exposure at 0x380), for the Light shadows row; once a frame
+void rt_note_local_lights(uint64_t lights, uint64_t frame_buffer);
 /// A draw into a depth-only target with the vertex stage's camera at `camera`: when that is one of the game's sun shadow
 /// maps (an orthographic camera), the sun's direction is taken from it and the draw's mesh (k, or null when the rays
 /// cannot have it) is an instance for the rays, in view or not. True: the Sun shadows row is on and the rays have this
