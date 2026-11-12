@@ -1230,10 +1230,20 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                 const float sun = (0.2126f * f[4] + 0.7152f * f[5] + 0.0722f * f[6]) / 3.14159265f;
                 if (sun > 1e-4f && sun < 1e4f) sky_level = sun / 3.0f;
                 else if (opts.pt) pc.to_sun[3] = 0.0f;
-                // (by the exposure, as the list's colours are: without it a lamp weighed a sixtieth of its light at
-                // night and a ninth in a cave, and lit no wall)
+                // (the sun's colour here is as the picture has it, the exposure in already: 0.98 over pi by day with an
+                // exposure of 0.001, read in the log. So not by the exposure again, as it was for a build: that weighed
+                // the lamps 64 times their light at night)
+                {   // (a line when the place's light changes much: what a cave gives for its sun, to set the sky by)
+                    static float told_sun = -1.0f, told_exposure = -1.0f;
+                    static int told = 0;
+                    const auto far_from = [](float a, float b) { return std::fabs(a - b) > 0.25f * std::max(std::fabs(a), std::fabs(b)); };
+                    if (opts.pt && told < 60 && (far_from(sun, told_sun) || far_from(r.lamps_exposure, told_exposure)))
+                        told++, told_sun = sun, told_exposure = r.lamps_exposure,
+                        logf("vk: rt: light f%llu: sun %.4g %.4g %.4g (over pi %.4g), exposure %.4g, sky kept %.4g, %d lamps", (unsigned long long)now,
+                             f[4], f[5], f[6], sun, r.lamps_exposure, sky_level, r.lamps_count);
+                }
                 if (sky_level > 0.0f && now - r.lamps_frame <= 2 && r.lamps_count > 0)
-                    pc.sky = sky_level * r.lamps_exposure, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;
+                    pc.sky = sky_level, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;
             }
         }
     }
