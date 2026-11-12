@@ -1633,6 +1633,15 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
             out[16] = f[16], out[17] = f[17], out[18] = f[18], out[19] = 0.0f;
         }
         flush_mapped_range(r.light_list.memory, at, kLights * 80);
+        if (getenv("RX_VK_RT_LIGHT_LOG") && now % 600 == 0)   // (a test: the lights taken)
+            for (size_t i = 0; i < found.size(); i++) {
+                const float* f = rec + found[i].second * 24;
+                uint32_t type;
+                std::memcpy(&type, f + 4, 4);
+                logf("vk: rt: light %zu type %u at %.2f %.2f %.2f reach %.2f near %.2f colour %.2f %.2f %.2f facing %.2f %.2f %.2f cone %.3f %.3f eye %.1f %.1f %.1f",
+                     i, type, f[12], f[13], f[14], 1.0f / f[11], f[25], f[8] * exposure, f[9] * exposure, f[10] * exposure, f[20], f[21], f[22], f[15], f[19],
+                     eye[0], eye[1], eye[2]);
+            }
         pc.light_count = (int32_t)found.size(), pc.light_list = r.light_list.address + at;
         pc.lights = found.empty() || !lights ? 0.0f : std::min((float)opts.lights / 100.0f, 1.0f);   // (the shadows' strength; the bounce reads the list too)
         static int told = 0;

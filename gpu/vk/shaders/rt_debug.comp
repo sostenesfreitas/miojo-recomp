@@ -272,13 +272,19 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
         const float fall = light_fall(o, p, n, to, d);
         if (!(fall > 1e-4)) continue;
         const vec2 s = vec2(g) + pc.seed + vec2(5.0, 23.0) + float(k) * vec2(13.0, 7.0);
-        const float a = 6.2831853 * noise(s), rr = 0.04 * sqrt(noise(s.yx + 3.0));   // (a small lamp: a soft edge)
+        // (a point light has a size, its radius in the game's own falloff: a fairy's is 2 units, about her whole reach. As
+        // a point she cast hard black shapes, a cave's wall's own bumps and a large shadow of Link high on the wall behind
+        // him, and from inside his hat, where she rests, a shadow over all she lit. So the ray aims somewhere within half
+        // her radius of her, another place each frame for the upscaler to average, and stops that far short: a wide soft
+        // shadow, and none from what is right beside her. A spot is a small lamp: a soft edge)
+        const float size = spot > 0.5 ? 0.04 : max(0.5 * colour.w, 0.04);
+        const float a = 6.2831853 * noise(s), rr = size * sqrt(noise(s.yx + 3.0));
         const vec3 L = to / d, su = normalize(abs(L.y) < 0.99 ? cross(L, vec3(0.0, 1.0, 0.0)) : cross(L, vec3(1.0, 0.0, 0.0)));
         const vec3 dir = normalize(to + (su * cos(a) + cross(L, su) * sin(a)) * rr);
         rayQueryEXT q;
         // (not up to the lamp itself: a lantern's light sits inside its housing, and stopped there the whole glow on the
-        // wall beside it went. Half a unit short for a spot, a tenth for a point light)
-        rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, 0.0, dir, max(d - (spot > 0.5 ? 0.5 : 0.1), 0.01));
+        // wall beside it went. Half a unit short for a spot)
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, 0.0, dir, max(d - (spot > 0.5 ? 0.5 : max(size, 0.1)), 0.01));
         while (rayQueryProceedEXT(q))
             if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
         if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) continue;
