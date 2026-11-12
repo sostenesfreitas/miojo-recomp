@@ -173,7 +173,9 @@ void main() {
             rayQueryInitializeEXT(q, tlas, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, pc.radius, dir, pc.far);
             while (rayQueryProceedEXT(q)) rayQueryConfirmIntersectionEXT(q);
             if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) {
-                open += 1.0;
+                // (with Path tracing a place with no sun has no sky either, Goron City's cave: a ray that leaves the
+                // scene there went through a wall the rays do not have, and brings nothing)
+                open += pc.physical > 0.5 && pc.to_sun.w <= 0.0 ? 0.0 : 1.0;
                 continue;
             }
             const float light = lightness(rayQueryGetIntersectionInstanceCustomIndexEXT(q, true));
@@ -201,7 +203,7 @@ void main() {
                     rayQueryInitializeEXT(q, tlas, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, o, 0.0, d, pc.far);
                     while (rayQueryProceedEXT(q)) rayQueryConfirmIntersectionEXT(q);
                     if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) {
-                        open += through;
+                        if (pc.to_sun.w > 0.0) open += through;
                         break;
                     }
                 }

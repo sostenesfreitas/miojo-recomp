@@ -131,6 +131,12 @@ struct Rt {
     std::unordered_map<uint64_t, uint64_t> two_sided;  // (a place drawn two-sided in the scene, and its frame)
     std::unordered_map<uint64_t, uint64_t> cut_seen;   // (a cutout's place, and the frame it was last marked)
     std::unordered_map<uint64_t, std::pair<Instance, uint64_t>> shadow_kept;   // (a shadow map's instance, and its frame)
+    struct Kept {
+        Instance in;
+        uint64_t last = 0;
+        uint32_t times = 0;
+    };
+    std::unordered_map<uint64_t, Kept> scene_kept;   // (the scene's own instances of late: rt_frame)
     std::vector<Dead> dead;
     Buf scratch, ring[kRing];
     Buf stage[kRing];   // (a frame's new meshes' vertices and indices, for their builds)
@@ -1228,8 +1234,15 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                 // place's stands, so its lamps still light its walls; and with Path tracing no sun is asked for there)
                 static float sky_level = 0.0f;
                 const float sun = (0.2126f * f[4] + 0.7152f * f[5] + 0.0722f * f[6]) / 3.14159265f;
+                // (Goron City's cave gives a sun of 0 0 0, read in the log: no sky level to weigh its lamps by, and they
+                // and the fairy's light went out of the traced ambient. A quarter stands there, about what the open
+                // air has: 0.19 at night in Kakariko, 0.33 by day on the trail.
+                // ponytail: a guess; the cave's own ambient level in the game's buffers for it)
                 if (sun > 1e-4f && sun < 1e4f) sky_level = sun / 3.0f;
-                else if (opts.pt) pc.to_sun[3] = 0.0f;
+                else {
+                    sky_level = 0.25f;
+                    if (opts.pt) pc.to_sun[3] = 0.0f;
+                }
                 // (the sun's colour here is as the picture has it, the exposure in already: 0.98 over pi by day with an
                 // exposure of 0.001, read in the log. So not by the exposure again, as it was for a build: that weighed
                 // the lamps 64 times their light at night)
@@ -1484,8 +1497,17 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         if (in.kind == 2) r.cut_seen[in.mark] = now;
         else if (in.kind == 3) r.two_sided[in.mark] = now;
         else if (in.kind == 1) r.shadow_kept[in.same] = {in, now};
-        else scene_places.insert(in.place);
+        else {
+            Rt::Kept& k = r.scene_kept[in.same];
+            k.in = in, k.times = k.last + 3 >= now ? k.times + 1 : 1, k.last = now;
+        }
     }
+    // (in Goron City the game draws two fifths of the scene every other frame, 101 instances then 179 in the log: a wall
+    // out of the rays one frame in two, light through it, a flash. An instance drawn at the same place three times stays
+    // three frames after its last draw; one that moves has another matrix each frame and goes at once, no trail)
+    for (auto it = r.scene_kept.begin(); it != r.scene_kept.end();)
+        if (now - it->second.last > (it->second.times >= 3 ? 3u : 0u)) it = r.scene_kept.erase(it);
+        else scene_places.insert(it->second.in.place), ++it;
     for (auto it = r.cut_seen.begin(); it != r.cut_seen.end();) it = now - it->second > 240 ? r.cut_seen.erase(it) : std::next(it);
     for (auto it = r.two_sided.begin(); it != r.two_sided.end();) it = now - it->second > 240 ? r.two_sided.erase(it) : std::next(it);
     for (auto it = r.shadow_kept.begin(); it != r.shadow_kept.end();) it = now - it->second.second > 8 ? r.shadow_kept.erase(it) : std::next(it);
@@ -1519,8 +1541,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         a.accelerationStructureReference = it->second.address;
         n++;
     };
-    for (const Instance& in : r.instances)
-        if (in.kind == 0) add(in);
+    for (const auto& kept : r.scene_kept) add(kept.second.in);
     // (the shadow maps': left out where the scene's own pass drew an object, whose mesh may be another level of detail)
     for (const auto& kept : r.shadow_kept)
         if (!scene_places.count(kept.second.first.place)) add(kept.second.first);
