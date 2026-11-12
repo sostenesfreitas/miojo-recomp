@@ -1162,7 +1162,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     // a flash of light over the whole picture)
     if (!r.top.as || !r.prev_depth || now - r.prev_frame > 2 || !make_atlas(r, cmd)) {
         static int told = 0;   // (a test: why a frame went to the game's own)
-        if (getenv("RX_VK_RT_AO_WHY") && told++ < 400)
+        if ((getenv("RX_VK_RT_AO_WHY") && told++ < 400) || (opts.pt && r.prev_frame && told++ < 40))   // (with Path tracing such a frame is a flash: the log says why)
             logf("vk: rt: ao-why f%llu top %d depth %d age %lld", (unsigned long long)now, r.top.as ? 1 : 0, r.prev_depth ? 1 : 0, (long long)(now - r.prev_frame));
         return false;
     }

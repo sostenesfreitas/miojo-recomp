@@ -222,6 +222,22 @@ void main() {
             open += light * lit;
         }
         wide = pc.physical > 0.5 ? min(open / 6.0, 1.0) : mix(1.0, max(open / 6.0, 0.2), pc.ambient);
+        // (the game scales its point lights by this image too, the fairy's, not only its ambient light (its spots it
+        // does not): an image near zero in a cave put the fairy's light out, and a frame of the game's own occlusion
+        // was a flash of it. So where a point light gives p times the sky's light the image is (wide + p) / (1 + p):
+        // the ambient scaled by wide and the light whole)
+        if (pc.physical > 0.5 && pc.sky > 0.0) {
+            float p = 0.0;
+            for (int k = 0; k < pc.light_count; k++) {
+                Floats lb = Floats(pc.light_list);
+                const uint o = uint(k) * 20u;
+                if (lb.f[o + 11u] > 0.5) continue;
+                const vec3 to = vec3(lb.f[o], lb.f[o + 1u], lb.f[o + 2u]) - from;
+                p += dot(vec3(lb.f[o + 4u], lb.f[o + 5u], lb.f[o + 6u]), vec3(0.2126, 0.7152, 0.0722)) * lamp_fall(o, from) *
+                     max(dot(n, to / max(length(to), 1e-4)), 0.0) / pc.sky;
+            }
+            wide = (wide + p) / (1.0 + p);
+        }
     }
     imageStore(occlusion, g, vec4(clamp((1.0 - pc.strength * sum / float(max(pc.rays, 1))) * wide, 0.0, 1.0)));
 }
