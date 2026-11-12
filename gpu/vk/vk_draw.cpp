@@ -5903,6 +5903,8 @@ static void dlss_trace_draw(const NvnState& s, const Program& p, const DrawArgs&
     for (int v = 0; v < 4 && n < 1800; v++)
         if (s.vbuf[v].address) n += snprintf(line + n, sizeof line - n, " vb%d=%llx/%llu/s%u", v, (unsigned long long)s.vbuf[v].address,
                                              (unsigned long long)s.vbuf[v].size, s.vstream[v].stride);
+    n += snprintf(line + n, sizeof line - n, " prim%d cull%d front%d blend%x dt%d dw%d", (int)d.prim, (int)s.poly.cull, (int)s.poly.front,
+                  (unsigned)s.color.blend_en, (int)s.ds.dt, (int)s.ds.dw);
     n += snprintf(line + n, sizeof line - n, " va");
     for (int i = 0; i < s.nvattr && i < 16 && n < 1800; i++) {
         const nvn_va_st a = *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]);
@@ -6057,7 +6059,23 @@ static void skin_check(const NvnState& s, const Program& p, const DrawArgs& d, c
 
 /// (miojo) An opaque, unskinned triangle-list draw into the scene, for the ray-tracing structures (vk_rt.cpp)
 static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& at, const Program& p) {
-    if (d.mesh || !d.indexed || d.indirect || d.instances != 1 || d.prim != NVN_DRAW_PRIMITIVE_TRIANGLES || !at.n || !at.color[0] ||
+    const bool strip = d.prim == NVN_DRAW_PRIMITIVE_TRIANGLE_STRIP;   // (the terrain's patches are strips)
+    // (a mesh-shader draw, the buildings and rocks: its packed mesh is the task stage's storage buffer 0, its level of
+    // detail a nibble of the object's word 23 picked by the camera's words 264 and 266, as the task stage reads them.
+    // vk_rt.cpp decode_meshlets unpacks it, and leaves out what is not that format)
+    if (d.mesh && !d.indirect && at.n && at.color[0] && at.depth && at.color_format[0] == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && s.ds.dt &&
+        s.ds.dw && !(s.color.blend_en & 1) && s.poly.cull != NVN_FACE_NONE && temporal_scene_size(at.width, at.height) &&
+        s.ssbo[6][0].addr && s.ubo[7][1].addr && s.ubo[7][1].size >= 0x60 && s.ubo[6][0].size >= 1068) {
+        uint32_t cam[3], word = 0;
+        if (!memory_read_as_submitted(s.ubo[6][0].addr + 1056, cam, sizeof cam) || !memory_read_as_submitted(s.ubo[7][1].addr + 92, &word, 4)) return;
+        RtDraw k;
+        k.meshlets = true, k.vbuf = s.ssbo[6][0].addr, k.vsize = s.ssbo[6][0].size;
+        k.lod = word >> (((cam[0] << 2) + ((cam[2] & 1) ? 16 : 0)) & 28) & 15;
+        k.object = s.ubo[7][1].addr, k.front_ccw = s.poly.front == NVN_FRONT_FACE_CCW;
+        rt_note_draw(k);
+        return;
+    }
+    if (d.mesh || !d.indexed || d.indirect || d.instances != 1 || (d.prim != NVN_DRAW_PRIMITIVE_TRIANGLES && !strip) || !at.n || !at.color[0] ||
         !at.depth || at.color_format[0] != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !s.ds.dt || !s.ds.dw || (s.color.blend_en & 1) ||
         s.nvattr < 1 || !temporal_scene_size(at.width, at.height))
         return;
@@ -6069,18 +6087,40 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
     // the rays have it as it hangs still, and where the cloth seen swung behind that copy every ray from it hit at once:
     // black patches over the banner, another shape each frame)
     if (s.poly.cull == NVN_FACE_NONE) return rt_note_two_sided(s.ubo[0][1].size >= 0x4c ? s.ubo[0][1].addr : 0);
+    uint32_t sampled = 0;   // (the textures its fragment stage samples: none in the plain depth pass)
+    for (const Stage& st : p.stages)
+        if (st.nvn_stage == 1)
+            for (const auto& td : st.info.texture_descriptors) sampled += td.count;
     const auto attr = [&](int i) { return *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]); };
     const nvn_va_st pos = attr(0);
-    if ((pos.fmt != NVN_FORMAT_RGB32F && pos.fmt != NVN_FORMAT_RGBA16F) || pos.stream != 0) return;
-    if (s.nvattr >= 7 && (attr(6).fmt == NVN_FORMAT_RGBA16UI || attr(6).fmt == NVN_FORMAT_RGBA8UI)) return;   // (skinned)
     RtDraw k;
+    // (a terrain patch, in the depth pass: two-float vertices, a vertex stage that samples one texture, the height map,
+    // and a fragment stage that samples none. Its buffers and the map's view for vk_rt.cpp)
+    // (by its program: 58ad8db34a72f9ec is the one whose vertex stage rt_terrain.comp follows. Another draws two-float
+    // strips too, 9be36373b6c47567, with other buffers: not read yet, its patches stay out of the rays)
+    if (p.key == 0x58ad8db34a72f9ecull && pos.fmt == NVN_FORMAT_RG32F && pos.stream == 0 && s.vstream[0].stride == 8) {
+        const Stage* vs = nullptr;
+        for (const Stage& st : p.stages)
+            if (st.nvn_stage == 0) vs = &st;
+        if (!vs || vs->info.texture_descriptors.size() != 1 || s.ubo[0][5].size < 112 || s.ubo[0][4].size < 24) return;
+        const uint32_t handle = handle_of(s, *vs, vs->info.texture_descriptors[0], 0);
+        Texture* map = nullptr;
+        k.heights = handle ? texture_view_of(handle, VK_IMAGE_VIEW_TYPE_2D, ViewUse::Sample, VK_FORMAT_UNDEFINED, &map) : VK_NULL_HANDLE;
+        if (!k.heights || !map) return;
+        k.terrain = true, k.heights_gen = texture_destroy_generation();
+        k.strip = strip, k.restart_on = s.restart, k.restart = s.restart_index;
+        k.patch = s.ubo[0][5].addr, k.ground = s.ubo[0][4].addr;
+    } else {
+        if (strip || (pos.fmt != NVN_FORMAT_RGB32F && pos.fmt != NVN_FORMAT_RGBA16F) || pos.stream != 0) return;
+        if (s.nvattr >= 7 && (attr(6).fmt == NVN_FORMAT_RGBA16UI || attr(6).fmt == NVN_FORMAT_RGBA8UI)) return;   // (skinned)
+    }
     k.vbuf = s.vbuf[0].address, k.vsize = s.vbuf[0].size, k.stride = s.vstream[0].stride, k.pos = pos.offset;
     k.half = pos.fmt == NVN_FORMAT_RGBA16F;
     k.itype = d.itype, k.count = d.count, k.base_vertex = d.base_vertex;
     k.ibuf = d.ibuf + (uint64_t)d.first * (d.itype == 0 ? 1 : d.itype == 1 ? 2 : 4);
     k.object = s.ubo[0][1].addr;
     k.front_ccw = s.poly.front == NVN_FRONT_FACE_CCW;
-    if (!k.vbuf || !k.ibuf || !k.object || s.ubo[0][1].size < 0x4c) return;
+    if (!k.vbuf || !k.ibuf || (!k.terrain && (!k.object || s.ubo[0][1].size < 0x4c))) return;
     for (int i = 0; i < 4; i++) k.tex[i] = s.tex[1][i];   // (the fragment stage's: the colour texture, vk_rt.cpp material_of)
     rt_note_lights(s.ubo[1][4].addr, s.ubo[1][4].size);
     rt_note_camera(s.ubo[0][0].addr, s.ubo[0][0].size);

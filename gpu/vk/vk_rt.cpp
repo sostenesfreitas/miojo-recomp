@@ -36,6 +36,8 @@
 #include "shaders/rt_ao_comp_spv.h"
 #include "shaders/rt_debug_comp_spv.h"
 #include "shaders/rt_sun_comp_spv.h"
+#include "shaders/rt_terrain_comp_spv.h"
+#include <bit>
 #include "vk_menu.h"
 #include "vk_paths.h"
 #include "vk_state.h"
@@ -201,6 +203,11 @@ struct Rt {
     std::atomic<uint64_t> mask_wanted{0}, camera_frame{0};
     float camera[16]{};
     bool camera_fine = false;
+    VkDescriptorSetLayout terrain_set = VK_NULL_HANDLE;   // (the terrain's patches placed and lifted: place_terrain)
+    VkPipelineLayout terrain_layout = VK_NULL_HANDLE;
+    VkPipeline terrain_pipe = VK_NULL_HANDLE;
+    VkSampler terrain_sampler = VK_NULL_HANDLE;
+    bool terrain_tried = false;
     VkDescriptorSetLayout sun_set = VK_NULL_HANDLE;
     VkPipelineLayout sun_layout = VK_NULL_HANDLE;
     VkPipeline sun_pipe = VK_NULL_HANDLE;
@@ -256,8 +263,14 @@ float half_float(uint16_t h) {
 uint64_t key_of(const RtDraw& d) {
     uint64_t h = 0xcbf29ce484222325ull;
     for (uint64_t v : {d.vbuf, d.ibuf, (uint64_t)d.count, (uint64_t)(uint32_t)d.base_vertex, (uint64_t)d.stride << 32 | d.pos,
-                       (uint64_t)d.itype << 1 | (d.half ? 1 : 0)})
+                       (uint64_t)d.itype << 1 | (d.half ? 1 : 0) | (d.strip ? 0x100 : 0) | (d.meshlets ? 0x200 | (uint64_t)d.lod << 16 : 0)})
         h = (h ^ v) * 0x100000001b3ull, h ^= h >> 29;
+    if (d.terrain)   // (every patch draws the same grid: a patch is its grid and where its buffers put it)
+        for (float f : d.tp) {
+            uint32_t bits;
+            std::memcpy(&bits, &f, 4);
+            h = (h ^ bits) * 0x100000001b3ull, h ^= h >> 29;
+        }
     return h;
 }
 
@@ -278,6 +291,57 @@ bool make_as(Rt& r, VkAccelerationStructureTypeKHR type, VkAccelerationStructure
     ai.accelerationStructure = out.as;
     out.address = r.address(dev.device, &ai);
     *scratch = si.buildScratchSize;
+    return true;
+}
+
+/// A terrain patch's vertices, staged as (x, y, 0), placed and lifted where they lie (rt_terrain.comp): false when the pass
+/// cannot be made
+bool place_terrain(Rt& r, VkCommandBuffer cmd, const RtDraw& d, uint64_t address, uint32_t count) {
+    if (!r.terrain_pipe) {
+        if (r.terrain_tried) return false;
+        r.terrain_tried = true;
+        VkSamplerCreateInfo sc{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        sc.magFilter = sc.minFilter = VK_FILTER_LINEAR;
+        sc.addressModeU = sc.addressModeV = sc.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        const VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, li.bindingCount = 1, li.pBindings = &b;
+        const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 56};
+        VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pi.setLayoutCount = 1, pi.pSetLayouts = &r.terrain_set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
+        VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        mi.codeSize = sizeof RT_TERRAIN_COMP_SPV, mi.pCode = RT_TERRAIN_COMP_SPV;
+        VkShaderModule m{};
+        if (vkCreateSampler(dev.device, &sc, nullptr, &r.terrain_sampler) != VK_SUCCESS ||
+            vkCreateDescriptorSetLayout(dev.device, &li, nullptr, &r.terrain_set) != VK_SUCCESS ||
+            vkCreatePipelineLayout(dev.device, &pi, nullptr, &r.terrain_layout) != VK_SUCCESS ||
+            vkCreateShaderModule(dev.device, &mi, nullptr, &m) != VK_SUCCESS)
+            return logf("vk: rt: the terrain's pass was not made: the ground is not in the rays"), false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", nullptr};
+        ci.layout = r.terrain_layout;
+        if (vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &ci, nullptr, &r.terrain_pipe) != VK_SUCCESS) r.terrain_pipe = VK_NULL_HANDLE;
+        vkDestroyShaderModule(dev.device, m, nullptr);
+        if (!r.terrain_pipe) return logf("vk: rt: the terrain's pipeline was not made: the ground is not in the rays"), false;
+        logf("vk: rt: the terrain's patches are in the rays (their heights from the game's height map)");
+    }
+    struct {
+        uint64_t vertices;
+        uint32_t count;
+        float tp[10];
+    } pc{};
+    static_assert(sizeof pc == 56, "rt_terrain.comp's push constants");
+    pc.vertices = address, pc.count = count;
+    std::memcpy(pc.tp, d.tp, sizeof pc.tp);
+    full_barrier(cmd, "barrier (rt terrain)");
+    const VkDescriptorImageInfo info{r.terrain_sampler, d.heights, VK_IMAGE_LAYOUT_GENERAL};
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstBinding = 0, w.descriptorCount = 1, w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, w.pImageInfo = &info;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r.terrain_pipe);
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r.terrain_layout, 0, 1, &w);
+    vkCmdPushConstants(cmd, r.terrain_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    vkCmdDispatch(cmd, (count + 63) / 64, 1, 1);
+    full_barrier(cmd, "barrier (rt terrain)");
     return true;
 }
 
@@ -307,31 +371,113 @@ void block_leave(Rt& r, int i) {
     if (--b.live <= 0 && i != r.block_now) later(r, b.buf), b = {};
 }
 
+/// A mesh-shader draw's mesh unpacked, as the game's mesh stage does it (program 3f50c174afd1945e's, read from its
+/// SPIR-V). The mesh, from its first byte:
+///   0   three floats, the origin; 12 a float, the step
+///   16  flags: 4 + the bits set in 0xc00 and 0x1f000 is a meshlet record's size in 8-byte units
+///   20  where each level of detail's meshlets end, a word each (level k: from word 16 + 4k, or 0 for k = 0, to 20 + 4k)
+///   84  the meshlet records, then the bit streams they point into (a bit's address counted from 84 too)
+/// A record: words 0, 1 three 21-bit bases (x, y, z); word 4 vertices << 24 | triangles << 16; word 5 >> 4 its stream's
+/// byte; word 6 a vertex's bits, and at 16, 21, 26 the bits of its x, y, z. A vertex is origin + step * (base + its bits);
+/// the triangles follow the vertices, three indices each of as many bits as the last vertex's number takes.
+/// False when anything lies outside the mesh: not this format
+bool decode_meshlets(const RtDraw& d, std::vector<float>& pos, std::vector<uint32_t>& idx) {
+    if (d.vsize < 116 || d.vsize > (64u << 20) || d.lod > 15) return false;
+    const size_t words = (size_t)(d.vsize / 4);
+    std::vector<uint32_t> w(words + 2);
+    if (!memory_read_as_submitted(d.vbuf, w.data(), words * 4)) return false;
+    float org[4];
+    std::memcpy(org, w.data(), 16);
+    for (float f : org)
+        if (!(std::fabs(f) < 1e6f)) return false;
+    const uint32_t per = ((uint32_t)std::popcount(w[4] & 0xc00u) + 4 + (uint32_t)std::popcount(w[4] & 0x1f000u)) * 2;
+    const uint32_t first = d.lod ? w[4 + d.lod] : 0, end = w[5 + d.lod];
+    if (end <= first || end - first > 4096 || 21 + (uint64_t)end * per > words) return false;
+    bool ok = true;
+    const auto bits = [&](uint64_t at, uint32_t n) -> uint32_t {
+        const uint64_t k = 21 + (at >> 5);
+        if (k >= words) return ok = false, 0;
+        return (uint32_t)((w[k] | (uint64_t)w[k + 1] << 32) >> (at & 31)) & (n >= 32 ? ~0u : (1u << n) - 1);
+    };
+    for (uint32_t m = first; m < end && ok; m++) {
+        const uint32_t* q = &w[21 + (size_t)m * per];
+        const uint32_t nv = q[4] >> 24, nt = q[4] >> 16 & 255, each = q[6] & 1023;
+        const uint32_t nx = q[6] >> 16 & 31, ny = q[6] >> 21 & 31, nz = q[6] >> 26 & 31;
+        if (nv < 3 || !nt) continue;
+        const uint32_t bx = q[0] & 0x1fffff, by = (uint32_t)((q[0] | (uint64_t)q[1] << 32) >> 21) & 0x1fffff, bz = q[1] >> 10 & 0x1fffff;
+        const uint64_t data = (uint64_t)(q[5] >> 4) * 8;
+        const uint32_t base = (uint32_t)(pos.size() / 3), ib = 32 - (uint32_t)std::countl_zero(nv - 1);
+        for (uint32_t i = 0; i < nv; i++) {
+            const uint64_t at = data + (uint64_t)each * i;
+            pos.push_back(org[0] + org[3] * (float)(bx + bits(at, nx)));
+            pos.push_back(org[1] + org[3] * (float)(by + bits(at + nx, ny)));
+            pos.push_back(org[2] + org[3] * (float)(bz + bits(at + nx + ny, nz)));
+        }
+        const uint64_t tris = data + (uint64_t)each * nv;
+        for (uint32_t t = 0; t < nt; t++) {
+            uint32_t v[3];
+            for (uint32_t c = 0; c < 3; c++) v[c] = bits(tris + (uint64_t)(t * 3 + c) * ib, ib);
+            if (v[0] >= nv || v[1] >= nv || v[2] >= nv) return false;
+            idx.insert(idx.end(), {base + v[0], base + v[1], base + v[2]});
+        }
+    }
+    return ok && idx.size() >= 3 && idx.size() <= 6000000;
+}
+
 /// A mesh read from guest memory and built: 1; 0 when it cannot be (unreadable, out of its buffer, too large); 2 when
 /// this frame's stage has no room for it (the next frame's)
 int build_mesh(Rt& r, VkCommandBuffer cmd, const RtDraw& d, Mesh& out) {
-    const uint32_t isz = d.itype == 0 ? 1 : d.itype == 1 ? 2 : 4, n = (uint32_t)d.count;
-    if (d.count < 3 || d.count % 3 || d.count > 6000000 || !d.stride) return false;
+    const uint32_t isz = d.itype == 0 ? 1 : d.itype == 1 ? 2 : 4;
+    uint32_t n = (uint32_t)d.count;
+    if (!d.meshlets && (d.count < 3 || (!d.strip && d.count % 3) || d.count > 6000000 || !d.stride)) return false;
     auto tp = std::chrono::steady_clock::now();
     const auto lap = [&](int k) {
         const auto t = std::chrono::steady_clock::now();
         r.phase_ns[k].fetch_add((t - tp).count(), std::memory_order_relaxed), tp = t;
     };
-    std::vector<uint8_t> raw((size_t)n * isz);
-    if (!memory_read_as_submitted(d.ibuf, raw.data(), raw.size())) return false;
-    std::vector<uint32_t> idx(n);
-    int64_t lo = INT64_MAX, hi = INT64_MIN;
-    for (uint32_t i = 0; i < n; i++) {
+    std::vector<float> made;
+    std::vector<uint8_t> raw((size_t)(d.meshlets ? 0 : n) * isz);
+    std::vector<uint32_t> idx(d.meshlets ? 0 : n);
+    if (d.meshlets) {
+        if (!decode_meshlets(d, made, idx)) return false;
+        n = (uint32_t)idx.size();
+    } else if (!memory_read_as_submitted(d.ibuf, raw.data(), raw.size())) {
+        return false;
+    }
+    for (uint32_t i = 0; i < n && !d.meshlets; i++) {
         uint32_t v = 0;
         std::memcpy(&v, raw.data() + (size_t)i * isz, isz);
-        const int64_t at = (int64_t)v + d.base_vertex;
-        lo = std::min(lo, at), hi = std::max(hi, at);
         idx[i] = v;
     }
-    const uint64_t nv = (uint64_t)(hi - lo + 1), psz = d.half ? 6 : 12;
-    if (lo < 0 || nv > 4000000 || (uint64_t)hi * d.stride + d.pos + psz > d.vsize) return false;
-    raw.resize((size_t)(nv * d.stride));
-    if (!memory_read_as_submitted(d.vbuf + (uint64_t)lo * d.stride, raw.data(), (nv - 1) * d.stride + d.pos + psz)) return false;
+    if (d.strip) {   // (a strip as the triangles it draws: every third index on, turned on the odd ones; a restart begins anew)
+        std::vector<uint32_t> list;
+        list.reserve((size_t)n * 3);
+        uint32_t run = 0, a = 0, b = 0;
+        for (uint32_t v : idx) {
+            if (d.restart_on && v == d.restart) { run = 0; continue; }
+            if (run >= 2 && a != b && b != v && a != v) {
+                if (run & 1) list.insert(list.end(), {b, a, v});
+                else list.insert(list.end(), {a, b, v});
+            }
+            a = b, b = v, run++;
+        }
+        idx.swap(list), n = (uint32_t)idx.size();
+        if (n < 3) return false;
+    }
+    int64_t lo = INT64_MAX, hi = INT64_MIN;
+    for (uint32_t v : idx) {
+        const int64_t at = (int64_t)v + d.base_vertex;
+        lo = std::min(lo, at), hi = std::max(hi, at);
+    }
+    const uint64_t nv = d.meshlets ? made.size() / 3 : (uint64_t)(hi - lo + 1), psz = d.terrain ? 8 : d.half ? 6 : 12;
+    if (d.terrain && d.heights_gen != texture_destroy_generation()) return 3;   // (its height map's view may be gone: noted again)
+    if (d.meshlets) {
+        lo = 0;
+    } else {
+        if (lo < 0 || nv > 4000000 || (uint64_t)hi * d.stride + d.pos + psz > d.vsize) return false;
+        raw.resize((size_t)(nv * d.stride));
+        if (!memory_read_as_submitted(d.vbuf + (uint64_t)lo * d.stride, raw.data(), (nv - 1) * d.stride + d.pos + psz)) return false;
+    }
     lap(0);
     Buf in;
     const uint64_t vbytes = nv * 12, bytes = vbytes + (uint64_t)n * 4;
@@ -349,11 +495,14 @@ int build_mesh(Rt& r, VkCommandBuffer cmd, const RtDraw& d, Mesh& out) {
     }
     // (made here and copied over: the buffer is the GPU's memory, written through and never read back. Reading each
     // vertex back from it to check it was 2.4 ms a frame of builds, the stutter of walking)
-    std::vector<float> made(nv * 3);
+    if (!d.meshlets) made.resize(nv * 3);
     float* p = made.data();
-    for (uint64_t v = 0; v < nv; v++, p += 3) {
+    for (uint64_t v = 0; v < nv && !d.meshlets; v++, p += 3) {
         const uint8_t* at = raw.data() + v * d.stride + d.pos;
-        if (d.half) {
+        if (d.terrain) {   // (two floats, the grid's: placed and lifted on the GPU, place_terrain)
+            std::memcpy(p, at, 8);
+            p[2] = 0.0f;
+        } else if (d.half) {
             uint16_t h[3];
             std::memcpy(h, at, 6);
             p[0] = half_float(h[0]), p[1] = half_float(h[1]), p[2] = half_float(h[2]);
@@ -367,6 +516,10 @@ int build_mesh(Rt& r, VkCommandBuffer cmd, const RtDraw& d, Mesh& out) {
     std::memcpy((uint8_t*)in.map + vbytes, idx.data(), (size_t)n * 4);
     if (own) flush_mapped(in.memory, bytes);
     else flush_mapped_range(in.memory, staged, bytes);
+    if (d.terrain && !place_terrain(r, cmd, d, in.address, (uint32_t)nv)) {
+        if (own) later(r, in);
+        return 0;
+    }
 
     lap(1);
     VkAccelerationStructureGeometryKHR g{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR};
@@ -832,12 +985,22 @@ static uint32_t material_of(Rt& r, const RtDraw& d) {
     return 1;
 }
 
-void rt_note_draw(const RtDraw& d, bool shadow_pass) {
+void rt_note_draw(const RtDraw& given, bool shadow_pass) {
     Rt& r = rt();
     if (!r.ok) return;
     Timed timed{r.note_ns};
-    float o[19];   // (the world matrix, 3 x 4 row major, and the origin added to it at 0x40)
-    if (!memory_read_as_submitted(d.object, o, sizeof o)) return;
+    RtDraw d = given;
+    float o[19] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};   // (the world matrix, 3 x 4 row major, and the origin added to it at 0x40)
+    if (d.terrain) {   // (in the world already: where its patch's buffer and the terrain's put it, rt_terrain.comp)
+        float c8[28], c7[6];
+        if (!memory_read_as_submitted(d.patch, c8, sizeof c8) || !memory_read_as_submitted(d.ground, c7, sizeof c7)) return;
+        const float tp[10] = {c8[0], c8[1], c8[2], c8[3], c8[16], c8[24], c8[26], c8[27], c7[1], c7[5]};
+        for (float f : tp)
+            if (!(std::fabs(f) < 1e6f)) return;
+        std::memcpy(d.tp, tp, sizeof d.tp);
+    } else if (!memory_read_as_submitted(d.object, o, sizeof o)) {
+        return;
+    }
     Instance in;
     in.key = key_of(d);
     std::memcpy(in.m, o, sizeof in.m);
@@ -849,7 +1012,10 @@ void rt_note_draw(const RtDraw& d, bool shadow_pass) {
         std::memcpy(&bits, &v, 4);
         place = (place ^ bits) * 0x100000001b3ull;
     }
-    in.place = place, in.same = (place ^ in.key) * 0x100000001b3ull, in.kind = shadow_pass ? 1 : 0;
+    // (every terrain patch has the same matrix, none: its place is the patch itself. And its number among the frame's
+    // instances too: place ^ key was the bare matrix again for each of them, one number, and one patch a frame got in)
+    if (d.terrain) place = (place ^ in.key) * 0x9e3779b97f4a7c15ull;
+    in.place = place, in.same = d.terrain ? place : (place ^ in.key) * 0x100000001b3ull, in.kind = shadow_pass ? 1 : 0;
     {   // (a mirroring matrix turns the winding around on the screen, and the game sets the draw's front face for that:
         // the rays tell a front in the mesh's own space, so the mirroring is taken back out)
         const float* m = in.m;
@@ -1207,6 +1373,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         Mesh m;
         const int made = build_mesh(r, cmd, it->second.d, m);
         if (made == 2) break;   // (the stage is full: the rest next frame)
+        if (made == 3) { it = r.pending.erase(it); continue; }   // (not now: noted again by its next draw)
         if (made) {
             m.used = now;
             budget -= std::min(budget, m.triangles);
@@ -1267,6 +1434,10 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         // (two-sided: told to the rays by a bit of its number. rt_ao.comp starts a ray in front of such an instance when
         // the surface seen lies just behind where the rays have it: a banner swung by the wind in its vertex shader)
         if (r.two_sided.count(in.place)) a.instanceCustomIndex |= 0x100000;
+        // (both faces stop a ray where the front is not known for sure: an instance drawn two-sided, and one that comes
+        // from a shadow map's pass, whose front-face state is the shadow pass's own. One-sided there, a building's wall in
+        // Kakariko let every ray through: the check view showed it missing)
+        if (r.two_sided.count(in.place) || in.kind == 1) a.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         a.accelerationStructureReference = it->second.address;
         n++;
     };

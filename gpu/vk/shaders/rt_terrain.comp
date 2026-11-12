@@ -1,0 +1,32 @@
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+// (miojo) The terrain's patches for the rays (vk_rt.cpp build_mesh). OoT draws its ground as grids of two-float vertices:
+// the vertex stage (program 58ad8db34a72f9ec's, the depth pass) places a vertex by its patch's buffer and takes its
+// height from a height map,
+//   world x = x * c8[0] + c8[2],  world z = y * c8[1] + c8[3]
+//   world y = heights(c8[16] / 2 + x * c8[24] + c8[26], c8[16] / 2 + y * c8[24] + c8[27]) * c7[1] + c7[5]
+// which this pass does over the vertices as vk_rt.cpp staged them (x, y, 0 each), in place: positions for the structure's
+// build. The shader also slides a vertex towards the coarser grid with distance; that is left out, the rays have each patch
+// at its full detail.
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D heights;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Floats { float f[]; };
+layout(push_constant) uniform P {
+    uint64_t vertices;
+    uint count;
+    float sx, sz, ox, oz;   // (c8[0], c8[1], c8[2], c8[3])
+    float texel;            // (c8[16])
+    float us, uo, vo;       // (c8[24], c8[26], c8[27])
+    float hs, ho;           // (c7[1], c7[5])
+} pc;
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    Floats v = Floats(pc.vertices);
+    const float x = v.f[i * 3u], y = v.f[i * 3u + 1u];
+    const float h = textureLod(heights, vec2(pc.texel * 0.5 + x * pc.us + pc.uo, pc.texel * 0.5 + y * pc.us + pc.vo), 0.0).x;
+    v.f[i * 3u] = x * pc.sx + pc.ox;
+    v.f[i * 3u + 1u] = h * pc.hs + pc.ho;
+    v.f[i * 3u + 2u] = y * pc.sz + pc.oz;
+}

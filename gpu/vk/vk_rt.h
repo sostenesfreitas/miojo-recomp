@@ -25,6 +25,21 @@ struct RtDraw {
     uint64_t ibuf = 0;              // (the first index's address)
     int itype = 0, count = 0, base_vertex = 0;
     uint64_t object = 0;
+    // (a terrain patch: a grid of two-float vertices its vertex stage places and lifts by a height map, rt_terrain.comp.
+    // patch and ground: the vertex stage's uniform buffers 5 and 4, the patch's own and the terrain's; heights: the map's
+    // view, good while no texture was destroyed since heights_gen. tp: what rt_note_draw reads of the two buffers)
+    bool terrain = false;
+    bool strip = false;             // (a triangle strip, as the terrain's patches are drawn; restart: the index that ends a run, when on)
+    bool restart_on = false;
+    uint32_t restart = 0;
+    uint64_t patch = 0, ground = 0;
+    VkImageView heights = VK_NULL_HANDLE;
+    uint64_t heights_gen = 0;
+    float tp[10]{};
+    // (a mesh-shader draw's mesh, as OoT packs its buildings and rocks: vbuf / vsize the packed mesh (the task stage's
+    // storage buffer 0), lod the level the task stage picks; vk_rt.cpp decode_meshlets)
+    bool meshlets = false;
+    uint32_t lod = 0;
     bool front_ccw = false;         // (the draw's front face: the rays pass a triangle's back)
     uint64_t tex[4]{};              // (the fragment stage's first texture handles: the colour texture is among them)
 };
