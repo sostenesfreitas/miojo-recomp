@@ -1137,9 +1137,17 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     if (off) return false;
     std::lock_guard lk(r.mu);
     const uint64_t now = texture_frame_no();
-    // (the frame before's scene: its structure, camera and depth. Its depth's view is the upscaler's, good while no texture
-    // was destroyed since)
-    if (!r.top.as || !r.prev_depth || now - r.prev_frame > 2 || r.prev_gen != texture_destroy_generation()) return false;
+    // (the frame before's scene: its structure, camera and depth. Its depth's view is the upscaler's own copy, which a
+    // game texture's end does not touch and which is let go only some frames after its last use (vk_temporal.cpp
+    // drop_image). This used to give the frame to the game's own occlusion whenever any texture had been destroyed since:
+    // walking, the game lets textures go about every 20 frames, and each time one frame had the game's lighter occlusion,
+    // a flash of light over the whole picture)
+    if (!r.top.as || !r.prev_depth || now - r.prev_frame > 2) {
+        static int told = 0;   // (a test: why a frame went to the game's own)
+        if (getenv("RX_VK_RT_AO_WHY") && told++ < 400)
+            logf("vk: rt: ao-why f%llu top %d depth %d age %lld", (unsigned long long)now, r.top.as ? 1 : 0, r.prev_depth ? 1 : 0, (long long)(now - r.prev_frame));
+        return false;
+    }
     if (!r.ao_pipe) {
         if (r.ao_tried) return false;
         r.ao_tried = true;
@@ -1483,6 +1491,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         // meshes each moment (levels of detail), and going back to the game's occlusion for them, darker in every crease,
         // was shadows that went dark while moving and came back when standing)
         const bool fine = n > 0 && missing <= n && dlss_math::reprojection(view_proj, one, r.prev_inv);
+        if (!fine && getenv("RX_VK_RT_AO_WHY")) logf("vk: rt: ao-why f%llu not fine: n %u missing %u", (unsigned long long)now, n, missing);
         // (the upscaler's copy, not the game's depth target: the game clears that at the start of the next frame, some
         // frames before its occlusion pass and some after, and read cleared it was all sky: a frame with no occlusion at
         // all between frames with it, every shadow of the occlusion flickering)
