@@ -1242,6 +1242,15 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                         logf("vk: rt: light f%llu: sun %.4g %.4g %.4g (over pi %.4g), exposure %.4g, sky kept %.4g, %d lamps", (unsigned long long)now,
                              f[4], f[5], f[6], sun, r.lamps_exposure, sky_level, r.lamps_count);
                 }
+                {   // (and a line for a frame the lamps' list is not there for, after one it was: a frame with no lamp)
+                    static bool had = false;
+                    static int told_none = 0;
+                    const bool has = now - r.lamps_frame <= 2 && r.lamps_count > 0;
+                    if (opts.pt && had != has && told_none++ < 60)
+                        logf("vk: rt: lamps f%llu: %s (the list's frame %llu, %d in it)", (unsigned long long)now, has ? "back" : "none",
+                             (unsigned long long)r.lamps_frame, r.lamps_count);
+                    had = has;
+                }
                 if (sky_level > 0.0f && now - r.lamps_frame <= 2 && r.lamps_count > 0)
                     pc.sky = sky_level, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;
             }
@@ -1552,6 +1561,13 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         // meshes each moment (levels of detail), and going back to the game's occlusion for them, darker in every crease,
         // was shadows that went dark while moving and came back when standing)
         const bool fine = n > 0 && missing <= n && dlss_math::reprojection(view_proj, one, r.prev_inv);
+        {   // (a line when the scene's instances change by a fifth in one frame: a frame with a wall out is a flash of sky)
+            static uint32_t last_n = 0;
+            static int told_n = 0;
+            if (opts.pt && told_n < 80 && last_n > 20 && (n * 10 < last_n * 8 || n * 8 > last_n * 10))
+                told_n++, logf("vk: rt: instances f%llu: %u after %u, missing %u", (unsigned long long)now, n, last_n, missing);
+            last_n = n;
+        }
         if (!fine && getenv("RX_VK_RT_AO_WHY")) logf("vk: rt: ao-why f%llu not fine: n %u missing %u", (unsigned long long)now, n, missing);
         // (the upscaler's copy, not the game's depth target: the game clears that at the start of the next frame, some
         // frames before its occlusion pass and some after, and read cleared it was all sky: a frame with no occlusion at
@@ -1677,6 +1693,23 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
             out[12] = f[15], out[13] = f[19], out[14] = std::clamp(f[23], 0.0f, 64.0f), out[15] = 0.0f;
             out[16] = f[16], out[17] = f[17], out[18] = f[18], out[19] = 0.0f;
         }
+        // (walking, the game's table reads empty for some frames, nine in a row seen, and is back with its eight lamps:
+        // those frames every lamp's shadow went and the traced ambient lost its lamps, a flash. The last list with a
+        // lamp in it stands for half a second of such frames.
+        // ponytail: why it reads empty is not known (the read, or another view's table of the same size); a place
+        // whose lamps do all go out keeps them that half second)
+        static float held[kLights * 20];
+        static size_t held_count = 0;
+        static uint64_t held_frame = 0;
+        size_t count = found.size();
+        if (count) {
+            std::memcpy(held, (uint8_t*)r.light_list.map + at, sizeof held), held_count = count, held_frame = now;
+        } else if (held_count && now - held_frame <= 30) {
+            std::memcpy((uint8_t*)r.light_list.map + at, held, sizeof held), count = held_count;
+            static int told_held = 0;
+            if (told_held++ < 20) logf("vk: rt: lamps f%llu: the table read empty, the list of f%llu stands (%zu lamps)", (unsigned long long)now,
+                                       (unsigned long long)held_frame, held_count);
+        }
         flush_mapped_range(r.light_list.memory, at, kLights * 80);
         if (getenv("RX_VK_RT_LIGHT_LOG") && now % 600 == 0)   // (a test: the lights taken)
             for (size_t i = 0; i < found.size(); i++) {
@@ -1687,9 +1720,9 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
                      i, type, f[12], f[13], f[14], 1.0f / f[11], f[25], f[8] * exposure, f[9] * exposure, f[10] * exposure, f[20], f[21], f[22], f[15], f[19],
                      eye[0], eye[1], eye[2]);
             }
-        pc.light_count = (int32_t)found.size(), pc.light_list = r.light_list.address + at;
+        pc.light_count = (int32_t)count, pc.light_list = r.light_list.address + at;
         r.lamps_exposure = exposure, r.lamps_at = pc.light_list, r.lamps_count = pc.light_count, r.lamps_frame = now;
-        pc.lights = found.empty() || !lights ? 0.0f : std::min((float)opts.lights / 100.0f, 1.0f);   // (the shadows' strength; the bounce reads the list too)
+        pc.lights = !count || !lights ? 0.0f : std::min((float)opts.lights / 100.0f, 1.0f);   // (the shadows' strength; the bounce reads the list too)
         static int told = 0;
         if (!found.empty() && told < 4 && now % 600 == 0) {
             const float* f = rec + found[0].second * 24;
