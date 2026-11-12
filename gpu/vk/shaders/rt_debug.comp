@@ -53,11 +53,14 @@ layout(push_constant, row_major) uniform P {
     float gi;       // (the bounce's strength, 0 to 1)
     float reach;    // (how far a ray looks for it)
     float skin;     // (a character's own surface nearer than this does not occlude it: the layers of a face)
-    float lights;   // (the local light's shadow's strength, 0 to 1)
-    vec4 light_at;  // (the nearest point light: where it is, and one over how far it reaches)
+    float lights;   // (the local lights' shadows' strength, 0 to 1)
+    int light_count;
+    uint64_t light_list;   // (the lights nearest the camera, 20 floats each: where it is, one over how far it reaches; its
+                           // colour as the picture has it, the game's exposure in, and its near distance; a spot's
+                           // direction, then 1 for a spot; its cone's inner and outer cosines and power; the falloff's
+                           // constant, linear and square terms)
     uint64_t skin_indices;   // (the characters' structure's indices and smooth normals, 0 for none this frame)
     uint64_t skin_normals;
-    vec4 light_colour;   // (its colour as the picture has it, the game's exposure in; w: its own radius)
 } pc;
 vec3 world(vec2 ndc, float z) {
     const vec4 p = pc.inv * vec4(ndc, z, 1.0);
@@ -169,30 +172,50 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
             }
         }
     }
-    // (the local light's shadow, the Light shadows row: the game lights by its point lights (a fairy, a torch) with no
-    // shadow at all. A ray from the surface to the nearest one; where it is stopped, what that light gave this pixel is
-    // taken back out: the light's colour by the game's own falloff (rt as its shader has it: over the distance squared,
-    // faded to nothing at its reach) and the cosine, through the albedo, never more than nine tenths of what is there.
-    // ponytail: one light, the nearest to the camera, and the albedo is the bounce's guess: the shadow's darkness is an
-    // estimate. The game's lighting shaders taking a visibility for each light would be the real thing)
+    // (the local lights' shadows, the Light shadows row: the game lights by its lamps (a village's lanterns are spot
+    // lights, a fairy a point light) with no shadow at all. A ray from the surface to each of the nearest ones that
+    // reaches it; where it is stopped, what that light gave this pixel is taken back out: the light's colour by the
+    // game's own falloff, as its lighting shader has it, and the cosine, through the albedo, never more than nine tenths
+    // of what is there. The falloff: faded to nothing at its reach, (1 - (d / reach)^4)^2; a spot over its quadratic in
+    // the distance, inside its cone ((cos - outer) / (inner - outer))^power, and faded in over its near distance
+    // (x^6 (7 - 6x)); a point light over 1 + the square of the distance past its radius.
+    // ponytail: the albedo is the bounce's guess, so the shadow's darkness is an estimate. The game's lighting shaders
+    // taking a visibility for each light would be the real thing)
     vec3 taken = vec3(0.0);
-    if (pc.lights > 0.0) {
-        const vec3 to = pc.light_at.xyz - p;
-        const float d = length(to), x = d * pc.light_at.w, nl = dot(n, to) / max(d, 1e-4);
-        if (nl > 0.0 && x < 1.0 && d > 0.08) {
-            const vec2 s = vec2(g) + pc.seed + vec2(5.0, 23.0);
-            const float a = 6.2831853 * noise(s), rr = 0.04 * sqrt(noise(s.yx + 3.0));   // (a small lamp: a soft edge)
-            const vec3 L = to / d, su = normalize(abs(L.y) < 0.99 ? cross(L, vec3(0.0, 1.0, 0.0)) : cross(L, vec3(1.0, 0.0, 0.0)));
-            const vec3 dir = normalize(to + (su * cos(a) + cross(L, su) * sin(a)) * rr);
-            rayQueryEXT q;
-            rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, 0.0, dir, max(d - 0.1, 0.01));
-            while (rayQueryProceedEXT(q))
-                if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
-            if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-                const float x2 = x * x, fade = (1.0 - x2 * x2) * (1.0 - x2 * x2), near = max(d - pc.light_colour.w, 0.05);
-                taken = pc.lights * pc.light_colour.rgb * (fade * nl / (near * near));
-            }
+    for (int k = 0; k < pc.light_count && pc.lights > 0.0; k++) {
+        Floats lb = Floats(pc.light_list);
+        const uint o = uint(k) * 20u;
+        const vec4 at = vec4(lb.f[o], lb.f[o + 1u], lb.f[o + 2u], lb.f[o + 3u]);
+        const vec4 colour = vec4(lb.f[o + 4u], lb.f[o + 5u], lb.f[o + 6u], lb.f[o + 7u]);
+        const vec4 facing = vec4(lb.f[o + 8u], lb.f[o + 9u], lb.f[o + 10u], lb.f[o + 11u]);
+        const vec3 to = at.xyz - p;
+        const float d = length(to), x = d * at.w, nl = dot(n, to) / max(d, 1e-4);
+        if (!(nl > 0.0 && x < 1.0 && d > 0.08)) continue;
+        const float x2 = x * x, reach = clamp(1.0 - x2 * x2, 0.0, 1.0);
+        float fall;
+        if (facing.w > 0.5) {
+            const float inner = lb.f[o + 12u], outer = lb.f[o + 13u], c = dot(facing.xyz, -to) / d;
+            const float cone = c > inner ? 1.0 : pow(clamp((c - outer) / max(inner - outer, 1e-4), 0.0, 1.0), lb.f[o + 14u]);
+            const float nx = colour.w > 0.0 ? clamp(d / colour.w, 0.0, 1.0) : 1.0, nx2 = nx * nx;
+            fall = cone * reach * reach * (colour.w > 0.0 ? nx2 * nx2 * nx2 * (7.0 - 6.0 * nx) : 1.0) /
+                   max(lb.f[o + 18u] * d * d + lb.f[o + 17u] * d + lb.f[o + 16u], 1e-3);
+        } else {
+            const float past = max(d - colour.w, 0.001);
+            fall = reach / (past * past + 1.0);
         }
+        if (!(fall > 1e-4)) continue;
+        const vec2 s = vec2(g) + pc.seed + vec2(5.0, 23.0) + float(k) * vec2(13.0, 7.0);
+        const float a = 6.2831853 * noise(s), rr = 0.04 * sqrt(noise(s.yx + 3.0));   // (a small lamp: a soft edge)
+        const vec3 L = to / d, su = normalize(abs(L.y) < 0.99 ? cross(L, vec3(0.0, 1.0, 0.0)) : cross(L, vec3(1.0, 0.0, 0.0)));
+        const vec3 dir = normalize(to + (su * cos(a) + cross(L, su) * sin(a)) * rr);
+        rayQueryEXT q;
+        // (not up to the lamp itself: a lantern's light sits inside its housing, and stopped there the whole glow on the
+        // wall beside it went. Half a unit short for a spot, a tenth for a point light)
+        rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, 0.0, dir, max(d - (facing.w > 0.5 ? 0.5 : 0.1), 0.01));
+        while (rayQueryProceedEXT(q))
+            if (rayQueryGetIntersectionTEXT(q, false) >= skip) rayQueryConfirmIntersectionEXT(q);
+        if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) continue;
+        taken += pc.lights * colour.rgb * (fall * nl);
     }
     const float open = 1.0 - pc.ao * sum / float(max(pc.rays, 1));
     light /= float(max(pc.rays, 1));

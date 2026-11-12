@@ -97,6 +97,7 @@ struct Block {
     int live = 0;
 };
 constexpr uint64_t kBlockBytes = 32 << 20, kStageBytes = 8 << 20;
+constexpr int kLights = 8;   // (the lights that cast a shadow at once)
 
 constexpr uint32_t kMaxInstances = 16384;
 constexpr int kRing = 6;
@@ -189,6 +190,7 @@ struct Rt {
     std::atomic<uint64_t> lights_frame{0};   // (the frame the lights' buffer was last read)
     float sun_colour[3]{};   // (the game's, before its exposure; 0: not known)
     std::atomic<uint64_t> local_lights{0}, local_frame_buffer{0}, local_frame{0};   // (rt_note_local_lights)
+    Buf light_list;   // (the frame's lights for rt_debug.comp: kRing frames of kLights lights, 20 floats each)
     std::atomic<uint64_t> traced_frame{0};   // (the frame rt_frame last drew its effects)
     // (the game's own occlusion pass, traced: rt_ao_replace. The frame before's camera and depth, kept by rt_frame)
     float prev_inv[16]{};
@@ -845,7 +847,7 @@ bool make_pipeline(Rt& r) {
     for (uint32_t i = 0; i < 6; i++) b[i] = {i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, li.bindingCount = 6, li.pBindings = b;
-    const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 224};
+    const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 200};
     VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pi.setLayoutCount = 1, pi.pSetLayouts = &r.set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
     VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -1536,7 +1538,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     }
 
     static const int debug = getenv("RX_VK_RT_DEBUG") ? atoi(getenv("RX_VK_RT_DEBUG")) : 0;
-    if (dev.props.limits.maxPushConstantsSize < 224) return;
+    if (dev.props.limits.maxPushConstantsSize < 200) return;
     const bool lights = opts.lights > 0 && now - r.local_frame.load(std::memory_order_relaxed) <= 2;
     if ((!debug && !(ao > 0.0f) && !(gi > 0.0f) && !lights) || !n || !make_pipeline(r) || !make_cache(r, cmd) ||
         !make_atlas(r, cmd))
@@ -1549,12 +1551,12 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         float ao, radius, seed;
         int32_t rays;
         float gi, reach, skin;
-        float lights, pad;   // (light_at is a vec4 in the block: at a multiple of 16)
-        float light_at[4];
+        float lights;
+        int32_t light_count;
+        uint64_t light_list;
         uint64_t skin_indices, skin_normals;
-        float light_colour[4];
     } pc{};
-    static_assert(sizeof pc == 224, "rt_debug.comp's push constants");
+    static_assert(sizeof pc == 200, "rt_debug.comp's push constants");
     pc.skin_indices = r.skin_indices, pc.skin_normals = r.skin_normals;
     r.traced_frame.store(now, std::memory_order_relaxed);
     static const float skin = getenv("RX_VK_RT_SKIN") ? (float)atof(getenv("RX_VK_RT_SKIN")) : 0.12f;
@@ -1568,36 +1570,58 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     pc.ao = ao, pc.radius = radius, pc.seed = seed, pc.rays = ao > 0.0f || gi > 0.0f || debug ? rays : 0;
     static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     if (!dlss_math::reprojection(view_proj, identity, pc.inv)) return;   // (identity * inverse(view_proj))
-    if (lights) {
-        // (the game's lights: 96 bytes each, the type at 16 (100: a point light), the colour at 32 with one over its reach
-        // after it, the place at 48, its own radius at 68. The nearest point light to the camera, and its colour as the
-        // picture has it: by the exposure, the frame buffer's float at 0x380. RX_VK_RT_LIGHT_K: that times this, a test)
+    if (lights && (r.light_list.buffer || make_buf(r.light_list, kRing * kLights * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true))) {
+        // (the game's lights, 96 bytes each, as its lighting shader reads them: the type at 16 (1 a spot, 100 a point
+        // light), the colour at 32 with one over its reach after it, the place at 48 with a spot's cone's inner cosine
+        // after it, the falloff's constant, linear and square terms at 64 with the cone's outer cosine after them, a
+        // spot's direction at 80 with the cone's power after it, and in the next one's second float its near distance (a
+        // point light's radius). The kLights nearest the camera, by how far their reach ends from it, their colours as
+        // the picture has them: by the exposure, the frame buffer's float at 0x380. RX_VK_RT_LIGHT_K: that times this, a test)
         static const float gain = getenv("RX_VK_RT_LIGHT_K") ? (float)atof(getenv("RX_VK_RT_LIGHT_K")) : 1.0f;
-        float rec[64 * 24], exposure = 0.0f;
+        static float rec[257 * 24];   // (this thread's alone: rt_frame is the upscaler's)
+        float exposure = 0.0f;
         const float* m = pc.inv;
         const float cw = -m[14] + m[15];
-        float eye[3] = {(-m[2] + m[3]) / cw, (-m[6] + m[7]) / cw, (-m[10] + m[11]) / cw}, best = 1e30f;
+        const float eye[3] = {(-m[2] + m[3]) / cw, (-m[6] + m[7]) / cw, (-m[10] + m[11]) / cw};
+        std::vector<std::pair<float, int>> found;
         if (memory_read_as_submitted(r.local_lights.load(std::memory_order_relaxed), rec, sizeof rec) &&
             memory_read_as_submitted(r.local_frame_buffer.load(std::memory_order_relaxed) + 0x380, &exposure, 4) && exposure > 0.0f &&
             exposure < 1e3f)
-            for (int k = 0; k < 64; k++) {
+            for (int k = 0; k < 256; k++) {
                 const float* f = rec + k * 24;
                 uint32_t type;
                 std::memcpy(&type, f + 4, 4);
-                const float d2 = (f[12] - eye[0]) * (f[12] - eye[0]) + (f[13] - eye[1]) * (f[13] - eye[1]) + (f[14] - eye[2]) * (f[14] - eye[2]);
-                if (type != 100 || !(d2 < best) || !(f[11] > 1e-3f && f[11] < 1e3f) || !(f[8] >= 0.0f && f[9] >= 0.0f && f[10] >= 0.0f) ||
-                    !(f[8] + f[9] + f[10] < 1e6f) || !(std::fabs(f[17]) < 100.0f))
-                    continue;
-                best = d2;
-                pc.lights = std::min((float)opts.lights / 100.0f, 1.0f);
-                pc.light_at[0] = f[12], pc.light_at[1] = f[13], pc.light_at[2] = f[14], pc.light_at[3] = f[11];
-                for (int i = 0; i < 3; i++) pc.light_colour[i] = f[8 + i] * exposure * gain;
-                pc.light_colour[3] = std::max(f[17], 0.0f);
+                if (type != 100 && type != 1) continue;
+                bool fine = true;
+                for (int i = 8; i < 26; i++) fine = fine && std::fabs(f[i]) < 1e6f;   // (finite too)
+                const float away = std::sqrt((f[12] - eye[0]) * (f[12] - eye[0]) + (f[13] - eye[1]) * (f[13] - eye[1]) + (f[14] - eye[2]) * (f[14] - eye[2]));
+                if (fine && f[11] > 1e-3f && f[8] >= 0.0f && f[9] >= 0.0f && f[10] >= 0.0f && f[8] + f[9] + f[10] > 0.0f && away - 1.0f / f[11] < 60.0f)
+                    found.push_back({away - 1.0f / f[11], k});
             }
+        std::sort(found.begin(), found.end());
+        if (found.size() > (size_t)kLights) found.resize(kLights);
+        const uint64_t at = (uint64_t)r.ring_at * kLights * 80;
+        float* out = (float*)((uint8_t*)r.light_list.map + at);
+        for (size_t i = 0; i < found.size(); i++, out += 20) {
+            const float* f = rec + found[i].second * 24;
+            uint32_t type;
+            std::memcpy(&type, f + 4, 4);
+            out[0] = f[12], out[1] = f[13], out[2] = f[14], out[3] = f[11];
+            for (int c = 0; c < 3; c++) out[4 + c] = f[8 + c] * exposure * gain;
+            out[7] = std::max(f[25], 0.0f);
+            out[8] = f[20], out[9] = f[21], out[10] = f[22], out[11] = type == 1 ? 1.0f : 0.0f;
+            out[12] = f[15], out[13] = f[19], out[14] = std::clamp(f[23], 0.0f, 64.0f), out[15] = 0.0f;
+            out[16] = f[16], out[17] = f[17], out[18] = f[18], out[19] = 0.0f;
+        }
+        flush_mapped_range(r.light_list.memory, at, kLights * 80);
+        pc.light_count = (int32_t)found.size(), pc.light_list = r.light_list.address + at;
+        pc.lights = found.empty() ? 0.0f : std::min((float)opts.lights / 100.0f, 1.0f);
         static int told = 0;
-        if (pc.lights > 0.0f && told < 4 && now % 600 == 0)
-            told++, logf("vk: rt: a point light at %.2f %.2f %.2f, reach %.2f, colour %.3g %.3g %.3g by the exposure %.4g", pc.light_at[0],
-                         pc.light_at[1], pc.light_at[2], 1.0f / pc.light_at[3], pc.light_colour[0], pc.light_colour[1], pc.light_colour[2], exposure);
+        if (!found.empty() && told < 4 && now % 600 == 0) {
+            const float* f = rec + found[0].second * 24;
+            told++, logf("vk: rt: %zu lights with a shadow; the nearest at %.2f %.2f %.2f, reach %.2f, exposure %.4g", found.size(), f[12], f[13],
+                         f[14], 1.0f / f[11], exposure);
+        }
     }
     pc.size[0] = (int32_t)w, pc.size[1] = (int32_t)h, pc.mode = debug ? debug : show_ao == 5 ? 8 : show_ao == 4 ? 7 : show_ao == 3 ? 6 : show_ao == 2 ? 5 : show_ao ? 4 : 3;
     VkWriteDescriptorSetAccelerationStructureKHR wa{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};

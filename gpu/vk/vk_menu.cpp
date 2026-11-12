@@ -728,7 +728,7 @@ Row rows[] = {
      "Experimental. The sun's shadows traced as well, sharp where things touch, added to the game's own. 0: the game's alone. Needs Ray tracing on and the DLSS or DLAA upscaler.",
      nullptr, false, true},
     {TAB_GRAPHICS, "Light shadows", &opts.lights, 0, 100, 10, tx_percent,
-     "Experimental. A shadow for the nearest point light (a fairy, a torch), which the game lights without one. Its darkness is an estimate. Needs Ray tracing on and the DLSS or DLAA upscaler.",
+     "Experimental. Shadows for the lamps nearby (lanterns, torches, a fairy), which the game lights without any. Their darkness is an estimate. Needs Ray tracing on and the DLSS or DLAA upscaler.",
      nullptr, false, true},
     {TAB_GRAPHICS, "Ray tracing", &opts.rt, 0, 1, 1, tx_onoff,
      "Experimental. Builds the scene for ray tracing on RTX-class cards: Ambient occlusion is then traced. Applies after a restart.",
