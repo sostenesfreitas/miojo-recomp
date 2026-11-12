@@ -18,6 +18,8 @@ layout(push_constant, row_major) uniform P {
     float seed;
     int rays;
     float skin;     // (a character's own surface nearer than this does not occlude it: rt_debug.comp)
+    float ambient;  // (the Traced ambient row, 0 to 1: how much the sky's reach shapes the game's ambient light)
+    float far;      // (how far its rays look for the sky)
 } pc;
 vec3 world(vec2 uv, float d) {
     const vec4 p = pc.inv * vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d * 2.0 - 1.0, 1.0);
@@ -82,5 +84,26 @@ void main() {
         if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
             sum += 1.0 - rayQueryGetIntersectionTEXT(q, true) / pc.radius;
     }
-    imageStore(occlusion, g, vec4(clamp(1.0 - pc.strength * sum / float(max(pc.rays, 1)), 0.0, 1.0)));
+    // (the Traced ambient row. The game's ambient light is one level a place, set by hand, with this image over it: the
+    // same under an open sky, under an eave, in an alley and a doorway. Long rays over the hemisphere, from where the
+    // short ones end: one that leaves the scene has found the sky, one that is stopped brings a fifth of it, what a wall
+    // gives back. Their mean scales this image, so the game lights by its own ambient, its colours and textures, as far
+    // as the sky reaches the place.
+    // ponytail: a fifth for any wall, lit or not, and a cave's hand-set ambient is not the sky's: it goes to that fifth.
+    // The hit's material and light, as the bounce has them, for that)
+    float wide = 1.0;
+    if (pc.ambient > 0.0) {
+        float open = 0.0;
+        for (int i = 0; i < 6; i++) {
+            const vec2 s = vec2(g) + pc.seed + float(i) * vec2(53.0, 29.0) + 101.0;
+            const float a = 6.2831853 * noise(s), z2 = noise(s.yx + 11.0), rr = sqrt(1.0 - z2);
+            const vec3 dir = t * (cos(a) * rr) + b * (sin(a) * rr) + n * sqrt(z2);
+            rayQueryEXT q;
+            rayQueryInitializeEXT(q, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from, pc.radius, dir, pc.far);
+            while (rayQueryProceedEXT(q)) rayQueryConfirmIntersectionEXT(q);
+            open += rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.2 : 1.0;
+        }
+        wide = mix(1.0, open / 6.0, pc.ambient);
+    }
+    imageStore(occlusion, g, vec4(clamp((1.0 - pc.strength * sum / float(max(pc.rays, 1))) * wide, 0.0, 1.0)));
 }

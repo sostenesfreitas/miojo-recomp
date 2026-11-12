@@ -1148,7 +1148,7 @@ bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_
 
 bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h) {
     Rt& r = rt();
-    if (!r.ok || opts.ao <= 0 || !out || !w || !h) return false;
+    if (!r.ok || (opts.ao <= 0 && opts.ambient <= 0) || !out || !w || !h) return false;
     static const bool off = getenv("RX_VK_RT_AO_POST") != nullptr;   // (a test: the multiply over the picture, as it was)
     if (off) return false;
     std::lock_guard lk(r.mu);
@@ -1173,7 +1173,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
         for (uint32_t i = 0; i < 3; i++) b[i] = {i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, li.bindingCount = 3, li.pBindings = b;
-        const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 92};
+        const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 100};
         VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pi.setLayoutCount = 1, pi.pSetLayouts = &r.ao_set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
         VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -1197,14 +1197,17 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
         float strength, radius, seed;
         int32_t rays;
         float skin;
+        float ambient, sky_reach;
     } pc{};
-    static_assert(sizeof pc == 92, "rt_ao.comp's push constants");
+    static_assert(sizeof pc == 100, "rt_ao.comp's push constants");
     static const float radius = getenv("RX_VK_RT_RADIUS") ? (float)atof(getenv("RX_VK_RT_RADIUS")) : 1.5f;
     static const int rays = getenv("RX_VK_RT_RAYS") ? std::clamp(atoi(getenv("RX_VK_RT_RAYS")), 1, 16) : 6;
     static const float skin = getenv("RX_VK_RT_SKIN") ? (float)atof(getenv("RX_VK_RT_SKIN")) : 0.12f;
     std::memcpy(pc.inv, r.prev_inv, sizeof pc.inv);
     pc.size[0] = (int32_t)w, pc.size[1] = (int32_t)h;
     pc.strength = (float)opts.ao / 50.0f;   // (the row's 50%: a ray's hit counts whole)
+    static const float sky_reach = getenv("RX_VK_RT_AMBIENT_FAR") ? (float)atof(getenv("RX_VK_RT_AMBIENT_FAR")) : 40.0f;
+    pc.ambient = std::clamp((float)opts.ambient / 100.0f, 0.0f, 1.0f), pc.sky_reach = sky_reach;
     // (the same noise every frame: with another each frame, what a few rays found in a narrow place (under a rug's edge)
     // changed from frame to frame, and the game's blur of one frame does not average frames: small shadows flickered)
     pc.radius = radius, pc.rays = rays, pc.skin = skin, pc.seed = 0.0f;
