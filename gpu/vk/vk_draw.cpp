@@ -5922,7 +5922,9 @@ static void dlss_trace_draw(const NvnState& s, const Program& p, const DrawArgs&
     }
     {   // (miojo, the local lights: a traced frame's first lit draw's fragment uniform buffers, whole, as files to read)
         static std::atomic<uint64_t> dumped{0};
-        if (!s.ds.dw && s.ds.dt && !d.mesh && at.n && at.depth && dumped.exchange(f) != f)
+        // (RX_VK_DUMP_PROG=<key>: that program's first draw instead)
+        static const uint64_t want = getenv("RX_VK_DUMP_PROG") ? strtoull(getenv("RX_VK_DUMP_PROG"), nullptr, 16) : 0;
+        if ((want ? p.key == want : !s.ds.dw && s.ds.dt && !d.mesh) && at.n && at.depth && dumped.exchange(f) != f)
             for (int u = 0; u < 8; u++) {
                 const uint64_t size = s.ubo[1][u].size;
                 std::vector<uint8_t> all((size_t)size);
@@ -5931,7 +5933,7 @@ static void dlss_trace_draw(const NvnState& s, const Program& p, const DrawArgs&
                 snprintf(name, sizeof name, "ubo_f%llu_u%d.bin", (unsigned long long)f, u);
                 if (FILE* o = fopen(name, "wb")) fwrite(all.data(), 1, all.size(), o), fclose(o);
             }
-        if (!s.ds.dw && s.ds.dt && !d.mesh && at.n && at.depth && dumped.load() == f) {
+        if ((want ? p.key == want : !s.ds.dw && s.ds.dt && !d.mesh) && at.n && at.depth && dumped.load() == f) {
             static std::atomic<uint64_t> stored{0};
             if (stored.exchange(f) != f)
                 for (int u = 0; u < 16; u++) {
