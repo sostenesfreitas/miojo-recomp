@@ -5920,6 +5920,30 @@ static void dlss_trace_draw(const NvnState& s, const Program& p, const DrawArgs&
             if (s.ssbo[ns][u].addr) n += snprintf(line + n, sizeof line - n, " s%d=%llx/%llu", u, (unsigned long long)s.ssbo[ns][u].addr,
                                                   (unsigned long long)s.ssbo[ns][u].size);
     }
+    {   // (miojo, the local lights: a traced frame's first lit draw's fragment uniform buffers, whole, as files to read)
+        static std::atomic<uint64_t> dumped{0};
+        if (!s.ds.dw && s.ds.dt && !d.mesh && at.n && at.depth && dumped.exchange(f) != f)
+            for (int u = 0; u < 8; u++) {
+                const uint64_t size = s.ubo[1][u].size;
+                std::vector<uint8_t> all((size_t)size);
+                if (size < 512 || size > (1u << 20) || !memory_read_as_submitted(s.ubo[1][u].addr, all.data(), all.size())) continue;
+                char name[64];
+                snprintf(name, sizeof name, "ubo_f%llu_u%d.bin", (unsigned long long)f, u);
+                if (FILE* o = fopen(name, "wb")) fwrite(all.data(), 1, all.size(), o), fclose(o);
+            }
+        if (!s.ds.dw && s.ds.dt && !d.mesh && at.n && at.depth && dumped.load() == f) {
+            static std::atomic<uint64_t> stored{0};
+            if (stored.exchange(f) != f)
+                for (int u = 0; u < 16; u++) {
+                    const uint64_t size = std::min<uint64_t>(s.ssbo[1][u].size, 2u << 20);
+                    std::vector<uint8_t> all((size_t)size);
+                    if (size < 64 || !memory_read_as_submitted(s.ssbo[1][u].addr, all.data(), all.size())) continue;
+                    char name[64];
+                    snprintf(name, sizeof name, "ssbo_f%llu_s%d.bin", (unsigned long long)f, u);
+                    if (FILE* o = fopen(name, "wb")) fwrite(all.data(), 1, all.size(), o), fclose(o);
+                }
+        }
+    }
     {   // (miojo, the path tracing census: the object's buffer, vertex uniform buffer 1, its first 0x70 bytes as floats, a line of its own)
         float o[28];
         char t[512];
@@ -6075,6 +6099,18 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
         rt_note_draw(k);
         return;
     }
+    {   // (a test, RX_VK_RT_WHY: the scene's depth-writing draws the rays leave out, by what leaves them out, on a traced frame)
+        static const bool why = getenv("RX_VK_RT_WHY") != nullptr;
+        if (why && texture_frame_no() % 1000 == 500 && at.n && at.color[0] && at.depth && s.ds.dt && s.ds.dw &&
+            at.color_format[0] == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && temporal_scene_size(at.width, at.height)) {
+            const nvn_va_st p0 = *reinterpret_cast<const nvn_va_st*>(&s.vattr[0]);
+            const nvn_va_st p6 = *reinterpret_cast<const nvn_va_st*>(&s.vattr[6]);
+            logf("vk: rt-why f%llu prog %016llx n%d mesh%d idx%d ind%d inst%d prim%d blend%x cull%d nva%d pos%x@%u:%u a6 %x u1 %llu",
+                 (unsigned long long)texture_frame_no(), (unsigned long long)p.key, d.count, d.mesh ? 1 : 0, d.indexed ? 1 : 0, d.indirect ? 1 : 0,
+                 d.instances, (int)d.prim, (unsigned)s.color.blend_en, (int)s.poly.cull, (int)s.nvattr, p0.fmt, p0.offset, p0.stream,
+                 s.nvattr >= 7 ? p6.fmt : 0, (unsigned long long)s.ubo[0][1].size);
+        }
+    }
     if (d.mesh || !d.indexed || d.indirect || d.instances != 1 || (d.prim != NVN_DRAW_PRIMITIVE_TRIANGLES && !strip) || !at.n || !at.color[0] ||
         !at.depth || at.color_format[0] != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !s.ds.dt || !s.ds.dw || (s.color.blend_en & 1) ||
         s.nvattr < 1 || !temporal_scene_size(at.width, at.height))
@@ -6086,11 +6122,17 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
     // too), and vk_rt.cpp then lets a ray that starts on it pass it: a banner's cloth moves in the wind by its vertex shader,
     // the rays have it as it hangs still, and where the cloth seen swung behind that copy every ray from it hit at once:
     // black patches over the banner, another shape each frame)
-    if (s.poly.cull == NVN_FACE_NONE) return rt_note_two_sided(s.ubo[0][1].size >= 0x4c ? s.ubo[0][1].addr : 0);
     uint32_t sampled = 0;   // (the textures its fragment stage samples: none in the plain depth pass)
     for (const Stage& st : p.stages)
         if (st.nvn_stage == 1)
             for (const auto& td : st.info.texture_descriptors) sampled += td.count;
+    // (a two-sided draw whose depth pass samples nothing is solid all over, a wall: Kakariko's gate is drawn so, and no
+    // shadow map's pass brought it, the check view had it missing. Into the rays, noted two-sided. One that samples a
+    // texture there is cut by it: left out as before)
+    // (and one-sided or not, a depth pass that samples a texture is a cutout's: a grate, a leaf. Marked, as a shadow map's
+    // pass marks it, which may draw another level of detail of it from another buffer)
+    const uint64_t object = s.ubo[0][1].size >= 0x4c ? s.ubo[0][1].addr : 0;
+    if (s.poly.cull == NVN_FACE_NONE) rt_note_two_sided(object, s.vbuf[0].address);
     const auto attr = [&](int i) { return *reinterpret_cast<const nvn_va_st*>(&s.vattr[i]); };
     const nvn_va_st pos = attr(0);
     RtDraw k;
@@ -6111,6 +6153,7 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
         k.strip = strip, k.restart_on = s.restart, k.restart = s.restart_index;
         k.patch = s.ubo[0][5].addr, k.ground = s.ubo[0][4].addr;
     } else {
+        if (sampled) return rt_note_cutout(object, s.vbuf[0].address);   // (not the terrain: its depth pass has a texture bound and is solid)
         if (strip || (pos.fmt != NVN_FORMAT_RGB32F && pos.fmt != NVN_FORMAT_RGBA16F) || pos.stream != 0) return;
         if (s.nvattr >= 7 && (attr(6).fmt == NVN_FORMAT_RGBA16UI || attr(6).fmt == NVN_FORMAT_RGBA8UI)) return;   // (skinned)
     }
@@ -6147,7 +6190,7 @@ static bool rt_shadow_draw(const NvnState& s, const DrawArgs& d, const Program& 
     const bool have = plain && !skinned && (pos.fmt == NVN_FORMAT_RGB32F || pos.fmt == NVN_FORMAT_RGBA16F) && pos.stream == 0 && k.vbuf &&
                       k.ibuf && k.object && s.ubo[0][1].size >= 0x4c;
     return rt_note_shadow_draw(have ? &k : nullptr, skinned, s.ubo[0][0].addr, s.ubo[0][0].size, cutout,
-                               s.ubo[0][1].size >= 0x4c ? s.ubo[0][1].addr : 0);
+                               s.ubo[0][1].size >= 0x4c ? s.ubo[0][1].addr : 0, s.vbuf[0].address);
 }
 
 void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {

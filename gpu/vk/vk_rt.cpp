@@ -74,6 +74,10 @@ struct Instance {
     float m[12];
     uint64_t same;   // (the mesh and the matrix as one number: the same twice is a second pass over the scene)
     uint64_t place;  // (the matrix alone)
+    // (the matrix and the mesh's vertex buffer: what a cutout's or a two-sided draw's mark is told by. By the matrix alone
+    // a mark took everything drawn with that matrix: a level's still parts all share one, and the vines on Kakariko's
+    // gate, cutouts, took the whole wall out of the rays)
+    uint64_t mark;
     bool ccw;        // (its triangles' front is counter-clockwise, the mirroring of its matrix counted)
     int kind;        // (0 the scene's; 1 from a shadow map's pass: left out when the scene's own pass drew an object
                      // there, whose mesh may be another level of detail of the same thing; 2 no instance but a mark:
@@ -1016,6 +1020,7 @@ void rt_note_draw(const RtDraw& given, bool shadow_pass) {
     // instances too: place ^ key was the bare matrix again for each of them, one number, and one patch a frame got in)
     if (d.terrain) place = (place ^ in.key) * 0x9e3779b97f4a7c15ull;
     in.place = place, in.same = d.terrain ? place : (place ^ in.key) * 0x100000001b3ull, in.kind = shadow_pass ? 1 : 0;
+    in.mark = (place ^ d.vbuf) * 0x9e3779b97f4a7c15ull;
     {   // (a mirroring matrix turns the winding around on the screen, and the game sets the draw's front face for that:
         // the rays tell a front in the mesh's own space, so the mirroring is taken back out)
         const float* m = in.m;
@@ -1055,11 +1060,11 @@ void rt_note_draw(const RtDraw& given, bool shadow_pass) {
     if (it != r.meshes.end()) it->second.material = slot;
 }
 
-static void note_place(uint64_t object, int kind);
-void rt_note_cutout(uint64_t object) { note_place(object, 2); }
-void rt_note_two_sided(uint64_t object) { note_place(object, 3); }
+static void note_place(uint64_t object, int kind, uint64_t vbuf);
+void rt_note_cutout(uint64_t object, uint64_t vbuf) { note_place(object, 2, vbuf); }
+void rt_note_two_sided(uint64_t object, uint64_t vbuf) { note_place(object, 3, vbuf); }
 /// A mark for the object's place: 2 a cutout, 3 two-sided
-static void note_place(uint64_t object, int kind) {
+static void note_place(uint64_t object, int kind, uint64_t vbuf) {
     Rt& r = rt();
     float o[19];
     if (!r.ok || !object || !memory_read_as_submitted(object, o, sizeof o)) return;
@@ -1071,12 +1076,13 @@ static void note_place(uint64_t object, int kind) {
         std::memcpy(&bits, &o[i], 4);
         place = (place ^ bits) * 0x100000001b3ull;
     }
-    in.place = place, in.same = place ^ (kind == 2 ? 0x5bd1e995 : 0x1b873593), in.kind = kind;
+    in.place = place, in.mark = (place ^ vbuf) * 0x9e3779b97f4a7c15ull;
+    in.same = in.mark ^ (kind == 2 ? 0x5bd1e995 : 0x1b873593), in.kind = kind;
     std::lock_guard lk(r.mu);
     if (r.instances.size() < 4 * kMaxInstances) r.instances.push_back(in);
 }
 
-bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size, bool cutout, uint64_t object) {
+bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size, bool cutout, uint64_t object, uint64_t vbuf) {
     Rt& r = rt();
     if (!r.ok || camera_size < 0xb0) return false;
     const uint64_t now = texture_frame_no();
@@ -1121,7 +1127,7 @@ bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_
         if (!r.light_is_sun) return false;
         built = k && r.meshes.count(key_of(*k));
     }
-    if (cutout) return rt_note_cutout(object), false;   // (the game's map keeps its shadow)
+    if (cutout) return rt_note_cutout(object, vbuf), false;   // (the game's map keeps its shadow)
     if (k) rt_note_draw(*k, true);
     // (left out of the game's map only while the rays draw their shadows: the row on, and rt_frame traced a moment ago)
     // (the first try left this draw out of the game's map when the rays had it and darkened the picture instead: double
@@ -1411,8 +1417,8 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     // the game's frame rate. A mark is kept for 240 frames, a shadow map's instance for 8)
     std::unordered_set<uint64_t> scene_places;
     for (const Instance& in : r.instances) {
-        if (in.kind == 2) r.cut_seen[in.place] = now;
-        else if (in.kind == 3) r.two_sided[in.place] = now;
+        if (in.kind == 2) r.cut_seen[in.mark] = now;
+        else if (in.kind == 3) r.two_sided[in.mark] = now;
         else if (in.kind == 1) r.shadow_kept[in.same] = {in, now};
         else scene_places.insert(in.place);
     }
@@ -1427,7 +1433,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         if (in.kind == 1) r.casters[in.place] = now;
     for (auto it = r.casters.begin(); it != r.casters.end();) it = now - it->second > 60 ? r.casters.erase(it) : std::next(it);
     const auto add = [&](const Instance& in) {
-        if (n >= kMaxInstances - 1 || r.cut_seen.count(in.place)) return;
+        if (n >= kMaxInstances - 1 || r.cut_seen.count(in.mark)) return;
         const auto it = r.meshes.find(in.key);
         if (it == r.meshes.end()) { missing++; return; }
         it->second.used = now;
@@ -1441,11 +1447,11 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         a.flags = in.ccw ? VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR : 0;
         // (two-sided: told to the rays by a bit of its number. rt_ao.comp starts a ray in front of such an instance when
         // the surface seen lies just behind where the rays have it: a banner swung by the wind in its vertex shader)
-        if (r.two_sided.count(in.place)) a.instanceCustomIndex |= 0x100000;
+        if (r.two_sided.count(in.mark)) a.instanceCustomIndex |= 0x100000;
         // (both faces stop a ray where the front is not known for sure: an instance drawn two-sided, and one that comes
         // from a shadow map's pass, whose front-face state is the shadow pass's own. One-sided there, a building's wall in
         // Kakariko let every ray through: the check view showed it missing)
-        if (r.two_sided.count(in.place) || in.kind == 1) a.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+        if (r.two_sided.count(in.mark) || in.kind == 1) a.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
         a.accelerationStructureReference = it->second.address;
         n++;
     };

@@ -55,10 +55,11 @@ void rt_note_lights(uint64_t address, uint64_t size);
 /// `object` (its buffer) is kept out of the rays this frame and its shadow left to the game's map
 /// The object whose buffer is at `object` is a cutout (a card cut by its texture's alpha: a grate, a leaf, a banner's
 /// fringe): kept out of the rays, which have no textures and would take the whole card as solid, for 240 frames
-void rt_note_cutout(uint64_t object);
+void rt_note_cutout(uint64_t object, uint64_t vbuf);
 /// The object whose buffer is at `object` is drawn two-sided: kept for 240 frames, its instance one a ray starting on it passes
-void rt_note_two_sided(uint64_t object);
-bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size, bool cutout, uint64_t object);
+void rt_note_two_sided(uint64_t object, uint64_t vbuf);
+bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_t camera_size, bool cutout, uint64_t object,
+                         uint64_t vbuf);
 /// A skinned draw into the scene (vk_draw.cpp's, as the upscaler's actor motion takes them): skinned on the CPU with this
 /// frame's bones, all of a frame's into one structure built anew
 void rt_note_skinned(const SkinnedDraw& k);
