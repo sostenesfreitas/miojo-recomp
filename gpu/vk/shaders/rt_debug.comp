@@ -82,8 +82,9 @@ ivec2 cell(vec3 p, vec3 n) {
 }
 /// An instance's material's mean albedo, linear; a < 0.5: not known (slots 0 and 1, the characters, a texture not copied yet)
 vec4 material(int id) {
-    if (id < 2 || id > 0xffff) return vec4(0.0);
-    const vec3 a = texelFetch(materials, ivec2(id & 255, id >> 8), 0).rgb;
+    // (the instance's number: its material's slot, with the two-sided mark above it, vk_rt.cpp; the characters' has none)
+    if (id == 0xfffffe || (id & 0xffff) < 2) return vec4(0.0);
+    const vec3 a = texelFetch(materials, ivec2(id & 255, (id >> 8) & 255), 0).rgb;
     return vec4(a, dot(a, vec3(1.0)) > 0.0 ? 1.0 : 0.0);
 }
 float noise(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }

@@ -1158,7 +1158,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     // drop_image). This used to give the frame to the game's own occlusion whenever any texture had been destroyed since:
     // walking, the game lets textures go about every 20 frames, and each time one frame had the game's lighter occlusion,
     // a flash of light over the whole picture)
-    if (!r.top.as || !r.prev_depth || now - r.prev_frame > 2) {
+    if (!r.top.as || !r.prev_depth || now - r.prev_frame > 2 || !make_atlas(r, cmd)) {
         static int told = 0;   // (a test: why a frame went to the game's own)
         if (getenv("RX_VK_RT_AO_WHY") && told++ < 400)
             logf("vk: rt: ao-why f%llu top %d depth %d age %lld", (unsigned long long)now, r.top.as ? 1 : 0, r.prev_depth ? 1 : 0, (long long)(now - r.prev_frame));
@@ -1167,13 +1167,13 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     if (!r.ao_pipe) {
         if (r.ao_tried) return false;
         r.ao_tried = true;
-        const VkDescriptorType types[3] = {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                           VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-        VkDescriptorSetLayoutBinding b[3]{};
-        for (uint32_t i = 0; i < 3; i++) b[i] = {i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        const VkDescriptorType types[4] = {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                           VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER};
+        VkDescriptorSetLayoutBinding b[4]{};
+        for (uint32_t i = 0; i < 4; i++) b[i] = {i, types[i], 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
         VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, li.bindingCount = 3, li.pBindings = b;
-        const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 100};
+        li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, li.bindingCount = 4, li.pBindings = b;
+        const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 128};
         VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pi.setLayoutCount = 1, pi.pSetLayouts = &r.ao_set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
         VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -1198,8 +1198,10 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
         int32_t rays;
         float skin;
         float ambient, sky_reach;
+        float pad[3];   // (to_sun is a vec4 in the block: at a multiple of 16)
+        float to_sun[4];
     } pc{};
-    static_assert(sizeof pc == 100, "rt_ao.comp's push constants");
+    static_assert(sizeof pc == 128, "rt_ao.comp's push constants");
     static const float radius = getenv("RX_VK_RT_RADIUS") ? (float)atof(getenv("RX_VK_RT_RADIUS")) : 1.5f;
     static const int rays = getenv("RX_VK_RT_RAYS") ? std::clamp(atoi(getenv("RX_VK_RT_RAYS")), 1, 16) : 6;
     static const float skin = getenv("RX_VK_RT_SKIN") ? (float)atof(getenv("RX_VK_RT_SKIN")) : 0.12f;
@@ -1208,20 +1210,32 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     pc.strength = (float)opts.ao / 50.0f;   // (the row's 50%: a ray's hit counts whole)
     static const float sky_reach = getenv("RX_VK_RT_AMBIENT_FAR") ? (float)atof(getenv("RX_VK_RT_AMBIENT_FAR")) : 40.0f;
     pc.ambient = std::clamp((float)opts.ambient / 100.0f, 0.0f, 1.0f), pc.sky_reach = sky_reach;
+    if (pc.ambient > 0.0f) {   // (the game's sun, as rt_frame reads it for the bounce: the lit draws' frame buffer at 0x40)
+        float f[3];
+        if (memory_read_as_submitted(r.local_frame_buffer.load(std::memory_order_relaxed) + 0x40, f, sizeof f)) {
+            const float len = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+            if (std::fabs(len - 1.0f) < 0.02f) {
+                for (int i = 0; i < 3; i++) pc.to_sun[i] = -f[i] / len;
+                pc.to_sun[3] = 1.0f;
+            }
+        }
+    }
     // (the same noise every frame: with another each frame, what a few rays found in a narrow place (under a rug's edge)
     // changed from frame to frame, and the game's blur of one frame does not average frames: small shadows flickered)
     pc.radius = radius, pc.rays = rays, pc.skin = skin, pc.seed = 0.0f;
     full_barrier(cmd, "barrier (rt occlusion)");
     VkWriteDescriptorSetAccelerationStructureKHR wa{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
     wa.accelerationStructureCount = 1, wa.pAccelerationStructures = &r.top.as;
-    const VkDescriptorImageInfo info[2] = {{r.prev_sampler, r.prev_depth, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, out, VK_IMAGE_LAYOUT_GENERAL}};
-    VkWriteDescriptorSet wr[3]{};
-    for (uint32_t i = 0; i < 3; i++) wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, wr[i].dstBinding = i, wr[i].descriptorCount = 1;
+    const VkDescriptorImageInfo info[3] = {{r.prev_sampler, r.prev_depth, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, out, VK_IMAGE_LAYOUT_GENERAL},
+                                           {r.prev_sampler, r.atlas_view, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[4]{};
+    for (uint32_t i = 0; i < 4; i++) wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, wr[i].dstBinding = i, wr[i].descriptorCount = 1;
     wr[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, wr[0].pNext = &wa;
     wr[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, wr[1].pImageInfo = &info[0];
     wr[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, wr[2].pImageInfo = &info[1];
+    wr[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, wr[3].pImageInfo = &info[2];
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r.ao_pipe);
-    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r.ao_layout, 0, 3, wr);
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, r.ao_layout, 0, 4, wr);
     vkCmdPushConstants(cmd, r.ao_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
     vkCmdDispatch(cmd, (w + 7) / 8, (h + 7) / 8, 1);
     full_barrier(cmd, "barrier (rt occlusion)");
