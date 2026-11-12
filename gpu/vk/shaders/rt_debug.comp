@@ -216,7 +216,39 @@ void occlusion(ivec2 g, vec2 uv, vec2 ndc) {
                             float d;
                             lamps += vec3(lb.f[o + 4u], lb.f[o + 5u], lb.f[o + 6u]) * light_fall(o, hit, ng, to, d);
                         }
-                        light += min(its * (pc.sun.rgb * sunlit + lamps + standing * 0.33), vec3(4.0));
+                        // (and a second bounce: one more ray from the hit, over its own hemisphere. What that finds is
+                        // the picture's colour there, or the cache's, or its material under the sky's guess; no ray
+                        // further. So light reaches round two corners: a room seen through its door is lit by the
+                        // wall the sun falls on inside it)
+                        vec3 again = vec3(0.0);
+                        {
+                            const vec3 t2 = normalize(abs(ng.y) < 0.99 ? cross(ng, vec3(0.0, 1.0, 0.0)) : cross(ng, vec3(1.0, 0.0, 0.0))), b2 = cross(ng, t2);
+                            const vec2 s2 = s + vec2(91.0, 53.0);
+                            const float a2 = 6.2831853 * noise(s2), up = noise(s2.yx + 7.0), flat2 = sqrt(1.0 - up);
+                            const vec3 from2 = hit + ng * 0.03, dir2 = t2 * (cos(a2) * flat2) + b2 * (sin(a2) * flat2) + ng * sqrt(up);
+                            rayQueryEXT q2;
+                            rayQueryInitializeEXT(q2, tlas, gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, from2, 0.0, dir2, pc.reach);
+                            while (rayQueryProceedEXT(q2)) rayQueryConfirmIntersectionEXT(q2);
+                            if (rayQueryGetIntersectionTypeEXT(q2, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+                                const vec3 hit2 = from2 + dir2 * rayQueryGetIntersectionTEXT(q2, true);
+                                const vec4 clip2 = pc.vp * vec4(hit2, 1.0);
+                                const vec2 at2 = vec2(clip2.x / clip2.w * 0.5 + 0.5, 0.5 - clip2.y / clip2.w * 0.5);
+                                if (clip2.w > 0.0 && all(greaterThan(at2, vec2(0.0))) && all(lessThan(at2, vec2(1.0))) &&
+                                    distance(surface(at2), hit2) < 0.03 * distance(eye, hit2) + 0.08) {
+                                    const vec3 c2 = textureLod(scene, at2, 0.0).rgb;
+                                    again = min(c2 * c2, vec3(4.0));
+                                } else {
+                                    vec3 w[3];
+                                    rayQueryGetIntersectionTriangleVertexPositionsEXT(q2, true, w);
+                                    vec3 n2 = normalize(mat3(rayQueryGetIntersectionObjectToWorldEXT(q2, true)) * cross(w[1] - w[0], w[2] - w[0]));
+                                    if (dot(n2, dir2) > 0.0) n2 = -n2;
+                                    const vec4 kept2 = imageLoad(cache, cell(hit2, n2));
+                                    const vec4 m2 = material(rayQueryGetIntersectionInstanceCustomIndexEXT(q2, true));
+                                    again = kept2.a > 0.0 ? kept2.rgb : (m2.a > 0.5 ? m2.rgb : vec3(0.3)) * standing * 0.33;
+                                }
+                            }
+                        }
+                        light += min(its * (pc.sun.rgb * sunlit + lamps + standing * 0.33 + again), vec3(4.0));
                     }
                 }
             }
