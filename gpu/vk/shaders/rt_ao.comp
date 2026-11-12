@@ -1,5 +1,6 @@
 #version 460
 #extension GL_EXT_ray_query : require
+#extension GL_EXT_ray_tracing_position_fetch : require
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 // (miojo) The game's own ambient occlusion, traced (vk_rt.cpp rt_ao_replace). OoT computes its occlusion at the start of a
@@ -23,6 +24,7 @@ layout(push_constant, row_major) uniform P {
     float skin;     // (a character's own surface nearer than this does not occlude it: rt_debug.comp)
     float ambient;  // (the Traced ambient row, 0 to 1: how much the sky's reach shapes the game's ambient light)
     float far;      // (how far its rays look for the sky)
+    float physical; // (the Path tracing row: the ambient light is what the rays bring, in the sky's units, no more the game's level shaped)
     vec4 to_sun;    // (the way to the game's sun or moon; w > 0: known)
     uint64_t light_list;   // (the game's lamps nearest the camera, 20 floats each: rt_debug.comp's list of the frame before)
     int light_count;
@@ -65,6 +67,10 @@ float noise(vec2 p) {
 void main() {
     const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(g, pc.size))) return;
+    if (pc.rays < 0) {   // (a test, RX_VK_RT_AO_CONST: one value everywhere, to measure the game's ambient light by)
+        imageStore(occlusion, g, vec4(pc.strength));
+        return;
+    }
     const vec2 uv = (vec2(g) + 0.5) / vec2(pc.size);
     const float d = textureLod(scene_depth, uv, 0.0).r;
     if (!(d > 0.0 && d < 1.0)) {   // (the sky)
@@ -141,12 +147,44 @@ void main() {
             const vec3 its = id == 0xfffffe || (id & 0xffff) < 2 ? vec3(0.0) : texelFetch(materials, ivec2(id & 255, (id >> 8) & 255), 0).rgb;
             const float light = dot(its, vec3(1.0)) > 0.0 ? clamp(dot(its, vec3(0.2126, 0.7152, 0.0722)), 0.05, 0.9) : 0.3;
             float lit = 0.3;
+            bool sunny = false;
             if (pc.to_sun.w > 0.0) {
                 rayQueryEXT sq;
                 rayQueryInitializeEXT(sq, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF,
                                       from + dir * max(rayQueryGetIntersectionTEXT(q, true) - 0.05, 0.0), 0.0, pc.to_sun.xyz, 400.0);
                 while (rayQueryProceedEXT(sq)) {}
-                if (rayQueryGetIntersectionTypeEXT(sq, true) != gl_RayQueryCommittedIntersectionTriangleEXT) lit = 1.0;
+                if (rayQueryGetIntersectionTypeEXT(sq, true) != gl_RayQueryCommittedIntersectionTriangleEXT) lit = 1.0, sunny = true;
+            }
+            if (pc.physical > 0.5) {
+                // (the Path tracing row: the light the wall sends here, counted in the sky's own brightness as 1. The
+                // sun on it by a ray: three skies at a surface square to it (the sky taken as a third of the sun's
+                // light there), less by the cosine. The lamps by their falloff. And what reaches the wall from
+                // elsewhere, by one more ray over its own hemisphere: the sky where that one leaves the scene, else a
+                // dim wall. All of it through the wall's own lightness. No floor: a cave no lamp reaches is dark.
+                // ponytail: the sky's level is that guess (the game's sky colour for it), the second wall is a
+                // constant, and the result cannot pass the game's own ambient level, which this image only scales)
+                vec3 v[3];
+                rayQueryGetIntersectionTriangleVertexPositionsEXT(q, true, v);
+                vec3 ng = normalize(mat3(rayQueryGetIntersectionObjectToWorldEXT(q, true)) * cross(v[1] - v[0], v[2] - v[0]));
+                if (dot(ng, dir) > 0.0) ng = -ng;
+                const vec3 hit = from + dir * rayQueryGetIntersectionTEXT(q, true) + ng * 0.03;
+                float e = sunny ? 3.0 * max(dot(ng, pc.to_sun.xyz), 0.0) : 0.0;
+                if (pc.sky > 0.0)
+                    for (int k = 0; k < pc.light_count; k++) {
+                        Floats lb = Floats(pc.light_list);
+                        const uint o = uint(k) * 20u;
+                        e += dot(vec3(lb.f[o + 4u], lb.f[o + 5u], lb.f[o + 6u]), vec3(0.2126, 0.7152, 0.0722)) * lamp_fall(o, hit) / pc.sky;
+                    }
+                const vec3 t2 = normalize(abs(ng.y) < 0.99 ? cross(ng, vec3(0.0, 1.0, 0.0)) : cross(ng, vec3(1.0, 0.0, 0.0))), b2 = cross(ng, t2);
+                const vec2 s2 = s + vec2(91.0, 53.0);
+                const float a2 = 6.2831853 * noise(s2), up = noise(s2.yx + 7.0), flat2 = sqrt(1.0 - up);
+                rayQueryEXT q2;
+                rayQueryInitializeEXT(q2, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsCullBackFacingTrianglesEXT, 0xFF, hit, 0.0,
+                                      t2 * (cos(a2) * flat2) + b2 * (sin(a2) * flat2) + ng * sqrt(up), pc.far);
+                while (rayQueryProceedEXT(q2)) rayQueryConfirmIntersectionEXT(q2);
+                e += rayQueryGetIntersectionTypeEXT(q2, true) == gl_RayQueryCommittedIntersectionTriangleEXT ? 0.1 : 1.0;
+                open += light * e;
+                continue;
             }
             if (pc.sky > 0.0) {
                 const vec3 hit = from + dir * rayQueryGetIntersectionTEXT(q, true);
@@ -160,7 +198,7 @@ void main() {
             }
             open += light * lit;
         }
-        wide = mix(1.0, max(open / 6.0, 0.2), pc.ambient);
+        wide = pc.physical > 0.5 ? min(open / 6.0, 1.0) : mix(1.0, max(open / 6.0, 0.2), pc.ambient);
     }
     imageStore(occlusion, g, vec4(clamp((1.0 - pc.strength * sum / float(max(pc.rays, 1))) * wide, 0.0, 1.0)));
 }

@@ -1150,7 +1150,7 @@ bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_
 
 bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h) {
     Rt& r = rt();
-    if (!r.ok || (opts.ao <= 0 && opts.ambient <= 0) || !out || !w || !h) return false;
+    if (!r.ok || (opts.ao <= 0 && opts.ambient <= 0 && !opts.pt) || !out || !w || !h) return false;
     static const bool off = getenv("RX_VK_RT_AO_POST") != nullptr;   // (a test: the multiply over the picture, as it was)
     if (off) return false;
     std::lock_guard lk(r.mu);
@@ -1200,7 +1200,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
         int32_t rays;
         float skin;
         float ambient, sky_reach;
-        float pad[3];   // (to_sun is a vec4 in the block: at a multiple of 16)
+        float physical, pad[2];   // (to_sun is a vec4 in the block: at a multiple of 16)
         float to_sun[4];
         uint64_t light_list;
         int32_t light_count;
@@ -1214,7 +1214,8 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     pc.size[0] = (int32_t)w, pc.size[1] = (int32_t)h;
     pc.strength = (float)opts.ao / 50.0f;   // (the row's 50%: a ray's hit counts whole)
     static const float sky_reach = getenv("RX_VK_RT_AMBIENT_FAR") ? (float)atof(getenv("RX_VK_RT_AMBIENT_FAR")) : 40.0f;
-    pc.ambient = std::clamp((float)opts.ambient / 100.0f, 0.0f, 1.0f), pc.sky_reach = sky_reach;
+    pc.ambient = opts.pt ? 1.0f : std::clamp((float)opts.ambient / 100.0f, 0.0f, 1.0f), pc.sky_reach = sky_reach;
+    pc.physical = opts.pt ? 1.0f : 0.0f;   // (the Path tracing row: rt_ao.comp)
     if (pc.ambient > 0.0f) {   // (the game's sun, as rt_frame reads it for the bounce: the lit draws' frame buffer at 0x40)
         float f[7];   // (its colour too, at 0x50: a third of what it gives a surface stands for the sky's light)
         if (memory_read_as_submitted(r.local_frame_buffer.load(std::memory_order_relaxed) + 0x40, f, sizeof f)) {
@@ -1231,6 +1232,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     // (the same noise every frame: with another each frame, what a few rays found in a narrow place (under a rug's edge)
     // changed from frame to frame, and the game's blur of one frame does not average frames: small shadows flickered)
     pc.radius = radius, pc.rays = rays, pc.skin = skin, pc.seed = 0.0f;
+    if (const char* e = getenv("RX_VK_RT_AO_CONST")) pc.rays = -1, pc.strength = (float)atof(e);   // (a test: rt_ao.comp)
     full_barrier(cmd, "barrier (rt occlusion)");
     VkWriteDescriptorSetAccelerationStructureKHR wa{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR};
     wa.accelerationStructureCount = 1, wa.pAccelerationStructures = &r.top.as;
@@ -1614,7 +1616,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     pc.ao = ao, pc.radius = radius, pc.seed = seed, pc.rays = ao > 0.0f || gi > 0.0f || debug ? rays : 0;
     static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     if (!dlss_math::reprojection(view_proj, identity, pc.inv)) return;   // (identity * inverse(view_proj))
-    if (lamps && (lights || gi > 0.0f || opts.ambient > 0) && (r.light_list.buffer || make_buf(r.light_list, kRing * kLights * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true))) {
+    if (lamps && (lights || gi > 0.0f || opts.ambient > 0 || opts.pt) && (r.light_list.buffer || make_buf(r.light_list, kRing * kLights * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true))) {
         // (the game's lights, 96 bytes each, as its lighting shader reads them: the type at 16 (1 a spot, 100 a point
         // light), the colour at 32 with one over its reach after it, the place at 48 with a spot's cone's inner cosine
         // after it, the falloff's constant, linear and square terms at 64 with the cone's outer cosine after them, a
