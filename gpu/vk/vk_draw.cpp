@@ -2616,6 +2616,30 @@ VkDescriptorBufferInfo uniform_range(const NvnState& s, const Stage& st, uint32_
         const uint64_t want = used ? std::max<uint64_t>(used, 16) : std::max<uint64_t>(u.size, 16);
         const uint64_t n = std::min<uint64_t>(std::min<uint64_t>(want, u.size ? std::max<uint64_t>(u.size, 16) : want),
                                               dev.props.limits.maxUniformBufferRange);
+        {   // (miojo, a test: RX_VK_POKE="<hex offset>:<float>,..." writes those floats over the lit draws' frame buffer, the
+            // fragment stage's uniform buffer 3 of 16960 bytes, as the shaders read it: to find what each field does)
+            static const std::vector<std::pair<uint32_t, float>> pokes = [] {
+                std::vector<std::pair<uint32_t, float>> v;
+                for (const char* e = getenv("RX_VK_POKE"); e && *e;) {
+                    char* end = nullptr;
+                    const uint32_t off = (uint32_t)strtoul(e, &end, 16);
+                    if (!end || *end != ':') break;
+                    const float f = strtof(end + 1, &end);
+                    v.push_back({off, f});
+                    e = *end == ',' ? end + 1 : "";
+                }
+                return v;
+            }();
+            if (!pokes.empty() && st.nvn_stage == 1 && index == 6 && u.size == 16960) {
+                const uint64_t at = stream_alloc(n, align);
+                if (at != UINT64_MAX) {
+                    memory_read_as_submitted(u.addr, cur->mapped + at, n);
+                    for (const auto& pk : pokes)
+                        if (pk.first + 4 <= n) std::memcpy(cur->mapped + at + pk.first, &pk.second, 4);
+                    return {cur->stream, at, n};
+                }
+            }
+        }
         // (updates the stream made to this range in this submission or ones still in flight: a copy with them in)
         // (room first: the overlay copies into the stream's mapping, which a move to a bigger stream in the middle would change)
         if (stream_reserve(n, align))
@@ -3189,6 +3213,14 @@ void build_descriptors(const NvnState& s, const Program& p) {
                                tex ? tex->width : 0, tex ? tex->height : 0, tex ? tex->layers : 0, tex ? (void*)tex->image : nullptr,
                                (void*)view, view ? "" : " (dummy)");
                 if (view && tex && tex->gpu_written) draw_sampled().push_back(tex);
+                {   // (miojo, a test: RX_VK_NO_AMBIENT, bit 0 the fragment stages' cube textures, bit 1 their 3D ones, bit 2
+                    // their 2D arrays: the empty texture in their place, to see what of the game's light comes from them)
+                    static const int no_ambient = getenv("RX_VK_NO_AMBIENT") ? atoi(getenv("RX_VK_NO_AMBIENT")) : 0;
+                    if (no_ambient && view && st.vk_stage == VK_SHADER_STAGE_FRAGMENT_BIT &&
+                        (((no_ambient & 1) && vt == VK_IMAGE_VIEW_TYPE_CUBE) || ((no_ambient & 2) && vt == VK_IMAGE_VIEW_TYPE_3D) ||
+                         ((no_ambient & 4) && vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY)))
+                        view = VK_NULL_HANDLE;
+                }
                 if (!view) view = dummies.view[(int)vt], st_dummy_textures += handle != 0;
                 dw().imgs.push_back({sampler_for((int)(handle >> 20), d.is_depth), view, VK_IMAGE_LAYOUT_GENERAL});
             }
