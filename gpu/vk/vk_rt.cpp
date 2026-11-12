@@ -1539,7 +1539,8 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
 
     static const int debug = getenv("RX_VK_RT_DEBUG") ? atoi(getenv("RX_VK_RT_DEBUG")) : 0;
     if (dev.props.limits.maxPushConstantsSize < 240) return;
-    const bool lights = opts.lights > 0 && now - r.local_frame.load(std::memory_order_relaxed) <= 2;
+    const bool lamps = now - r.local_frame.load(std::memory_order_relaxed) <= 2;   // (the game's lights' table was seen)
+    const bool lights = opts.lights > 0 && lamps;
     if ((!debug && !(ao > 0.0f) && !(gi > 0.0f) && !lights) || !n || !make_pipeline(r) || !make_cache(r, cmd) ||
         !make_atlas(r, cmd))
         return;
@@ -1588,7 +1589,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     pc.ao = ao, pc.radius = radius, pc.seed = seed, pc.rays = ao > 0.0f || gi > 0.0f || debug ? rays : 0;
     static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     if (!dlss_math::reprojection(view_proj, identity, pc.inv)) return;   // (identity * inverse(view_proj))
-    if (lights && (r.light_list.buffer || make_buf(r.light_list, kRing * kLights * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true))) {
+    if (lamps && (lights || gi > 0.0f) && (r.light_list.buffer || make_buf(r.light_list, kRing * kLights * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true))) {
         // (the game's lights, 96 bytes each, as its lighting shader reads them: the type at 16 (1 a spot, 100 a point
         // light), the colour at 32 with one over its reach after it, the place at 48 with a spot's cone's inner cosine
         // after it, the falloff's constant, linear and square terms at 64 with the cone's outer cosine after them, a
@@ -1633,7 +1634,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         }
         flush_mapped_range(r.light_list.memory, at, kLights * 80);
         pc.light_count = (int32_t)found.size(), pc.light_list = r.light_list.address + at;
-        pc.lights = found.empty() ? 0.0f : std::min((float)opts.lights / 100.0f, 1.0f);
+        pc.lights = found.empty() || !lights ? 0.0f : std::min((float)opts.lights / 100.0f, 1.0f);   // (the shadows' strength; the bounce reads the list too)
         static int told = 0;
         if (!found.empty() && told < 4 && now % 600 == 0) {
             const float* f = rec + found[0].second * 24;
