@@ -191,6 +191,7 @@ struct Rt {
     float sun_colour[3]{};   // (the game's, before its exposure; 0: not known)
     std::atomic<uint64_t> local_lights{0}, local_frame_buffer{0}, local_frame{0};   // (rt_note_local_lights)
     Buf light_list;   // (the frame's lights for rt_debug.comp: kRing frames of kLights lights, 20 floats each)
+    float lamps_exposure = 0.0f;   // (the game's exposure, which the list's colours carry)
     uint64_t lamps_at = 0, lamps_frame = 0;   // (the last frame's list, for the next frame's traced ambient: rt_ao_replace)
     int32_t lamps_count = 0;
     std::atomic<uint64_t> traced_frame{0};   // (the frame rt_frame last drew its effects)
@@ -1229,8 +1230,10 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                 const float sun = (0.2126f * f[4] + 0.7152f * f[5] + 0.0722f * f[6]) / 3.14159265f;
                 if (sun > 1e-4f && sun < 1e4f) sky_level = sun / 3.0f;
                 else if (opts.pt) pc.to_sun[3] = 0.0f;
+                // (by the exposure, as the list's colours are: without it a lamp weighed a sixtieth of its light at
+                // night and a ninth in a cave, and lit no wall)
                 if (sky_level > 0.0f && now - r.lamps_frame <= 2 && r.lamps_count > 0)
-                    pc.sky = sky_level, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;
+                    pc.sky = sky_level * r.lamps_exposure, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;
             }
         }
     }
@@ -1675,7 +1678,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
                      eye[0], eye[1], eye[2]);
             }
         pc.light_count = (int32_t)found.size(), pc.light_list = r.light_list.address + at;
-        r.lamps_at = pc.light_list, r.lamps_count = pc.light_count, r.lamps_frame = now;
+        r.lamps_exposure = exposure, r.lamps_at = pc.light_list, r.lamps_count = pc.light_count, r.lamps_frame = now;
         pc.lights = found.empty() || !lights ? 0.0f : std::min((float)opts.lights / 100.0f, 1.0f);   // (the shadows' strength; the bounce reads the list too)
         static int told = 0;
         if (!found.empty() && told < 4 && now % 600 == 0) {
