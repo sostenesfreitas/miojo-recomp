@@ -16,6 +16,16 @@
    (RETAA/RETAB, BRAA/BRAB and their Z forms), so register values from the block before a `retab` leaked into
    the dispatch block. zlib's inflate (main+0x1105e70) loses its table register x0 that way, to the
    `mov w0, #-2` before the `retab` above the dispatch. The window now starts after the last such instruction.
+4. A function with code below its entry. emit_function writes a function's instructions in address order, and the C
+   function starts at the first of them: at its entry only when the entry is its lowest address. A function is its
+   entry and everything reachable from it without crossing another entry, so that is not always so. Where a module
+   has no unwind entry per function (main's libcurl: one entry for 238 KB at main+0x24a21e0), a function that
+   branches to code at a lower address which is no entry of its own has that code below its entry. So has the
+   return address of a setjmp call, an entry since find_setjmp_owners, when the code after the call loops back
+   (main+0x165ab04). On build e0f3ccfa 26 functions are like that, 25 of them in libcurl, and each began at an
+   instruction that was not its first. Such a function now starts with `goto L_<entry>;` (stats: entry_gotos).
+   Found with ExeFS patches applied when the game is built: a patch routine in a code cave that goes on in spare
+   code at a lower address was run from there, without its first instructions.
 """
 import a64_lift
 
@@ -112,3 +122,18 @@ def install():
         return out
 
     a64_lift.Lifter.jump_table = jump_table
+
+    base_emit_function = a64_lift.Lifter.emit_function
+
+    def emit_function(self, e, texts):
+        body, labels = self.funcs[e]
+        if e in self.plt or min(body) == e:   # (a PLT stub is written without its body)
+            return base_emit_function(self, e, texts)
+        labels.add(e)   # (the base writes "L_<entry>:;" at an entry that is a label)
+        text, refs = base_emit_function(self, e, texts)
+        head = "void f_%08x(Ctx *__restrict A64_NOESC c) {\n" % e
+        at = text.index(head) + len(head)
+        self.stats["entry_gotos"] += 1
+        return text[:at] + "goto L_%08x;\n" % e + text[at:], refs
+
+    a64_lift.Lifter.emit_function = emit_function

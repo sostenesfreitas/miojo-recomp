@@ -682,6 +682,231 @@ def vectorize_fpx(text):
                         % (m.group(3), m.group(1), m.group(2)), text)
 
 
+# (hookshot) Fast float regions (A64_FASTFP at lift time: on unless "0"; "hot" the A64_HOT_FUNCS list only; "check"
+# both copies every time, compared: see ff_region).
+# Each float op on the exact path carries its own tests (~25 instructions around one SSE op). A straight run of
+# instructions with no label, store, call, branch or system access inside, holding at least A64_FASTFP_MIN (8) single-
+# precision adds, subtracts, multiplies, divides or square roots, is emitted twice: a fast copy whose ops are plain SSE,
+# with MXCSR's flags cleared before it and read once after, and the exact copy. A clean fast run is the Arm result: with
+# no invalid operation (no NaN made), no denormal operand and no underflow (FTZ on under FPCR.FZ: a tiny result is
+# flushed and flagged), IEEE single precision round-to-nearest is the same on both, except for a NaN result or a
+# product, quotient or multiply-add of exactly 2^-126, which raise the invalid flag on purpose (a64_ff_guard_; the ops
+# are asm with Arm's operand order all the same). Divide-by-zero and overflow give the same infinities; they and inexact
+# are or-ed into FPSR. On an invalid, denormal or underflow flag the registers the run names are put back and the exact
+# copy runs. Measured
+# 2026-11-11 on OoT's f_820e1d60 in game (both run per call, compared): 0 mismatches in 150,000 calls, 1.79x faster.
+# HOS_NO_FASTFP (run time, any value): the exact copies only, for comparisons.
+FF_CALL = re.compile(r"\b((?:recomp|a64|A64|RECOMP)_\w+)\s*\(")
+FF_PURE = {"recomp_load8", "recomp_load16", "recomp_load32", "recomp_load64", "recomp_ldp32", "recomp_ldp64",
+           "a64_vset64", "a64_vset128", "a64_vset_lo", "a64_vst16", "a64_fcmp32", "a64_fcmp64", "a64_vfcmp",
+           "recomp_fixed_to_fp", "recomp_fp_to_int", "recomp_fp_to_fixed", "recomp_umulh", "recomp_smulh",
+           "recomp_fp_estimate", "recomp_aes_sbox", "RECOMP_LIKELY", "RECOMP_UNLIKELY", "RECOMP_FPX_OPEN",
+           "RECOMP_FPX_FZ", "a64_fcmp32k", "a64_fcmp64k"}
+FF_BAD = ("c->fpcr", "c->fpsr", "c->excl", "c->pc", "c->halted", "c->poll", "c->tpidr", "\x01", "goto ", "return",
+          "switch", "A64_PTR", "A64_MARK")
+# (the exact blocks' own uses, safe in a region: FPCR read in a test (it doesn't change inside one: no MSR there), and
+# FPSR's cumulative bits or-ed in (put back with the registers when the region runs again exactly). An MSR, or an MRS of
+# FPSR, which would see a value the fast copy has not finished, still ends the run.)
+FF_FP_OK = re.compile(r"c->fpcr\s*&|c->fpsr\s*\|=")
+# ((hookshot) fma32_fma32: FMADD/FMSUB/FNMADD/FNMSUB and FMLA/FMLS S lanes, an FMA3 op where the build has one; see
+# a64_ff_fma32_fma32 in FASTFP_HEADER)
+FF_CONV = re.compile(r"\ba64_vfpx_(add32|sub32|mul32)\(|"
+                     r"\ba64_fpx_(add32_add32|sub32_sub32|mul32_fma32|fma32_fma32|div32_div32|sqrt32_sqrt32)\(")
+VREG_REF = re.compile(r"c->vreg\[(\d+)\]")
+
+
+def fastfp_mode():
+    """the mode: empty when A64_FASTFP is 0 (off), else its value, "1" by default (every function), hot or check"""
+    v = os.environ.get("A64_FASTFP", "1")
+    return "" if v == "0" else v
+
+
+def ff_min():
+    v = os.environ.get("A64_FASTFP_MIN", "")
+    return int(v) if v.isdigit() else 8
+
+
+def ff_eligible(text):
+    """an instruction's C text may sit inside a fast float region: no store, control flow or system state; only pure calls"""
+    if any(b in FF_FP_OK.sub("", text) for b in FF_BAD):
+        return False
+    return all(n in FF_PURE or n.startswith(("a64_fpx_", "a64_vfpx_")) for n in FF_CALL.findall(text))
+
+
+def ff_region(items):
+    """a run's C text ([(pc, text)], every text ff_eligible): the fast and exact copies, or the exact text alone when the
+    run has too few float ops to pay for its check. (text, number of ops made fast)"""
+    exact = "\n".join(t for _, t in items)
+    n = len(FF_CONV.findall(exact))
+    if n < ff_min():
+        return exact, 0
+    fast = FF_CONV.sub(lambda m: "a64_ff_v%s(" % m.group(1) if m.group(1) else "a64_ff_%s(" % m.group(2), exact)
+    xs = sorted({int(r) for r in REG_REF.findall(exact)})
+    vs = sorted({int(r) for r in VREG_REF.findall(exact)})
+    fl = sorted(set(FLAG_REF.findall(exact)))
+    save = ("".join("const uint64_t _ffx%d = c->x[%d]; " % (r, r) for r in xs) +
+            "".join("const uint64_t _ffv%d0 = c->vreg[%d][0], _ffv%d1 = c->vreg[%d][1]; " % (r, r, r, r) for r in vs) +
+            "".join("const uint8_t _fff%s = c->%s; " % (f, f) for f in fl) + "const uint64_t _ffsr = c->fpsr; ")
+    restore = ("".join("c->x[%d] = _ffx%d; " % (r, r) for r in xs) +
+               "".join("c->vreg[%d][0] = _ffv%d0; c->vreg[%d][1] = _ffv%d1; " % (r, r, r, r) for r in vs) +
+               "".join("c->%s = _fff%s; " % (f, f) for f in fl) + "c->fpsr = _ffsr; ")
+    label = "L_ff_%08x" % items[0][0]
+    if fastfp_mode() == "check":
+        # (A64_FASTFP=check: both copies every time, the exact one's result kept, the registers the run names compared;
+        # a64_ff_check counts and prints the first mismatches with the run's guest address)
+        keep = ("".join("const uint64_t _ffox%d = c->x[%d]; " % (r, r) for r in xs) +
+                "".join("const uint64_t _ffov%d0 = c->vreg[%d][0], _ffov%d1 = c->vreg[%d][1]; " % (r, r, r, r) for r in vs) +
+                "".join("const uint8_t _ffof%s = c->%s; " % (f, f) for f in fl))
+        same = " && ".join(["1"] + ["_ffox%d == c->x[%d]" % (r, r) for r in xs] +
+                           ["_ffov%d0 == c->vreg[%d][0] && _ffov%d1 == c->vreg[%d][1]" % (r, r, r, r) for r in vs] +
+                           ["_ffof%s == c->%s" % (f, f) for f in fl])
+        return ("{ if (A64_FF_ON(c)) { %sconst unsigned _ffm = a64_ff_begin(c);\n%s\n"
+                "const int _ffok = a64_ff_end(c, _ffm);\n%s%s\n%s\na64_ff_check(0x%xu, _ffok, %s); } else {\n%s\n} }"
+                % (save, fast, keep, restore, exact, items[0][0], same, exact)), n
+    return ("{ if (A64_FF_ON(c)) { %sconst unsigned _ffm = a64_ff_begin(c);\n%s\n"
+            "if (RECOMP_LIKELY(a64_ff_end(c, _ffm))) goto %s;\n%s}\n%s\n%s:; }"
+            % (save, fast, label, restore, exact, label)), n
+
+
+FASTFP_HEADER = r"""
+/* ---- (hookshot) fast float regions (A64_FASTFP, ff_region in a64_lift.py) ---- */
+#if RECOMP_FPX_HOST == 2 && defined(__x86_64__) && !defined(__EMSCRIPTEN__)
+#include <stdlib.h>
+#include <stdio.h>
+static int a64_ff_enabled_(void) { static int v = -1; if (v < 0) v = !getenv("HOS_NO_FASTFP"); return v; }
+#define A64_FF_ON(c) (RECOMP_FPX_OPEN(c) && a64_ff_enabled_())
+/* MXCSR: exceptions masked, round to nearest, DAZ off, FTZ as FPCR.FZ, flags cleared; the old value returned */
+static inline __attribute__((always_inline)) unsigned a64_ff_begin(const Ctx *c) {
+    unsigned m, n;
+    __asm__ volatile("stmxcsr %0" : "=m"(m));
+    n = (m & ~0xE07Fu) | 0x1F80u | (RECOMP_FPX_FZ(c) ? 0x8000u : 0u);
+    __asm__ volatile("ldmxcsr %0" : : "m"(n));
+    return m;
+}
+/* 0: an invalid, denormal or underflow flag (the exact copy runs); else inexact, overflow, divide-by-zero to FPSR */
+static inline __attribute__((always_inline)) int a64_ff_end(Ctx *c, unsigned m) {
+    unsigned f;
+    __asm__ volatile("stmxcsr %0" : "=m"(f));
+    __asm__ volatile("ldmxcsr %0" : : "m"(m));
+    if (f & 0x13u) return 0;
+    c->fpsr |= (f & 0x20u ? 0x10u : 0u) | (f & 0x08u ? 0x04u : 0u) | (f & 0x04u ? 0x02u : 0u);
+    return 1;
+}
+/* (asm volatile: kept inside the MXCSR window and in Arm's operand order, see ff_region) */
+#ifdef __AVX__
+#define A64_FF_OP(ins, d, a, b) __asm__ volatile("v" ins " %2, %1, %0" : "=x"(d) : "x"(a), "x"(b))
+#define A64_FF_SQRT(d, a) __asm__ volatile("vsqrtss %1, %1, %0" : "=x"(d) : "x"(a))
+#define A64_FF_SPOIL "vcomiss %0, %0"
+#else
+#define A64_FF_OP(ins, d, a, b) do { (d) = (a); __asm__ volatile(ins " %1, %0" : "+x"(d) : "x"(b)); } while (0)
+#define A64_FF_SQRT(d, a) __asm__ volatile("sqrtss %1, %0" : "=x"(d) : "x"(a))
+#define A64_FF_SPOIL "comiss %0, %0"
+#endif
+/* The invalid flag raised on purpose (a signalling compare of a NaN), sending the run to its exact copy, for two results
+   whose value x86 gets right but not Arm's flags, or under FZ not Arm's value (found by tests/test_fastfp_fma.py):
+   - a NaN: x86 raises no denormal flag for a subnormal next to a NaN operand, where Arm under FZ flushes it and sets
+     IDC; and a multiply-add's 0 * inf + a quiet NaN gives that NaN with no flag (Arm: the default NaN, IOC);
+   - exactly 2^-126, the smallest normal, from a multiply, divide or multiply-add: x86 detects tininess after rounding,
+     Arm before, so a result rounded up to 2^-126 sets UFC on Arm, and is a zero under FZ. (A sum this small is exact.)
+   The tests are integer compares on the bits: a float compare would raise the denormal flag on a subnormal result. */
+static inline __attribute__((always_inline)) void a64_ff_spoil_(void) {
+    __asm__ volatile(A64_FF_SPOIL : : "x"(_mm_castsi128_ps(_mm_cvtsi32_si128(0x7fc00000))) : "cc");
+}
+static inline __attribute__((always_inline)) void a64_ff_guard_(uint64_t v, int tiny) {
+    const uint32_t m = (uint32_t)v & 0x7fffffffu;
+    if (__builtin_expect(m > 0x7f800000u || (tiny && m == 0x00800000u), 0)) a64_ff_spoil_();
+}
+static inline __attribute__((always_inline)) void a64_ff_vguard_(__m128 r, int k, int tiny) {   /* (the k lanes kept) */
+    const __m128i m = _mm_and_si128(_mm_castps_si128(r), _mm_set1_epi32(0x7fffffff));
+    __m128i bad = _mm_cmpgt_epi32(m, _mm_set1_epi32(0x7f800000));
+    if (tiny) bad = _mm_or_si128(bad, _mm_cmpeq_epi32(m, _mm_set1_epi32(0x00800000)));
+    if (__builtin_expect(_mm_movemask_ps(_mm_castsi128_ps(bad)) & (k == 4 ? 15 : 3), 0)) a64_ff_spoil_();
+}
+/* (2 lanes: the upper two are loaded as zeros, so they raise no flag of their own) */
+static inline __attribute__((always_inline)) __m128 a64_ff_vld(const uint64_t *s, int k) {
+    return k == 4 ? _mm_loadu_ps((const float *)s) : _mm_castsi128_ps(_mm_loadl_epi64((const __m128i *)s));
+}
+static inline __attribute__((always_inline)) void a64_ff_vst(uint64_t *d, __m128 r, int k) {
+    if (k == 4) _mm_storeu_ps((float *)d, r); else _mm_storeu_si128((__m128i *)d, _mm_move_epi64(_mm_castps_si128(r)));
+}
+#define A64_FF_V(name, ins, tiny) \
+static inline __attribute__((always_inline)) void a64_ff_v##name(Ctx *c, uint64_t *d, const uint64_t *n, const uint64_t *m, int k) { \
+    __m128 r; (void)c; A64_FF_OP(ins, r, a64_ff_vld(n, k), a64_ff_vld(m, k)); \
+    a64_ff_vguard_(r, k, tiny); a64_ff_vst(d, r, k); }
+A64_FF_V(add32, "addps", 0)
+A64_FF_V(sub32, "subps", 0)
+A64_FF_V(mul32, "mulps", 1)
+static inline __attribute__((always_inline)) __m128 a64_ff_ss(uint64_t a) { return _mm_castsi128_ps(_mm_cvtsi32_si128((int)(uint32_t)a)); }
+static inline __attribute__((always_inline)) uint64_t a64_ff_bits(__m128 r) { return (uint32_t)_mm_cvtsi128_si32(_mm_castps_si128(r)); }
+#define A64_FF_S(name, ins, tiny) \
+static inline __attribute__((always_inline)) uint64_t a64_ff_##name(Ctx *c, uint64_t a, uint64_t b) { \
+    __m128 r; (void)c; A64_FF_OP(ins, r, a64_ff_ss(a), a64_ff_ss(b)); a64_ff_guard_(a64_ff_bits(r), tiny); return a64_ff_bits(r); }
+A64_FF_S(add32_add32, "addss", 0)
+A64_FF_S(sub32_sub32, "subss", 0)
+/* (A subnormal over a zero also takes the exact copy: x86 raises no denormal flag beside divide-by-zero and gives an
+   infinity, where Arm under FZ flushes the subnormal first, 0 / 0: the default NaN and IOC.) */
+static inline __attribute__((always_inline)) uint64_t a64_ff_div32_div32(Ctx *c, uint64_t a, uint64_t b) {
+    __m128 r;
+    (void)c;
+    if (__builtin_expect(((uint32_t)b << 1) == 0 && ((uint32_t)a << 1) - 1u < 0x00ffffffu, 0)) a64_ff_spoil_();
+    A64_FF_OP("divss", r, a64_ff_ss(a), a64_ff_ss(b));
+    a64_ff_guard_(a64_ff_bits(r), 1);
+    return a64_ff_bits(r);
+}
+A64_FF_S(mul32_, "mulss", 1)
+static inline __attribute__((always_inline)) uint64_t a64_ff_mul32_fma32(Ctx *c, uint64_t a, uint64_t b, uint64_t z) { (void)z; return a64_ff_mul32_(c, a, b); }
+static inline __attribute__((always_inline)) uint64_t a64_ff_sqrt32_sqrt32(Ctx *c, uint64_t a) { __m128 r; (void)c; A64_FF_SQRT(r, a64_ff_ss(a)); return a64_ff_bits(r); }
+/* (hookshot) FMADD/FMSUB/FNMADD/FNMSUB and FMLA/FMLS S lanes: a64_fpx_fma32_fma32(c, a, b, z) is a*b + z, the lifted
+   code having already flipped the signs the op negates. FMA3's vfmadd231ss rounds once, as Arm does, and takes its
+   NaN in Arm's order (the addend, then a, then b). Two cases differ, and both raise the invalid flag here (a64_ff_guard_),
+   which sends the run to its exact copy:
+   - 0 * inf + a quiet NaN: x86 returns that NaN with no flag, Arm the default NaN with IOC (so: any NaN result);
+   - a result rounded up to the smallest normal, 2^-126: x86 detects tininess after rounding and raises no underflow,
+     Arm detects it before, sets UFC, and under FZ returns a zero.
+   Without FMA3 (x86-64-v2), the exact helper. */
+#ifdef __FMA__
+static inline __attribute__((always_inline)) uint64_t a64_ff_fma32_fma32(Ctx *c, uint64_t a, uint64_t b, uint64_t z) {
+    __m128 r = a64_ff_ss(z);
+    (void)c;
+    __asm__ volatile("vfmadd231ss %2, %1, %0" : "+x"(r) : "x"(a64_ff_ss(a)), "x"(a64_ff_ss(b)));
+    a64_ff_guard_(a64_ff_bits(r), 1);
+    return a64_ff_bits(r);
+}
+#else
+#define a64_ff_fma32_fma32 a64_fpx_fma32_fma32
+#endif
+/* (A64_FASTFP=check) a run's result: counts per file, and the first mismatches of a clean fast run (which must not
+   happen) with the run's guest address, on stderr (the game's log) */
+static volatile long long a64_ff_n_[3];   /* runs, clean, mismatched when clean */
+static __attribute__((noinline, cold)) void a64_ff_check_print_(unsigned pc, long long bad) {
+    if (bad < 16) fprintf(stderr, "fastfp check: MISMATCH in the run at %#x (%s)\n", pc, __BASE_FILE__);
+}
+static inline void a64_ff_check(unsigned pc, int clean, int same) {
+    const long long n = __atomic_add_fetch(&a64_ff_n_[0], 1, __ATOMIC_RELAXED);
+    if (clean) __atomic_add_fetch(&a64_ff_n_[1], 1, __ATOMIC_RELAXED);
+    if (clean && !same) a64_ff_check_print_(pc, __atomic_fetch_add(&a64_ff_n_[2], 1, __ATOMIC_RELAXED));
+    if (!(n & ((1LL << 22) - 1)))
+        fprintf(stderr, "fastfp check: %s: %lld runs, %lld clean, %lld mismatched when clean\n", __BASE_FILE__, n, a64_ff_n_[1], a64_ff_n_[2]);
+}
+#else
+/* (no x86 MXCSR here: the fast copies are never run, and name the exact helpers) */
+#define A64_FF_ON(c) 0
+#define a64_ff_begin(c) 0u
+#define a64_ff_end(c, m) 1
+#define a64_ff_vadd32 a64_vfpx_add32
+#define a64_ff_vsub32 a64_vfpx_sub32
+#define a64_ff_vmul32 a64_vfpx_mul32
+#define a64_ff_add32_add32 a64_fpx_add32_add32
+#define a64_ff_sub32_sub32 a64_fpx_sub32_sub32
+#define a64_ff_mul32_fma32 a64_fpx_mul32_fma32
+#define a64_ff_fma32_fma32 a64_fpx_fma32_fma32
+#define a64_ff_div32_div32 a64_fpx_div32_div32
+#define a64_ff_sqrt32_sqrt32 a64_fpx_sqrt32_sqrt32
+#define a64_ff_check(pc, clean, same) ((void)0)
+#endif
+"""
+
+
 # A64_LOCAL_FLAGS: the fast scalar FCMP as a code (0: the exact block; else 4 | lt | eq << 1), appended to a64_fpx.h
 FCMPK_HEADER = r"""
 static inline __attribute__((always_inline)) uint32_t a64_fcmp32k(Ctx *c, const void *pa, const void *pb) {
@@ -1627,14 +1852,35 @@ class Lifter:
         frame = not os.environ.get("A64_MARK_FRAME")
         local = local_regs() and e not in self.no_local
         dirty = self.dirty_regs(body, pcs, texts) if local else None
+        # (fast float regions, ff_region: the run of joinable instructions so far, [(pc, text)])
+        ff_only = getattr(self, "ff_only", None)
+        ff = bool(fastfp_mode()) and (ff_only is None or self.fname(e) in ff_only)
+        run = []
+
+        def flush():
+            if run:
+                text, n = ff_region(run)
+                out.append(text)
+                if n:
+                    self.stats["ff_regions"] = self.stats.get("ff_regions", 0) + 1
+                    self.stats["ff_ops"] = self.stats.get("ff_ops", 0) + n
+                del run[:]
         for i, pc in enumerate(pcs):
             self.cur_i = i
             (k, w) = body[pc]
             kind = k[0]
+            joins = False
+            if ff and kind == "op" and pc not in self.after and not (pc in labels or (pc == e and e in labels)):
+                t, f = texts[(w, pc) if pc_relative(w) else w]
+                if not f & (a64emit.UNHANDLED | a64emit.TERMINATOR):
+                    joins = ff_eligible(drop_flag_stores(t, dead[pc]) if pc in dead else t)
+            if not joins:
+                flush()
             if pc in labels or (pc == e and e in labels):
                 out.append("L_%08x:;" % pc)
             if self.comments:
-                out.append("/* %08x: %08x */" % (pc, w))
+                (run.append((pc, "/* %08x: %08x */" % (pc, w))) if joins else
+                 out.append("/* %08x: %08x */" % (pc, w)))
             nxt = pc + 4
             falls = True
             if kind == "op":
@@ -1651,7 +1897,10 @@ class Lifter:
                     if pc in dead:
                         text = drop_flag_stores(text, dead[pc])
                         self.stats["dead_flag_stores"] += bin(dead[pc]).count("1")
-                    out.append(text.rstrip("\n"))
+                    if joins:
+                        run.append((pc, text.rstrip("\n")))
+                    else:
+                        out.append(text.rstrip("\n"))
                     if pc in self.after:
                         out.append(self.after[pc])
                         self.stats["after_patches"] = self.stats.get("after_patches", 0) + 1
@@ -1725,7 +1974,9 @@ class Lifter:
             elif kind == "ic":
                 out.append("/* ic ivau: no self-modifying code */")
             if falls and (i + 1 == len(pcs) or pcs[i + 1] != nxt):
+                flush()
                 out.append(self.transfer(pc, nxt, labels, body))
+        flush()
         out.append("}")
         text = "\n".join(out)
         if frame:
@@ -1749,6 +2000,8 @@ class Lifter:
             f.write(fpx_header(fpx))
             if local_flags():
                 f.write(FCMPK_HEADER)
+            if fastfp_mode():
+                f.write(FASTFP_HEADER)
 
         chunk, size, n, decls, files = [], 0, 0, set(), []
 
@@ -1768,6 +2021,7 @@ class Lifter:
             chunk, size, n, decls = [], 0, n + 1, set()
 
         hot = hot_functions()
+        self.ff_only = hot if fastfp_mode() == "hot" else None   # (A64_FASTFP=hot: the hot functions' regions only)
         # A64_HOT_CHUNK=1 (with A64_HOT_FUNCS): the hot functions in a file of their own, code_hot.c, so that the
         # compiler sees the hot callees' bodies where the hot callers are and can inline them (build.py compiles it
         # with RX_HOT_CFLAGS)
@@ -1801,6 +2055,9 @@ class Lifter:
             files.append(path)
         elif os.path.exists(os.path.join(out_dir, "code_hot.c")):
             os.remove(os.path.join(out_dir, "code_hot.c"))   # (a lift without the hot file: no stale copy linked twice)
+        if fastfp_mode():
+            print("fast float regions (A64_FASTFP=%s): %d, %d float ops in them" % (
+                fastfp_mode(), self.stats.get("ff_regions", 0), self.stats.get("ff_ops", 0)))
         if hot:
             print("hot functions (A64_HOT_FUNCS): %d of %d listed found%s" % (nhot, len(hot),
                                                                          ", in code_hot.c" if hot_chunk else ""))

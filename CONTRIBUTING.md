@@ -35,13 +35,13 @@ break. Claim in Discord #dev-work before you start.
 |---|---|
 | **Test on other hardware** | NVIDIA cards are the most tested; the README's [status table](readme.md#project-status) says what works where, and [tested configurations](docs/tested-configurations.md) lists the runs behind it (build, hardware, driver, where, fps). Reports from AMD and Intel cards, other NVIDIA drivers, other distributions and SteamOS are useful even when everything works: add a row there. Pull requests that need a run on your hardware are queued as [test requests](docs/test-requests.md): pick one up, by hand or with an agent. |
 | **Play further** | The tested area is the start of the game. Reaching new areas, cutscenes, menus and items finds problems the developer has not seen. |
-| **Report what is broken** | Use the [issue forms](https://github.com/NotRexed/Hookshot/issues/new/choose): game problem, build problem or idea. Include the version, your hardware, where you were and `hookshot_log.txt`. |
+| **Report what is broken** | Use the [issue forms](https://git.notrexed.dev/Hookshot/Hookshot/issues/new/choose): game problem, build problem or idea. Include the version, your hardware, where you were and `hookshot_log.txt`. |
 | **Send a fix** | Fork, fix, test, open a pull request. Small, focused changes are easiest to review and merge. |
 | **Improve the docs** | The README, the development guide and the design notes are part of the project. Corrections and clearer steps are welcome. |
 
 ## Before you open an issue or a PR
 
-- Try the [newest release](https://github.com/NotRexed/Hookshot/releases/latest) first. It includes every fix before it.
+- Try the [newest release](https://git.notrexed.dev/Hookshot/Hookshot/releases/latest) first. It includes every fix before it.
 - Search the open issues. If yours is already there, add your details instead of opening another.
 - English, please.
 - One topic per issue or pull request. Do not mix a fix with a refactor or a batch of unrelated changes.
@@ -186,7 +186,7 @@ hot code at `-O1`, about a quarter less compile time. Never use it for fps, timi
 
 ### Game-free checks
 
-These need no dump and are what CI runs, on every pull request and every push to `main`. One command runs them all:
+These need no dump and are what CI runs, on every pull request and every push to `main`. One command runs the source checks:
 
 ```powershell
 python -I -B tests/run_all.py
@@ -204,6 +204,11 @@ validator (`spirv-val`), the SPIR-V or Vulkan headers (`HOOKSHOT_SPIRV_HEADERS` 
 cache in `RX_CPM` or `build-linux/deps/cpm`), or the `zstandard` package. A check whose tool is missing is skipped and
 says so; CI passes `--strict`, which fails it instead. A check that cannot run in CI (a GPU, the game, a Visual Studio
 prompt), or runs on one OS only, says so in its own file with `RUN_ALL_SKIP`; `--no-skip` runs it anyway.
+
+CI also runs `tests/run_vulkan_fixtures.py` on Ubuntu 24.04 with Mesa's lavapipe software driver and the Khronos
+validation layer. It executes the authored write-back shader, copy-span and seven offscreen aspect/crop cases;
+missing devices, skipped cases and validation errors fail the job. This is CPU Vulkan execution, not hardware GPU
+coverage, a swapchain or a game run. The ordinary source checks keep their GPU opt-ins/skips for machines without Vulkan.
 
 ### Checks that need your dump or a run
 
@@ -332,9 +337,9 @@ NVIDIA's DLSS SDK is not one of them: it is never in the repository, and nothing
 
 ## Where to talk
 
-- **Issues:** [use the forms](https://github.com/NotRexed/Hookshot/issues/new/choose).
+- **Issues:** [use the forms](https://git.notrexed.dev/Hookshot/Hookshot/issues/new/choose).
 - **Discord:** https://discord.gg/rexed. Use the `dev-work` channel for prs.
-- **Newest release:** https://github.com/NotRexed/Hookshot/releases/latest
+- **Newest release:** https://git.notrexed.dev/Hookshot/Hookshot/releases/latest
 
 Thanks for testing, reporting and sending fixes. Every report from a different GPU and every area played further than
 before moves the port forward.

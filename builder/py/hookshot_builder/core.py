@@ -69,10 +69,8 @@ def build_env(tools, workers=None, ngx_sdk=None):
     env["PYTHONIOENCODING"] = "utf-8"
     if workers:
         env["HOOKSHOT_JOBS"] = str(int(workers))
-    # (written into the game folder's hookshot_version.txt: the game starts this app again to update, host/hos_update.c)
-    exe, args = paths.launcher_command()
-    env["HOOKSHOT_BUILDER_EXE"] = exe
-    env["HOOKSHOT_BUILDER_ARGS"] = subprocess.list2cmdline(args)
+    # (written into the game folder's hookshot_version.txt: which builder made the folder)
+    env["HOOKSHOT_BUILDER_EXE"] = paths.launcher_command()[0]
     # (NVIDIA DLSS: only when ticked. Without it, one set on the PC is not passed on either)
     if ngx_sdk:
         env["HOOKSHOT_NGX_SDK"] = ngx_sdk

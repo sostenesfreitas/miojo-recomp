@@ -827,13 +827,24 @@ size_t program_cache_load_some(const std::unordered_set<uint64_t>& wanted, const
 /// (hookshot) Program key's kept variants made for fn, then let go (modules and layouts): the records stay for play
 void program_cache_borrow(uint64_t key, const std::function<void(Program&)>& fn) {
     std::vector<std::unique_ptr<Program>> variants;
+    // Own the handles before loading: both the loader and the callback may throw.
+    // Program's vectors are RAII-managed, but its Vulkan handles are not.
+    struct Cleanup {
+        std::vector<std::unique_ptr<Program>>& variants;
+        static void release(Program& p) {
+            for (Stage& st : p.stages)
+                if (st.module) vkDestroyShaderModule(dev.device, st.module, nullptr), st.module = VK_NULL_HANDLE;
+            if (p.layout) vkDestroyPipelineLayout(dev.device, p.layout, nullptr), p.layout = VK_NULL_HANDLE;
+            if (p.set_layout) vkDestroyDescriptorSetLayout(dev.device, p.set_layout, nullptr), p.set_layout = VK_NULL_HANDLE;
+        }
+        ~Cleanup() {
+            for (auto& p : variants) release(*p);
+        }
+    } cleanup{variants};
     program_cache_load(key, variants, true);
     for (auto& p : variants) {
         fn(*p);
-        for (Stage& st : p->stages)
-            if (st.module) vkDestroyShaderModule(dev.device, st.module, nullptr);
-        if (p->layout) vkDestroyPipelineLayout(dev.device, p->layout, nullptr);
-        if (p->set_layout) vkDestroyDescriptorSetLayout(dev.device, p->set_layout, nullptr);
+        Cleanup::release(*p);   // (release each variant before starting the next one)
     }
 }
 

@@ -102,6 +102,17 @@ int run(int argc, char** argv) {
     } else if (test == "reuse") {
         cpu(37,0x5b); auto old = arenas.front().buffer; completed_value = rec_value++;
         cpu(37,0xa7); require(arenas.size() == 1 && arenas.front().buffer == old, "completed arena reused with new bytes");
+    } else if (test == "inflight-tail") {
+        cpu(37, 0x5b);
+        require(arenas.size() == 1, "initial arena allocated");
+        auto old = arenas.front().buffer;
+        auto first_used = arenas.front().used;
+        rec_value++; // advance timeline without completing the first slice
+        cpu(49, 0xa7);
+        require(arenas.size() == 1 && arenas.front().buffer == old, "in-flight arena tail reused without new allocation");
+        require(arenas.front().value == rec_value, "in-flight arena bumped to latest rec_value");
+        require(arenas.front().used > first_used, "second slice allocated past first slice");
+        require(flushes == 2, "both slices flushed independently");
     } else if (test == "multiple") {
         cpu(kModelArena,0x5b); cpu(31,0xa7); require(arenas.size() == 2, "multiple arenas independently published");
     } else if (test == "failure") {

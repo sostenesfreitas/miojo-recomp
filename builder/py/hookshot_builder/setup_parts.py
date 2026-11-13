@@ -73,7 +73,7 @@ class Http:
                 return None if sink else b"".join(out)
         except urllib.error.HTTPError as e:
             self.status = e.code
-            raise SetupError("GitHub returned HTTP %d" % e.code) from None
+            raise SetupError("git.notrexed.dev returned HTTP %d" % e.code) from None
         except (urllib.error.URLError, OSError, TimeoutError) as e:
             if not isinstance(e, SetupError):
                 self.status = self.status if self.status and self.status != 200 else 0
@@ -84,16 +84,16 @@ class Http:
 def api_link_for(http, url):
     """https://github.com/<owner>/<repo>/releases/download/<tag>/<name> (or .../latest/download/<name>) -> the API's own link to
     that file, which redirects to a fresh download (GitHub's cached release links answered 504 for hours while its API answered)"""
-    m = re.match(r"https://github\.com/([^/]+/[^/]+)/releases/(?:download/([^/]+)|latest/download)/([^/?]+)$", url)
+    m = re.match(r"https://git\.notrexed\.dev/([^/]+/[^/]+)/releases/(?:download/([^/]+)|latest/download)/([^/?]+)$", url)
     if not m:
         return None
     repo, tag, name = m.groups()
-    api = "https://api.github.com/repos/%s/releases/%s" % (repo, ("tags/" + tag) if tag else "latest")
+    api = "https://git.notrexed.dev/api/v1/repos/%s/releases/%s" % (repo, ("tags/" + tag) if tag else "latest")
     try:
         doc = json.loads(http.get(api, accept="application/vnd.github+json"))
         for a in doc.get("assets", []):
-            if a.get("name") == name and str(a.get("url", "")).startswith("https://api.github.com/"):
-                return a["url"]
+            if a.get("name") == name and str(a.get("browser_download_url", "")).startswith("https://git.notrexed.dev/"):
+                return a["browser_download_url"]
     except (SetupError, ValueError):
         pass
     return None
@@ -211,6 +211,19 @@ def reuse_part(tag, p, install):
         return False
 
 
+def replace_retry(src, dst):
+    """os.replace, tried again for up to 20 s while another program (an antivirus scan, the search indexer) still holds files
+    just unpacked: Windows then refuses the move with access denied or a sharing violation. Any other error, and any error on
+    another system, is raised at once"""
+    for tries in range(1, 81):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if os.name != "nt" or tries == 80:
+                raise
+        time.sleep(0.25)
+
+
 def rmtree(p):
     shutil.rmtree(p, ignore_errors=True)
 
@@ -261,16 +274,19 @@ def install(status, progress=lambda f: None, tag=None, repair=False, cancel=None
                 src, dst = os.path.join(dest, p.frm), os.path.join(dest, p.to)
                 if not os.path.exists(dst):
                     try:
-                        os.replace(src, dst)
-                    except OSError:
-                        raise SetupError("Could not set up part %d of %d (renaming %s)." % (i, n, p.frm)) from None
+                        replace_retry(src, dst)
+                    except OSError as e:
+                        held = (" Another program is holding the files just unpacked, often an antivirus scan: run the setup again, and "
+                                "if it happens again allow the folder %s in it." % paths.base()
+                                if os.name == "nt" and isinstance(e, PermissionError) else "")
+                        raise SetupError("Could not set up part %d of %d (renaming %s: %s).%s" % (i, n, p.frm, e.strerror, held)) from None
         if not os.path.isfile(os.path.join(work, "HookshotBuilder", "tools", "nx2", "make_game.py")):
             raise SetupError("The build tools are missing after unpacking. Your antivirus may have removed them: allow the folder %s "
                              "and try again." % paths.base())
         try:
-            os.replace(work, final)
-        except OSError:
-            raise SetupError("Could not finish installing into %s." % final) from None
+            replace_retry(work, final)
+        except OSError as e:
+            raise SetupError("Could not finish installing into %s (%s)." % (final, e.strerror)) from None
         paths.write_small(os.path.join(final, "installed.txt"), tag)
         write_parts(final, parts)
     elif not os.path.isfile(os.path.join(final, "parts.txt")):

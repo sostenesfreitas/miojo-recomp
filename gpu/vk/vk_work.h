@@ -8,6 +8,7 @@
 
 #include "vk_loader.h"
 #include "vk_recorder.h"   // (RX_VK_RECORDER: each macro below calls its packer, which calls the driver directly when the recorder is off)
+#include "gpu_wait_stats.h"
 
 namespace mkwvk {
 extern std::atomic<uint64_t> work_epoch;   // (vk_texture.cpp)
@@ -96,16 +97,16 @@ inline void note_work() {
 #define vkResetCommandPool(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkResetCommandPool), ::vkx::vkResetCommandPool(__VA_ARGS__))
 #define vkDestroyCommandPool(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkDestroyCommandPool), ::vkx::vkDestroyCommandPool(__VA_ARGS__))
 #define vkQueueSubmit2(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkQueueSubmit2), ::vkx::vkQueueSubmit2(__VA_ARGS__))
-#define vkQueueWaitIdle(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkQueueWaitIdle), ::vkx::vkQueueWaitIdle(__VA_ARGS__))
+#define vkQueueWaitIdle(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkQueueWaitIdle), ::mkwvk::gpu_wait_stats::idle(::vkx::vkQueueWaitIdle, __VA_ARGS__))
 #define vkQueueBindSparse(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkQueueBindSparse), ::vkx::vkQueueBindSparse(__VA_ARGS__))
 #define vkQueuePresentKHR(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkQueuePresentKHR), ::vkx::vkQueuePresentKHR(__VA_ARGS__))
 #define vkAcquireNextImageKHR(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkAcquireNextImageKHR), ::vkx::vkAcquireNextImageKHR(__VA_ARGS__))
-#define vkDeviceWaitIdle(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkDeviceWaitIdle), ::vkx::vkDeviceWaitIdle(__VA_ARGS__))
-#define vkWaitForFences(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkWaitForFences), ::vkx::vkWaitForFences(__VA_ARGS__))
+#define vkDeviceWaitIdle(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkDeviceWaitIdle), ::mkwvk::gpu_wait_stats::idle(::vkx::vkDeviceWaitIdle, __VA_ARGS__))
+#define vkWaitForFences(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkWaitForFences), ::mkwvk::gpu_wait_stats::fences(::vkx::vkWaitForFences, __VA_ARGS__))
 #define vkResetFences(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkResetFences), ::vkx::vkResetFences(__VA_ARGS__))
-#define vkWaitSemaphores(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkWaitSemaphores), ::vkx::vkWaitSemaphores(__VA_ARGS__))
+#define vkWaitSemaphores(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkWaitSemaphores), ::mkwvk::gpu_wait_stats::timeline(::vkx::vkWaitSemaphores, __VA_ARGS__))
 #define vkGetSemaphoreCounterValue(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkGetSemaphoreCounterValue), ::vkx::vkGetSemaphoreCounterValue(__VA_ARGS__))
-#define vkGetQueryPoolResults(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkGetQueryPoolResults), ::vkx::vkGetQueryPoolResults(__VA_ARGS__))
+#define vkGetQueryPoolResults(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkGetQueryPoolResults), ::mkwvk::gpu_wait_stats::queries(::vkx::vkGetQueryPoolResults, VK_QUERY_RESULT_WAIT_BIT, __VA_ARGS__))
 #define vkResetQueryPool(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkResetQueryPool), ::vkx::vkResetQueryPool(__VA_ARGS__))
 #define vkGetQueueCheckpointDataNV(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkGetQueueCheckpointDataNV), ::vkx::vkGetQueueCheckpointDataNV(__VA_ARGS__))
 #define vkGetDeviceFaultInfoEXT(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vkGetDeviceFaultInfoEXT), ::vkx::vkGetDeviceFaultInfoEXT(__VA_ARGS__))

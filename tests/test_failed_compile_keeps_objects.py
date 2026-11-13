@@ -57,12 +57,12 @@ class FailedCompileTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             work = work_folder(d)
             with contextlib.redirect_stdout(io.StringIO()) as out:
-                make_game.forget_failed_build(str(work), linked=False, failed=["hos_update.c"])
+                make_game.forget_failed_build(str(work), linked=False, failed=["hos_main.c"])
             self.assertTrue((work / "sa" / "gen" / make_game.LIFT_KEY).exists())
             self.assertTrue((work / "objcache" / ("0" * 40 + ".o")).exists())
             self.assertTrue((work / "sa" / "build" / "obj" / "code_000.o").exists())
             self.assertIn("keeps the translation", out.getvalue())
-            self.assertIn("hos_update.c", out.getvalue())
+            self.assertIn("hos_main.c", out.getvalue())
 
     def test_a_lifted_or_generated_file_that_failed_forgets_it(self):
         for name in ("code_021.c", "code_hot_3.c", "hos_image.c", "a64_rt.c"):
@@ -72,7 +72,7 @@ class FailedCompileTests(unittest.TestCase):
                 (work / "sa" / "build" / "rt64").mkdir(parents=True)
                 (work / "sa" / "build" / "rt64" / "a64_rt.c").write_text("")
                 with contextlib.redirect_stdout(io.StringIO()):
-                    make_game.forget_failed_build(str(work), linked=False, failed=["hos_update.c", name])
+                    make_game.forget_failed_build(str(work), linked=False, failed=["hos_main.c", name])
                 self.assertFalse((work / "sa" / "gen" / make_game.LIFT_KEY).exists())
                 self.assertTrue((work / "objcache" / ("0" * 40 + ".o")).exists())
 
@@ -94,9 +94,9 @@ class FailedCompileTests(unittest.TestCase):
         build = (ROOT / "nx2" / "build.py").read_text(encoding="utf-8")
         self.assertIn('print("FAILED %s (%d MB, %.0fs, alone too):\\n%s" % (os.path.basename(src), size, secs, err), flush=True)', build)
         pattern = re.search(r're\.match\(r"(FAILED [^"]+)", line\)', src).group(1)
-        line = "FAILED %s (%d MB, %.0fs, alone too):\n%s" % ("hos_update.c", 0, 0.4, "error: ...")
-        self.assertEqual(re.match(pattern, line).group(1), "hos_update.c")
-        self.assertIsNone(re.match(pattern, "not compiled yet: hos_update.c (0 MB, 0s), tried again alone at the end:"))
+        line = "FAILED %s (%d MB, %.0fs, alone too):\n%s" % ("hos_main.c", 0, 0.4, "error: ...")
+        self.assertEqual(re.match(pattern, line).group(1), "hos_main.c")
+        self.assertIsNone(re.match(pattern, "not compiled yet: hos_main.c (0 MB, 0s), tried again alone at the end:"))
 
 
 if __name__ == "__main__":

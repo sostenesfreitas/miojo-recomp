@@ -14,6 +14,9 @@ from pathlib import Path
 import textwrap
 import threading
 import unittest
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOW = (ROOT / "builder" / "py" / "hookshot_builder" / "window.py").read_text(encoding="utf-8")
@@ -27,16 +30,6 @@ def method(name):
     scope = {"os": __import__("os"), "updater": Updater}
     exec(textwrap.dedent(WINDOW[start:end]), scope)
     return scope[name]
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 class Updater:

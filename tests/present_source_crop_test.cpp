@@ -27,7 +27,7 @@ constexpr bool vkCmdPushDescriptorSetKHR = true;
 constexpr uint32_t HDR_ENCODE_COMP_SPV[] = {0};
 bool init_scale() { std::abort(); }
 bool make_pipe(Pipe&, const uint32_t*, size_t, std::initializer_list<VkDescriptorType>, int) { std::abort(); }
-void logf(const char*) { std::abort(); }
+void logf(const char*, ...) { std::abort(); }   // (framegen_record logs only when the frames asked change: not here)
 void device_wait_idle_locked() { std::abort(); }
 void drop_img(Img&) { std::abort(); }
 bool make_img(Img&, uint32_t, uint32_t, VkFormat, VkImageUsageFlags) { std::abort(); }
@@ -52,7 +52,11 @@ int fsr3fi_frame(VkCommandBuffer, OutSet&, int, uint32_t w, uint32_t h, uint64_t
     ++fsr_calls; return fsr_result;
 }
 VkImageBlit last_blit{};
-int32_t copy_pc[4]{};
+struct { int32_t rect[4]; float x0, cover; int32_t pq; } copy{};
+std::atomic<bool> present_native_pq{false};
+int32_t* const copy_pc = copy.rect;
+float margin = 0.0f;   // (wide_margin: the middle 16:9's left edge, 0 on a 16:9 screen or with the setting off)
+float wide_margin() { return margin; }
 void vkCmdBlitImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout,
                     uint32_t count, const VkImageBlit* b, VkFilter filter) {
     CHECK(count == 1 && filter == VK_FILTER_LINEAR); ++blits; last_blit = *b;
@@ -76,7 +80,7 @@ void full_barrier(VkCommandBuffer) {}
 void pass(VkCommandBuffer, const Pipe& p, std::initializer_list<std::pair<VkImageView, VkSampler>>,
           uint32_t, uint32_t, const void* pc = nullptr, uint32_t bytes = 0) {
     ++dispatches;
-    if (&p == &fg.copy) { CHECK(bytes == sizeof copy_pc); std::memcpy(copy_pc, pc, bytes); }
+    if (&p == &fg.copy) { CHECK(bytes == sizeof copy && bytes == 28); std::memcpy(&copy, pc, bytes); }
     if (&p == &hdr.pipe) { CHECK(bytes == 48); std::memcpy(hdr_uv, pc, sizeof hdr_uv); }
 }
 void vkCmdCopyImage(VkCommandBuffer, VkImage, VkImageLayout, VkImage, VkImageLayout,
@@ -90,7 +94,7 @@ void reset() {
     blits = clears = initializations = sizes = dispatches = copies = 0;
     allocated_w = allocated_h = 0;
     fsr3fi::wanted = false; fsr_calls = 0; fsr_result = 1;
-    std::memset(copy_pc, 0, sizeof copy_pc);
+    copy = {}; margin = 0.0f; present_native_pq = false;
 }
 void check(uint32_t sw, uint32_t sh, const int* crop, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     reset();
@@ -106,7 +110,7 @@ void check(uint32_t sw, uint32_t sh, const int* crop, uint32_t x, uint32_t y, ui
     blit_crop(nullptr, 1, sw, sh, crop, 2, VK_IMAGE_LAYOUT_GENERAL, 320, 180);
     CHECK(blits == int(valid) && clears == int(!valid));
     if (valid) CHECK(last_blit.dstOffsets[0].x == 0 && last_blit.dstOffsets[1].x == 320);
-    const bool recorded = framegen_record(nullptr, 1, sw, sh, crop);
+    const bool recorded = framegen_record(nullptr, 1, sw, sh, crop, 0.0f);
     CHECK(recorded == valid && initializations == int(valid) && sizes == int(valid));
     if (valid) {
         CHECK(allocated_w == w && allocated_h == h && dispatches == 2 && copies == 1);
@@ -114,17 +118,32 @@ void check(uint32_t sw, uint32_t sh, const int* crop, uint32_t x, uint32_t y, ui
         CHECK(copy_pc[0] == int(x) && copy_pc[1] == int(y) && copy_pc[2] == int(w) && copy_pc[3] == int(h));
         // Newly merged FSR3 receives the same validated extent; fallback still uses the shared crop.
         fsr3fi::wanted = true;
-        CHECK(framegen_record(nullptr, 1, sw, sh, crop) && fsr_calls == 1 && fg.recorded->made == 1);
+        CHECK(framegen_record(nullptr, 1, sw, sh, crop, 0.0f) && fsr_calls == 1 && fg.recorded->made == 1);
         CHECK(dispatches == 4 && copies == 2 && last_maker == FgMaker::Fsr3);
         fsr_result = 0;
-        CHECK(framegen_record(nullptr, 1, sw, sh, crop) && fsr_calls == 2 && fg.recorded->made == 1);
+        CHECK(framegen_record(nullptr, 1, sw, sh, crop, 0.0f) && fsr_calls == 2 && fg.recorded->made == 1);
         CHECK(last_maker == FgMaker::BuiltIn);   // (FSR 3.1 made none: the renderer's own did)
         CHECK(dispatches == 9 && copies == 3);
+        CHECK(copy_pc[0] == int(x) && copy_pc[1] == int(y) && copy_pc[2] == int(w) && copy_pc[3] == int(h));
+        // Ultrawide's loading cover is closed in the copy, from the middle 16:9's edge; without that middle there is none.
+        CHECK(copy.x0 == 0.0f && copy.cover == 0.0f);
+        const auto record = [&](float cover) {   // (no display thread here to show a set and free it)
+            for (OutSet& set : fg.sets) set.busy = false;
+            return framegen_record(nullptr, 1, sw, sh, crop, cover);
+        };
+        CHECK(record(0.5f) && copy.x0 == 0.0f && copy.cover == 0.0f);
+        margin = 0.125f;
+        CHECK(record(0.5f) && copy.x0 == 0.125f && copy.cover == 0.5f);
+        CHECK(record(3.0f) && copy.x0 == 0.125f && copy.cover == 1.0f && copy.pq == 0);
+        present_native_pq = true;   // (the game's own HDR10 picture: its coding for the cover's light)
+        CHECK(record(0.5f) && copy.cover == 0.5f && copy.pq == 1);
+        present_native_pq = false;
+        CHECK(record(0.0f) && copy.x0 == 0.0f && copy.cover == 0.0f);
         CHECK(copy_pc[0] == int(x) && copy_pc[1] == int(y) && copy_pc[2] == int(w) && copy_pc[3] == int(h));
     } else {
         CHECK(dispatches == 0 && copies == 0 && !fg.recorded);
         fsr3fi::wanted = true; fg.have_prev = true;
-        CHECK(!framegen_record(nullptr, 1, sw, sh, crop) && fsr_calls == 0);
+        CHECK(!framegen_record(nullptr, 1, sw, sh, crop, 0.0f) && fsr_calls == 0);
         CHECK(dispatches == 0 && copies == 0 && !fg.recorded);
     }
     // Execute the actual HDR consumer, keeping resources ready to isolate source validation.

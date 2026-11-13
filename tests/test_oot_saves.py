@@ -6,7 +6,9 @@ python -I -B tests/test_oot_saves.py
 import contextlib
 import importlib.util
 import io
+import json
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -83,8 +85,10 @@ class Discovery(Case):
         make_save(eden_save(self.data / "eglantine"), b"EG")
         nx = self.home / "Games" / "Ocarina" / "profile" / "save" / ACCOUNT
         make_save(nx, b"NX")
+        ls = self.data / "longshot" / "save" / UID
+        make_save(ls, b"LS")
         expect = {"lichii": self.li, "frizti": self.li, "orchid": self.li, "pokedinner": self.li, "eden": self.li,
-                  "eglantine": eden_save(self.data / "eglantine"), "nx2navi": nx}
+                  "eglantine": eden_save(self.data / "eglantine"), "nx2navi": nx, "longshot": ls}
         self.assertEqual(sorted(expect), sorted(p.name for p in oot.EMULATORS))
         for program in oot.EMULATORS:
             folder, found = oot.locate(program, None, "--from")
@@ -95,10 +99,11 @@ class Discovery(Case):
         win_li = eden_save(self.appdata / "eden")
         win_eg = eden_save(self.appdata / "eglantine")
         win_nx = self.localappdata / "Programs" / "NX2navi" / "game" / "profile" / "save" / ACCOUNT
-        for folder in (win_li, win_eg, win_nx):
+        win_ls = self.home / "Games" / "Longshot" / "user" / "save" / UID
+        for folder in (win_li, win_eg, win_nx, win_ls):
             make_save(folder, b"W")
         expect = {"lichii": win_li, "frizti": win_li, "orchid": win_li, "pokedinner": win_li, "eden": win_li,
-                  "eglantine": win_eg, "nx2navi": win_nx}
+                  "eglantine": win_eg, "nx2navi": win_nx, "longshot": win_ls}
         with mock.patch.object(oot, "WINDOWS", True):
             for program in oot.EMULATORS:
                 self.assertEqual(list(oot.locate(program, None, "--from")[1].values()), [str(expect[program.name])])
@@ -185,6 +190,46 @@ class Discovery(Case):
         with self.assertRaises(oot.Fail) as e:
             oot.locate(oot.program_named("eglantine"), None, "--from")
         self.assertIn(str(self.data / "eglantine"), str(e.exception))
+
+    def test_list_json(self):
+        make_save(self.data / "longshot" / "save" / UID, b"LS")
+        code, out, _ = self.run_main("list", "--json")
+        self.assertEqual(code, 0)
+        doc = json.loads(out)
+        self.assertEqual([s["path"] for s in doc["hookshot"]["saves"]], [str(self.hs)])
+        by = {g["name"]: g for g in doc["sources"]}
+        self.assertEqual(sorted(by), ["lichii", "longshot"])   # (Eden's forks share one entry; no other saves here)
+        self.assertIn("Orchid", by["lichii"]["display"])
+        self.assertEqual([x["slot"] for x in by["lichii"]["saves"][0]["slots"]], ["slot_00"])
+        self.assertEqual(by["longshot"]["saves"][0]["profile"], UID)
+
+    def test_import_json_answer(self):
+        code, out, err = self.run_main("import", "lichii", "--json")
+        self.assertEqual(code, 0, err)
+        doc = json.loads(out)
+        self.assertTrue(doc["ok"])
+        self.assertEqual((doc["from"], doc["to"], doc["slots"]), (str(self.li), str(self.hs), ["slot_00"]))
+        self.assertEqual(tree(self.hs), tree(self.li))
+        code, out, _ = self.run_main("import", "eglantine", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn("no Eglantine save", json.loads(out)["error"])
+
+    def test_import_into_a_hookshot_without_a_save(self):
+        shutil.rmtree(self.data / "hookshot")
+        code, out, err = self.run_main("import", "lichii")
+        self.assertEqual(code, 0, err)
+        made = self.data / "hookshot" / "save" / oot.USER_ID
+        self.assertEqual(tree(made), tree(self.li))
+        with mock.patch.object(oot, "WINDOWS", True):
+            game = self.tmp / "Games" / "Hookshot"
+            code, out, err = self.run_main("import", "--from", str(self.li), "--hookshot", str(game))
+            self.assertEqual(code, 1)
+            self.assertIn("build the game there first", err)
+            game.mkdir(parents=True)
+            code, out, err = self.run_main("import", "--from", str(self.li), "--hookshot", str(game), "--json")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out)["to"], str(game / "user" / "save" / oot.USER_ID))
+            self.assertEqual(tree(game / "user" / "save" / oot.USER_ID), tree(self.li))
 
     def test_ambiguous_profiles_listed(self):
         other = "11111111111111111111111111111111"

@@ -28,12 +28,12 @@ static constexpr uint32_t sentinel = 0xcccccccc;
 static void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
+static uint64_t ring_bytes();
 static bool create_buffer(uint64_t size, VkBufferUsageFlags usage, bool host_visible,
                           VkBuffer& buffer, VmaAllocation& allocation, void** mapped) {
     ++creates;
     require(creates == 1, "initialization allocated more than once");
-    require(size != 0 && size % 16 == 0 && size <= 4 * 1024 * 1024,
-            "unexpected allocation size");
+    require(size == ring_bytes(), "unexpected allocation size");
     require(usage == (VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) && host_visible && mapped,
             "changed production allocation flags");
@@ -65,6 +65,8 @@ static uint64_t vkGetBufferDeviceAddress(int device, const VkBufferDeviceAddress
 }
 
 #include "mesh_args_actual.inc"
+
+static uint64_t ring_bytes() { return static_cast<uint64_t>(kMeshArgs) * 4 * sizeof(uint32_t); }
 
 static void initialized_ring() {
     require(storage.size() == static_cast<std::size_t>(kMeshArgs) * 4 + 2,

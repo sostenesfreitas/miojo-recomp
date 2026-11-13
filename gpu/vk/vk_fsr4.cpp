@@ -266,7 +266,13 @@ struct TailPipe {
 };
 std::unordered_map<VkPipeline, TailPipe> tail_pipes;
 std::atomic<int> tail_count{0};
-std::unordered_map<VkCommandBuffer, VkPipeline> bound;   // (the library's pipeline as it bound it)
+/// (a command buffer's last compute bind: the library's pipeline, and whether its unrolled one was bound in its place.
+/// cmd_dispatch goes by what was bound: a job may publish the unrolled one between the bind and the dispatch)
+struct Bind {
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    bool unrolled = false;
+};
+std::unordered_map<VkCommandBuffer, Bind> bound;
 int layers64 = 0;
 
 // (the unrolled pipelines: made by jobs, bound in the library's place; a job whose pipeline was destroyed meanwhile drops
@@ -793,8 +799,8 @@ VKAPI_ATTR void VKAPI_CALL cmd_bind_pipeline(VkCommandBuffer cb, VkPipelineBindP
     if (bp == VK_PIPELINE_BIND_POINT_COMPUTE && (tail_count.load(std::memory_order_relaxed) || better_count.load(std::memory_order_relaxed))) {
         std::lock_guard lk(mu);
         if (bound.size() > 256) bound.clear();   // (command buffers of the renderer's, made and freed: only the last bind matters)
-        bound[cb] = pl;
         auto b = better.find(pl);
+        bound[cb] = {pl, b != better.end()};
         if (b != better.end()) pl = b->second;
     }
     real_bind(cb, bp, pl);
@@ -809,8 +815,8 @@ VKAPI_ATTR void VKAPI_CALL cmd_dispatch(VkCommandBuffer cb, uint32_t x, uint32_t
         {
             std::lock_guard lk(mu);
             auto b = bound.find(cb);
-            auto t = b == bound.end() ? tail_pipes.end() : tail_pipes.find(b->second);
-            if (t != tail_pipes.end() && !better.count(b->second)) {
+            auto t = b == bound.end() ? tail_pipes.end() : tail_pipes.find(b->second.pipeline);
+            if (t != tail_pipes.end() && !b->second.unrolled) {
                 auto g = bigs.find(t->second.gen);
                 if (g != bigs.end() && g->second.bound == 1) {
                     Big& big = g->second;
@@ -830,7 +836,7 @@ VKAPI_ATTR void VKAPI_CALL cmd_dispatch(VkCommandBuffer cb, uint32_t x, uint32_t
                                              : g->second.bound == 0 ? "its storage buffer was not seen bound (a way of binding not checked here)"
                                                                     : "its storage buffer is bound without the tail");
                     if (t->second.twin) use = t->second.twin;
-                    else if (!t->second.twin_failed) make = t->second.plain, original = b->second;
+                    else if (!t->second.twin_failed) make = t->second.plain, original = b->second.pipeline;
                 }
             }
         }

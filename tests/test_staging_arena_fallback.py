@@ -8,18 +8,11 @@ size asked for, and says so in the log.
 python -I -B tests/test_staging_arena_fallback.py
 """
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 def main():
@@ -31,7 +24,11 @@ def main():
         raise SystemExit("a staging arena that cannot be made at 64 MB is not tried at the size asked for")
     if body.index("make(std::max(kArena, need))") > body.index("make(need)"):
         raise SystemExit("the small arena is tried before the 64 MB one")
-    if "destroy_buffer(a.buffer, a.allocation);" not in body:
+    # (staging() makes its arenas through arena_make, which the spare's worker shares: the unmapped one is destroyed there)
+    if "return arena_make(a, size);" not in body:
+        raise SystemExit("staging() does not make its arenas through arena_make")
+    made = block(tex, "bool arena_make(Arena& a, uint64_t size) {")
+    if "if (!m) {" not in made or "destroy_buffer(a.buffer, a.allocation);" not in made:
         raise SystemExit("an arena made but not mapped is kept (a leak)")
     if "no %llu MB arena could be made" not in body:
         raise SystemExit("a staging arena that could not be made is not logged")

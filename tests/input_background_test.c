@@ -17,6 +17,7 @@ typedef struct { uint64_t x[32]; } Ctx;
 enum { GWL_EXSTYLE = -20, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x8000000,
        VK_MENU = 0x12, VK_RETURN = 0x0d, VK_LEFT = 0x25, VK_UP, VK_RIGHT, VK_DOWN,
        VK_LBUTTON = 1, VK_RBUTTON = 2, VK_MBUTTON = 4, VK_XBUTTON1 = 5, VK_XBUTTON2 = 6 };
+static int insert_open, pads_up;   /* (the Insert menu open: rx_option(1); the pad let go) */
 static int front, menu_background, bootstrap_polls, pad_merges, key_queries, mouse_queries, focus_queries, commands;
 typedef int64_t LONG64;
 volatile LONG64 hos_present_count = 1000;
@@ -55,7 +56,7 @@ static void *at(uint64_t address) { CHECK(address <= 512 - 8); return memory + a
 #define ARG(n) (c->x[n])
 #define RET(value) (c->x[0] = (uint64_t)(value))
 
-int rx_option(int id, int otherwise) { return id == 4 ? menu_background : id == 1 ? 0 : otherwise; }
+int rx_option(int id, int otherwise) { return id == 4 ? menu_background : id == 1 ? insert_open : otherwise; }
 int64_t hos_now_ns(void) { return now_ns; }
 void hos_prompts_live(void) {}   /* (host/prompts.c: the button prompts follow the controls) */
 volatile int hos_prompts_row = -1;   /* (host/prompts.c: "!prompts" in the live input) */
@@ -87,7 +88,9 @@ int hos_sdl_pads(uint64_t *buttons, int32_t stick[4]) {
 }
 void pads_read(uint64_t *buttons, int32_t stick[4]) {
     /* The physical backend boundary is a spy; actual routing merges its result with the script below. */
-    pad_merges++; *buttons |= 1ULL << B_B; stick[0] = -12000; stick[2] = 8000;
+    pad_merges++;
+    pad_raw_now = !pads_up;   /* (pads_up: the pad let go, nothing held) */
+    if (!pads_up) *buttons |= 1ULL << B_B, stick[0] = -12000, stick[2] = 8000;
 }
 void binds_load(void) {
     key_bind[B_X][0] = 'P';
@@ -212,9 +215,10 @@ int main(int argc, char **argv) {
         return 0;
     }
     front = !strcmp(name, "foreground") || !strcmp(name, "exclusive-foreground");
-    menu_background = !strcmp(name, "pads-menu") || !strcmp(name, "pads-off");
+    menu_background = !strcmp(name, "pads-menu") || !strcmp(name, "pads-off") || !strcmp(name, "pads-insert");
     const int exclusive = !strncmp(name, "exclusive-", 10);
-    const int pads = !exclusive && (front || !strcmp(name, "pads-env") || !strcmp(name, "pads-menu"));
+    const int pads = !exclusive && (front || !strcmp(name, "pads-env") || !strcmp(name, "pads-menu") ||
+                                    !strcmp(name, "pads-insert"));
     const uint64_t physical = pads ? (1ULL << B_B) | (front ? 1ULL << B_X : 0) : 0;
     if (!strcmp(name, "live-background")) {
         packet(0, 0, 0, 0);
@@ -226,6 +230,16 @@ int main(int argc, char **argv) {
         packet(0, 0, 0, 0); /* consumed once, then released at the actual hold boundary */
     } else if (!strcmp(name, "no-script-background")) {
         packet(0, 0, 0, 0);
+    } else if (!strcmp(name, "pads-insert")) {   /* (behind another window, the pads allowed there, the menu open) */
+        insert_open = 1;
+        packet(0, 0, 0, 0);   /* the pad's B and sticks are the menu's */
+        CHECK(pad_merges > 0);   /* (read all the same, so the letting go is seen) */
+        insert_open = 0;
+        packet(0, 0, 0, 0);   /* the menu closed, B still held: not yet */
+        pads_up = 1;
+        packet(0, 0, 0, 0);
+        pads_up = 0;
+        packet(1ULL << B_B, -12000, 0, 8000);   /* let go and pressed again: the game's */
     } else {
         packet((1ULL << B_A) | physical, pads ? (front ? 32767 : -12000) : 0, 32767, pads ? 8000 : 0);
         now_ns += 201000000;

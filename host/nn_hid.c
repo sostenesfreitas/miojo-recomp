@@ -36,6 +36,7 @@
 #include <xinput.h>
 #include "../gpu/vk/vk_api.h"   /* (the controls' names: HOS_SW_*, HOS_PAD_*) */
 #include "hos_motion.h"
+#include "auto_run.h"   /* (the Insert menu's Auto run) */
 #ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
 #include "../gpu/vk/compat/hookshot_env.h"
 #endif
@@ -806,12 +807,20 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
 static int pads_in_background(const char *env, int menu) {
     return env ? atoi(env) != 0 : menu != 0;
 }
+/* (read_input's rule for the background, for the ocarina's notes there: oc_pad_word) */
+static int pads_behind(void) {
+    static const char *env;
+    static int looked;
+    if (!looked) looked = 1, env = getenv("HOS_INPUT_BACKGROUND");
+    return pads_in_background(env, rx_option(4, 0));
+}
 
 /* (hookshot) Whether a pad's motion counts: when its buttons do, with the game's window in front, or behind another
-   window when the player asked for the pads there. Otherwise GetSixAxisSensorStates hands out the pad at rest, so a
-   gyro moved while the player is in another window does not turn the camera. tests/test_motion_background.py */
-static int motion_counts(int front, const char *env, int menu) {
-    return front || pads_in_background(env, menu);
+   window when the player asked for the pads there, and never while the Insert menu is open (insert: read_input holds the
+   buttons and sticks back then). Otherwise GetSixAxisSensorStates hands out the pad at rest, so a gyro moved while the
+   player is in another window or in the menu does not turn the camera. tests/test_motion_background.py */
+static int motion_counts(int front, const char *env, int menu, int insert) {
+    return !insert && (front || pads_in_background(env, menu));
 }
 
 #ifndef VK_XBUTTON1
@@ -916,10 +925,12 @@ static void oc_notes(void) {
         hos_oc_note_bits = 0;
         return;
     }
+    /* (behind another window the keys are not the player's input, only the pads may be: oc_pad_word) */
+    const int keys = game_in_front();
     AcquireSRWLockShared(&pad_bind_lock);
     for (int i = 0; i < 5; i++) {
         const int row = HOS_KEY_OC_NOTE_L + i;
-        int held = bound_down(row, 0);
+        int held = keys && bound_down(row, 0);
         for (int k = 0; k < 2 && !held; k++)
             if (pad_bind[row][k] >= 0 && (pad_raw_now >> pad_bind[row][k] & 1)) held = 1;
         if (held) bits |= 1ULL << i;
@@ -939,8 +950,9 @@ static void oc_notes(void) {
 /* (npad_states writes the game's one merged word: during a button wait its five note buttons are the note controls) */
 static uint64_t oc_pad_word(uint64_t buttons) {
     if (hos_oc_wait != 1) return buttons;
-    /* (no notes where read_input gives the game no player input either: menu open, pads held after it, background) */
-    if (rx_option(1, 0) || pad_after_menu || !game_in_front()) return buttons;
+    /* (no notes where read_input gives the game no player input either: menu open, pads held after it, background
+       unless the pads count there) */
+    if (rx_option(1, 0) || pad_after_menu || (!game_in_front() && !pads_behind())) return buttons;
     static const uint64_t note_to[5] = {1ULL << HOS_SW_L, 1ULL << HOS_SW_R, 1ULL << HOS_SW_A,
                                         1ULL << HOS_SW_Y, 1ULL << HOS_SW_X};
     uint64_t w = buttons;
@@ -955,6 +967,24 @@ static uint64_t oc_pad_word(uint64_t buttons) {
     }
     ReleaseSRWLockShared(&pad_bind_lock);
     return w;
+}
+
+/* (hookshot) The pads into the game's input, in front and behind other windows alike: while the Insert menu is open they
+   are its own, as the keyboard is (key()), and after it closed until they are let go (the press that closed it never
+   reaches the game). They are read either way, so the letting go is seen. Whether they were used (a button, or a stick
+   past a third) */
+static int pads_merge(uint64_t *buttons, int32_t stick[4]) {
+    uint64_t pb = 0;
+    int32_t ps[4] = {0};
+    pads_read(&pb, ps);
+    if (rx_option(1, 0)) pad_after_menu = 1;
+    else if (pad_after_menu && !pad_raw_now) pad_after_menu = 0;
+    if (!pad_after_menu) {
+        *buttons |= pb;
+        stick_max(stick, ps);
+    }
+    return pb || ps[0] > 12000 || ps[0] < -12000 || ps[1] > 12000 || ps[1] < -12000 || ps[2] > 12000 || ps[2] < -12000 ||
+           ps[3] > 12000 || ps[3] < -12000;
 }
 
 static void read_input(uint64_t *buttons, int32_t stick[4]) {
@@ -988,24 +1018,10 @@ static void read_input(uint64_t *buttons, int32_t stick[4]) {
         static const char *env;
         static int looked;
         if (!looked) looked = 1, env = getenv("HOS_INPUT_BACKGROUND");
-        if (pads_in_background(env, rx_option(4, 0))) pads_read(buttons, stick);
+        if (pads_in_background(env, rx_option(4, 0))) pads_merge(buttons, stick);
         return;
     }
-    {   /* (hookshot) while the Insert menu is open the pads are its own, as the keyboard is (key()), and after it
-           closed until they are let go (the press that closed it never reaches the game) */
-        uint64_t pb = 0;
-        int32_t ps[4] = {0};
-        pads_read(&pb, ps);
-        if (rx_option(1, 0)) pad_after_menu = 1;
-        else if (pad_after_menu && !pad_raw_now) pad_after_menu = 0;
-        if (!pad_after_menu) {
-            *buttons |= pb;
-            stick_max(stick, ps);
-        }
-        if (pb || ps[0] > 12000 || ps[0] < -12000 || ps[1] > 12000 || ps[1] < -12000 || ps[2] > 12000 || ps[2] < -12000 ||
-            ps[3] > 12000 || ps[3] < -12000)
-            player_used();
-    }
+    if (pads_merge(buttons, stick)) player_used();
     binds_load();   /* (the keys: key_default's, or hookshot_options.ini's; the mouse's buttons once its capture is known) */
     for (int i = 0; i < HOS_SW_N; i++)
         if (bound_down(i, 0)) *buttons |= 1ULL << i, player_used();
@@ -1103,6 +1119,19 @@ static void npad_states(Ctx *c) {
             stick[0] = stick[1] = 0;
             buttons &= ~(climb | (1ULL << B_L));
         }
+        /* (hookshot) Auto run (Controls; host/auto_run.h): A (the sprint) held long enough while moving and then let go
+           stays held for the game while the stick is pushed and Link is the player's to move. After the flight and the
+           free camera, which take the stick (none left: nothing kept). The ocarina's note wait (hos_oc_wait 1: A is a
+           note there, oc_pad_word) ends it too, so a kept A is never heard as a held note */
+        {
+            int hos_oot_player_free(void);
+            static AutoRun auto_run;
+            static int logged_lock;
+            const int on = rx_option(HOS_OPT_AUTO_RUN, 0) != 0;
+            buttons = hos_auto_run(&auto_run, buttons, stick[0], stick[1], on,
+                                   !menu_open && hos_oc_wait != 1 && hos_oot_player_free(), hos_now_ns());
+            if (auto_run.locked && !logged_lock) logged_lock = 1, hos_log("hid: auto run: A kept held for the sprint");
+        }
         __atomic_store_n(&flight_input, flight, __ATOMIC_RELAXED);
         __atomic_store_n(&move_stick_held, abs(stick[0]) > 4096 || abs(stick[1]) > 4096, __ATOMIC_RELAXED);
         __atomic_store_n(&free_camera_axes, axes, __ATOMIC_RELAXED);
@@ -1178,7 +1207,7 @@ HLE(_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxi
     static const char *background_env;
     static int background_looked;
     if (!background_looked) background_looked = 1, background_env = getenv("HOS_INPUT_BACKGROUND");
-    const int counts = motion_counts(game_in_front(), background_env, rx_option(4, 0));
+    const int counts = motion_counts(game_in_front(), background_env, rx_option(4, 0), rx_option(1, 0));
     const int live = count && counts ? hos_sdl_motion_history(h, count) : 0;
     /* (each switch between live and at rest moves the numbers a whole history past the last ones given out, so no entry
        of one ever has a number an entry of the other had) */

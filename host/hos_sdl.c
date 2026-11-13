@@ -18,6 +18,7 @@ static struct {
         *PollEvent, *GetWindowSize, *LoadPNG, *SetWindowIcon, *DestroySurface, *GetWindowDisplay, *GetCurrentDisplayMode;
     /* sound */
     void *OpenAudioDevice, *PauseAudioDevice, *OpenAudioDeviceStream, *ResumeAudioStreamDevice, *PutAudioStreamData;
+    void *CloseAudioDevice, *DestroyAudioStream;
     /* controllers */
     void *PadOpen, *PadClose, *PadConnected, *PadsUpdate, *PadButton, *PadAxis, *PadName, *PadRumble;
     void *PadType, *PadEffect;   /* (optional: HD rumble, host/pad_sdl.c) */
@@ -87,6 +88,7 @@ static int get_all(HMODULE m, int three) {
         GET(OpenAudioDeviceStream, "SDL_OpenAudioDeviceStream");
         GET(ResumeAudioStreamDevice, "SDL_ResumeAudioStreamDevice");
         GET(PutAudioStreamData, "SDL_PutAudioStreamData");
+        GET(DestroyAudioStream, "SDL_DestroyAudioStream");
         GET(GetGamepads, "SDL_GetGamepads");
         GET(GetGamepadID, "SDL_GetGamepadID");
         GET(Free, "SDL_free");
@@ -101,6 +103,7 @@ static int get_all(HMODULE m, int three) {
         *(FARPROC *)&f.GetCurrentDisplayMode = GetProcAddress(m, "SDL_GetCurrentDisplayMode");
         GET(OpenAudioDevice, "SDL_OpenAudioDevice");
         GET(PauseAudioDevice, "SDL_PauseAudioDevice");
+        GET(CloseAudioDevice, "SDL_CloseAudioDevice");
         GET(NumJoysticks, "SDL_NumJoysticks");
         GET(IsGameController, "SDL_IsGameController");
         GET(DeviceInstanceID, "SDL_JoystickGetDeviceInstanceID");
@@ -341,6 +344,8 @@ typedef struct {
     void (*pull)(void *user, uint8_t *out, int len);
     void *user;
     int frame;   /* bytes a sample frame (all channels) */
+    void *stream;   /* (SDL3: the stream, which holds the device) */
+    uint32_t dev;   /* (SDL2: the device) */
 } Pull;
 static void pull3(void *p, void *stream, int want, int total) {   /* (SDL3: a stream asks for want more bytes) */
     (void)total;
@@ -359,21 +364,22 @@ static void pull2(void *p, uint8_t *out, int len) {   /* (SDL2: a device callbac
     const Pull *s = (const Pull *)p;
     s->pull(s->user, out, len);
 }
-int hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user, uint8_t *out, int len), void *user) {
-    if (!hos_sdl_load()) return 0;
+void *hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user, uint8_t *out, int len), void *user) {
+    if (!hos_sdl_load()) return NULL;
     const uint16_t format = s16 ? 0x8010 /* S16LE */ : 0x8120 /* F32LE */;   /* (both's numbers) */
     const char *env_samples = getenv("SDL_AUDIO_DEVICE_SAMPLE_FRAMES");
     if (version == 3 && !env_samples) hos_sdl_hint("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "480");   /* (SDL2's device buffer below) */
-    if (!hos_sdl_init(HOS_SDL_AUDIO)) return 0;
+    if (!hos_sdl_init(HOS_SDL_AUDIO)) return NULL;
     Pull *p = (Pull *)calloc(1, sizeof *p);
     p->pull = pull, p->user = user, p->frame = channels * (s16 ? 2 : 4);
     if (version == 3) {
         const struct { uint32_t format; int channels, freq; } spec = {format, channels, freq};
         void *stream = CALL(void *(*)(uint32_t, const void *, void (*)(void *, void *, int, int), void *), OpenAudioDeviceStream)(
             0xFFFFFFFFu /* the default output */, &spec, pull3, p);
-        if (stream && CALL(_Bool (*)(void *), ResumeAudioStreamDevice)(stream)) return 1;
+        if (stream && CALL(_Bool (*)(void *), ResumeAudioStreamDevice)(stream)) return p->stream = stream, p;
+        if (stream) CALL(void (*)(void *), DestroyAudioStream)(stream);
         free(p);
-        return 0;
+        return NULL;
     }
     struct {
         int freq;
@@ -392,10 +398,18 @@ int hos_sdl_audio_open(int freq, int channels, int s16, void (*pull)(void *user,
     const uint32_t dev = CALL(uint32_t (*)(const char *, int, const void *, void *, int), OpenAudioDevice)(NULL, 0, &want, &have, 0);
     if (!dev) {
         free(p);
-        return 0;
+        return NULL;
     }
     CALL(void (*)(uint32_t, int), PauseAudioDevice)(dev, 0);
-    return 1;
+    p->dev = dev;
+    return p;
+}
+void hos_sdl_audio_close(void *out) {   /* (pull is not called again once this returns) */
+    Pull *p = (Pull *)out;
+    if (!p) return;
+    if (version == 3) CALL(void (*)(void *), DestroyAudioStream)(p->stream);   /* (and the device it opened) */
+    else CALL(void (*)(uint32_t), CloseAudioDevice)(p->dev);
+    free(p);
 }
 /* SDL3's format of the default device; SDL2's default audio info (2.24 on: the bundled 2.32 has it). Looked up here,
    not at load: an SDL without it still plays, in stereo. */

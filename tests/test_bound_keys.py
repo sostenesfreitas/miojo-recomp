@@ -132,7 +132,9 @@ int main(int argc, char **argv) {
     CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_X, 1) == -1);   /* invalid second value */
     CHECK(bound_pad_buttons(face) == a && bound_pad_buttons(paddle) == a && bound_pad_buttons(face | paddle) == a);
     CHECK(bound_pad_buttons(1ULL << HOS_PAD_RTRIGGER) == 1ULL << HOS_SW_ZR);
-    CHECK(bound_pad_buttons(1ULL << HOS_PAD_TOUCHPAD) == 0);
+    /* the touchpad click, saved as Minus's input (the map, as players ask): read back, and it presses Minus */
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_MINUS, 0) == HOS_PAD_TOUCHPAD);
+    CHECK(bound_pad_buttons(1ULL << HOS_PAD_TOUCHPAD) == 1ULL << HOS_SW_MINUS);
     hos_bind(HOS_BIND_PAD, HOS_SW_B, 1, HOS_PAD_RPADDLE1);
     CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_A, 1) == -1);
     CHECK(bound_pad_buttons(paddle) == 1ULL << HOS_SW_B && bound_pad_buttons(face) == a);
@@ -174,7 +176,7 @@ class BoundKeysTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="hookshot-bound-keys-") as tmp:
             tmp = Path(tmp)
             (tmp / "hookshot_options.ini").write_text(
-                "key_move_up=90,0\npad_move_up=0\npad_a=1,17\npad_b=0\npad_x=3,99\n", encoding="utf-8"
+                "key_move_up=90,0\npad_move_up=0\npad_a=1,17\npad_b=0\npad_x=3,99\npad_minus=21\n"   # (21: the touchpad), encoding="utf-8"
             )
             (tmp / "t.c").write_text(PRELUDE + code + MAIN, encoding="utf-8")
             binary = tmp / ("t.exe" if sys.platform == "win32" else "t")

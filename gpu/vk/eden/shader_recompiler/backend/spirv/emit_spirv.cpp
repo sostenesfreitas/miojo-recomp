@@ -117,7 +117,7 @@ void EmitInst(EmitContext& ctx, IR::Inst* inst) {
         EmitInstOf(ctx, inst);
     } catch (const NotImplementedException& e) {
         throw NotImplementedException("{} ({})", e.what(), IR::NameOf(inst->GetOpcode()));
-    } catch (const std::runtime_error& e) {   // (super build: sirit's null Id, named by the IR op that asked for it)
+    } catch (const std::runtime_error& e) {   // (sirit's null Id, named by the IR op that asked for it)
         std::string args;
         for (size_t i = 0; i < inst->NumArgs(); ++i) {
             const IR::Value a{inst->Arg(i)};

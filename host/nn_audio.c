@@ -762,6 +762,17 @@ static void au_opened(HWAVEOUT w) {
 /* The default output's channels (its shared-mode mix format on Windows, SDL's default device on Linux); 2 when
    unknown. */
 #ifdef _WIN32
+/* (hookshot) The channels of a mix format that are 5.1 speakers: its channel count when its mask names a centre and a
+   pair behind or beside the player (5.1 back or side, 7.1), else 2. A device with more channels than speakers (an
+   audio interface's outputs, a Scarlett's 8 with mask 0; quad without a centre; no mask at all) was counted by its
+   channels: the game mixed 5.1, and what it puts in the centre (voices, the ocarina, Link's own sounds) and behind went
+   to outputs nothing listens to, silent (issue 2182). As stereo, the game's own mix down keeps every sound. */
+static int au_layout_channels(int channels, int extensible, unsigned long mask) {
+    if (channels <= 2 || !extensible) return 2;
+    const unsigned long front = 0x7, back = 0x30, side = 0x600;   /* FL FR FC; BL BR; SL SR (ksmedia.h SPEAKER_) */
+    if ((mask & front) == front && ((mask & back) == back || (mask & side) == side)) return channels;
+    return 2;
+}
 static int au_device_channels(void) {
     static const GUID clsid_enumerator = {0xbcde0395, 0xe52f, 0x467c, {0x8e, 0x3d, 0xc4, 0x57, 0x92, 0x91, 0x69, 0x2e}};
     static const GUID iid_enumerator = {0xa95664d2, 0x9614, 0x4f35, {0xa7, 0x46, 0xde, 0x8d, 0xb6, 0x36, 0x17, 0xe6}};
@@ -776,7 +787,13 @@ static int au_device_channels(void) {
             if (SUCCEEDED(d->lpVtbl->Activate(d, &iid_audio_client, CLSCTX_ALL, NULL, (void **)&a)) && a) {
                 WAVEFORMATEX *mix = NULL;
                 if (SUCCEEDED(a->lpVtbl->GetMixFormat(a, &mix)) && mix) {
-                    n = mix->nChannels;
+                    const int extensible = mix->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                                           (size_t)mix->cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
+                    const unsigned long mask = extensible ? (unsigned long)((WAVEFORMATEXTENSIBLE *)mix)->dwChannelMask : 0;
+                    n = au_layout_channels(mix->nChannels, extensible, mask);
+                    if (n != mix->nChannels)
+                        hos_log("audio: the default output has %d channels but not 5.1 speakers (channel mask %#lx): "
+                                "counted as stereo", mix->nChannels, mask);
                     CoTaskMemFree(mix);
                 }
                 a->lpVtbl->Release(a);
@@ -810,7 +827,7 @@ static int au_menu_output(void) {
     return v < 1 ? 0 : v > 2 ? 2 : v;
 }
 /* The speakers the game mixes for: the Insert menu's Audio output, Stereo 2 or 5.1 6, HOS_AUDIO_CHANNELS=2 or 6 over it;
-   Auto: 6 when the default output has 5.1 or more, else 2. The game asks once, at its start
+   Auto: 6 when the default output has 5.1 or more speakers (au_layout_channels), else 2. The game asks once, at its start
    (GetActiveAudioDeviceChannelCountForOutput), and pans for that many, so a change takes a restart. Told 2 (always,
    before), it put nothing behind the player, and a 5.1 system played the whole game from the front speakers (issue
    1124). Its device sink has the six channels either way; with two speakers they are mixed down. */

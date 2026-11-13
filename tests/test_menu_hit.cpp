@@ -55,14 +55,15 @@ int main() {
     CHECK("the slider's value", slider_value(m.drag(720, 7), 0, 100, 10) == 30 && slider_value(1000, 0, 100, 10) == 100);
     CHECK("the knob's place", slider_permille(60, 0, 100) == 600 && slider_permille(500, 10, 300) == 1000);
 
-    // ---- the Controls page: a name, two gamepad cells and a keyboard cell per row, then Reset to defaults ----
+    // ---- the Controls page: a name, two gamepad cells and two key cells per row, then Reset to defaults ----
     m.clear(0, 0, 1920, 1080);
     for (int i = 0; i < 3; i++) {
         const float y = 120 + i * 42;
         m.add(100, y, 400, y + 36, kCtlRow, i);
         m.add(400, y, 547, y + 36, kCtlCell, i, 0, 0, 0, 0, kCtlPrimary);
         m.add(553, y, 697, y + 36, kCtlCell, i, 0, 0, 0, 0, kCtlAlternate);
-        m.add(703, y, 1000, y + 36, kCtlCell, i, 0, 0, 0, 0, kCtlKeyboard);
+        m.add(703, y, 847, y + 36, kCtlCell, i, 0, 0, 0, 0, kCtlKeyboard);
+        m.add(853, y, 1000, y + 36, kCtlCell, i, 0, 0, 0, 0, kCtlKeyboard2);
     }
     m.add(100, 120 + 3 * 42, 390, 120 + 3 * 42 + 36, kCtlRow, 3);
     h = m.at(200, 130 + 42);
@@ -73,7 +74,21 @@ int main() {
     CHECK("its alternate gamepad cell", h.part == kCtlCell && h.index == 2 && h.side == kCtlAlternate);
     CHECK("the gap between gamepad cells", m.at(550, 130 + 84).part == kNone);
     h = m.at(800, 130);
-    CHECK("its keyboard cell", h.part == kCtlCell && h.index == 0 && h.side == kCtlKeyboard);
+    CHECK("its first key cell", h.part == kCtlCell && h.index == 0 && h.side == kCtlKeyboard);
+    h = m.at(900, 130);
+    CHECK("its second key cell", h.part == kCtlCell && h.index == 0 && h.side == kCtlKeyboard2);
+    CHECK("the gap between key cells", m.at(850, 130).part == kNone);
+    // (a key cell is its own slot of the control's two keys; a keys-only row keeps to the key cells, Left and Right swap them)
+    CHECK("the key cells' slots", ctl_key_slot(kCtlKeyboard) == 0 && ctl_key_slot(kCtlKeyboard2) == 1);
+    CHECK("a gamepad cell has no key slot", ctl_key_slot(kCtlPrimary) < 0 && ctl_key_slot(kCtlAlternate) < 0);
+    CHECK("a keys-only row's selection from a gamepad column", ctl_column(kCtlAlternate, true) == kCtlKeyboard);
+    CHECK("a keys-only row keeps its key column", ctl_column(kCtlKeyboard2, true) == kCtlKeyboard2);
+    CHECK("any row keeps a gamepad column", ctl_column(kCtlAlternate, false) == kCtlAlternate);
+    CHECK("Right through all four", ctl_step(kCtlKeyboard, 1, false) == kCtlKeyboard2 && ctl_step(kCtlKeyboard2, 1, false) == kCtlPrimary);
+    CHECK("Left through all four", ctl_step(kCtlPrimary, -1, false) == kCtlKeyboard2);
+    CHECK("a keys-only row's Left and Right",
+          ctl_step(kCtlKeyboard, 1, true) == kCtlKeyboard2 && ctl_step(kCtlKeyboard2, -1, true) == kCtlKeyboard &&
+              ctl_step(kCtlPrimary, 1, true) == kCtlKeyboard2);
     h = m.at(200, 130 + 126);
     CHECK("Reset to defaults", h.part == kCtlRow && h.index == 3);
     m.add(100, 60, 1000, 96, kCtlOption, 1, 600, 1000);   // (a row of the page's own, above the grid: Button prompts)

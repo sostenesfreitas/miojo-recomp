@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Before you start: check the [newest release](https://github.com/NotRexed/Hookshot/releases/latest) and the [build requirements](https://github.com/NotRexed/Hookshot#what-you-need) (Visual Studio Build Tools with "Desktop development with C++" and the Windows SDK, about 60 GB free), and search the open issues. English, please. Never attach game files.
+        Before you start: check the [newest release](https://git.notrexed.dev/Hookshot/Hookshot/releases/latest) and the [build requirements](https://github.com/NotRexed/Hookshot#what-you-need) (Visual Studio Build Tools with "Desktop development with C++" and the Windows SDK, about 60 GB free), and search the open issues. English, please. Never attach game files.
   - type: input
     id: version
     attributes:

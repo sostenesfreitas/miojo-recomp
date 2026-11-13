@@ -66,16 +66,19 @@ static class Program
         Require(ShaderStep.Args(new List<string> { "--update", "authored game" }, BuilderSettings.PrepareNow(settings))
                 .SequenceEqual(new[] { "--update", "authored game" }), "A saved ticked choice must prepare the shaders.");
 
-        Require(ShaderStep.Reason("the shaders were not prepared now (no usable Vulkan here): the game prepares them at its first start")
-                == "no usable Vulkan here", "make_game's not-prepared line was not read.");
-        Require(ShaderStep.Reason("the shaders were not prepared now (\"Prepare shaders now\" is unticked (here)): the game prepares them at its first start")
-                == "\"Prepare shaders now\" is unticked (here)", "A reason with brackets was cut.");
-        Require(ShaderStep.Reason("@@stage shaders Preparing shaders") is null && ShaderStep.Reason("done shaders") is null,
+        Require(ShaderStep.Note("the shaders were not prepared now (no usable Vulkan here): the game prepares them at its first start")
+                == "Left to the game's first start: no usable Vulkan here", "make_game's not-prepared line was not read.");
+        Require(ShaderStep.Note("the shaders were not prepared now (\"Prepare shaders now\" is unticked (here)): the game prepares them at its first start")
+                == "Left to the game's first start: \"Prepare shaders now\" is unticked (here)", "A reason with brackets was cut.");
+        Require(ShaderStep.Note("the shaders were not prepared now (the GPU driver stopped responding): the game builds each shader when it first draws it, and the next build or update tries the preparation again")
+                is { } stalled && !stalled.Contains("first start") && stalled.Contains("the GPU driver stopped responding")
+                && stalled.Contains("first draws it"), "A stalled preparation must not be promised for the first start.");
+        Require(ShaderStep.Note("@@stage shaders Preparing shaders") is null && ShaderStep.Note("done shaders") is null,
                 "Other lines are not a skipped step.");
-        Require(ShaderStep.Skipped(began: true, reason: null) is null, "Prepared shaders must get their check mark.");
-        Require(ShaderStep.Skipped(began: false, reason: null) is { } none && none.Contains("first start"),
+        Require(ShaderStep.Skipped(began: true, note: null) is null, "Prepared shaders must get their check mark.");
+        Require(ShaderStep.Skipped(began: false, note: null) is { } none && none.Contains("first start"),
                 "No @@stage shaders (an older make_game, or none ran) must not be a check mark.");
-        Require(ShaderStep.Skipped(began: true, reason: "the game printed nothing for 15 minutes and was stopped") is { } stopped
+        Require(ShaderStep.Skipped(began: true, note: ShaderStep.Note("the shaders were not prepared now (the game printed nothing for 15 minutes and was stopped): the game prepares them at its first start")) is { } stopped
                 && stopped.Contains("15 minutes"), "A stopped preparation must say why under its row.");
     }
 

@@ -87,8 +87,9 @@ static DWORD GetModuleFileNameA(void *m, char *b, DWORD n) { (void)m; return (DW
 #define hos_game_path_a(b,n) GetModuleFileNameA(0,b,n)
 static int held[256];
 static int key(int vk) { return held[vk & 255]; }
-static int oc_menu, oc_front = 1;   /* (oc_pad_word shares read_input's gates: the Insert menu, the pads held after it, the window) */
-int rx_option(int id, int otherwise) { return id == 1 ? oc_menu : otherwise; }
+static int oc_menu, oc_front = 1, oc_background;   /* (oc_pad_word shares read_input's gates: the Insert menu, the pads held
+                                                      after it, the window, and the pads behind it: Controller in background) */
+int rx_option(int id, int otherwise) { return id == 1 ? oc_menu : id == 4 ? oc_background : otherwise; }
 static int game_in_front(void) { return oc_front; }
 """
 
@@ -229,6 +230,24 @@ int main(int argc, char **argv) {
     hos_oc_wait = 1, hos_oc_beat++;       /* and a live action re-arms the guard */
     oc_notes();
     CHECK((oc_pad_word(raw2) & (1ULL << HOS_SW_R)) && !(oc_pad_word(raw2) & (1ULL << HOS_SW_L)));
+    /* (l) the controller in the background (the menu's row, or HOS_INPUT_BACKGROUND=1): read_input reads the pads there,
+       so a note on a pad button plays; the keys are not input there, so a note key does nothing */
+    oc_front = 0, oc_background = 1;
+    hos_oc_last_kind = 1;
+    release();
+    pad_raw_now = 1 << HOS_PAD_LSHOULDER;   /* the (L) note's pad input */
+    oc_notes();
+    CHECK((oc_pad_word(0) & (1ULL << HOS_SW_L)) != 0);
+    pad_raw_now = 0;
+    held[VK_NUMPAD2] = 1;   /* the (R) note's key, pressed in the window in front */
+    oc_notes();
+    CHECK((oc_pad_word(0) & (1ULL << HOS_SW_R)) == 0);
+    release();
+    oc_background = 0;   /* without the row: the word is the player's own, as before */
+    pad_raw_now = 1 << HOS_PAD_LSHOULDER;
+    oc_notes();
+    CHECK(oc_pad_word(0) == 0);
+    pad_raw_now = 0, oc_front = 1;
     if (!fails) printf("PASS\n");
     return fails != 0;
 }
@@ -244,6 +263,8 @@ class OcarinaNotesTests(unittest.TestCase):
         code = [block(hid, "static int kmap_down("),
                 between(hid, "static const char *const bind_names[HOS_KEY_N]", "uint32_t hos_pad_raw("),
                 between(hid, "static int mouse_vk_slot(", "static int bound_down("),
+                block(hid, "static int pads_in_background("),
+                block(hid, "static int pads_behind("),
                 block(hid, "static void oc_notes(void)"),
                 block(hid, "static uint64_t oc_pad_word(")]
         code = "\n".join(code)

@@ -145,6 +145,10 @@ void WriteGlobalNarrow(EmitContext& ctx, Id address, Id value, u32 bits) {
         LOG_WARNING(Shader_SPIRV, "Int64 not supported, ignoring memory operation");
         return;
     }
+    if (const Id direct{bits == 8 ? ctx.write_global_u8_func : ctx.write_global_u16_func}; Sirit::ValidId(direct)) {
+        ctx.OpFunctionCall(ctx.TypeVoid(), direct, address, value);   // (the byte or half written directly: spirv_emit_context.cpp)
+        return;
+    }
     const Id low{ctx.OpUConvert(ctx.U32[1], ctx.OpBitwiseAnd(ctx.U64, address, ctx.Constant(ctx.U64, u64{3})))};
     const Id bit_offset{ctx.OpShiftLeftLogical(ctx.U32[1], low, ctx.Const(3u))};
     ctx.OpFunctionCall(ctx.TypeVoid(), ctx.write_global_cas_loop_func, address, value, bit_offset, ctx.Const(bits));

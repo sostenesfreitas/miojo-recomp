@@ -426,8 +426,8 @@ static void pads_poll(void) {
             for (int k = BTN_RPADDLE1; k <= BTN_LPADDLE2; k++)
                 if (hos_sdl_pad_button(gc, k)) sig |= 1ULL << (HOS_PAD_RPADDLE1 + k - BTN_RPADDLE1);
             b |= sig;
-            /* (hookshot) a DualShock 4's or DualSense's touchpad click: it opens the Insert menu as F1 does (vk_menu.cpp).
-               SDL numbers it 20, past the buttons above; an SDL without it answers 0 */
+            /* (hookshot) a DualShock 4's or DualSense's touchpad click: a Controls row's input, or unbound it opens the
+               Insert menu as F1 does (vk_menu.cpp). SDL numbers it 20, past the buttons above; an SDL without it answers 0 */
             if (hos_sdl_pad_button(gc, BTN_TOUCHPAD)) b |= 1ULL << HOS_PAD_TOUCHPAD;
             if (hos_sdl_pad_axis(gc, AX_LT) > 8000) b |= 1ULL << HOS_PAD_LTRIGGER;
             if (hos_sdl_pad_axis(gc, AX_RT) > 8000) b |= 1ULL << HOS_PAD_RTRIGGER;

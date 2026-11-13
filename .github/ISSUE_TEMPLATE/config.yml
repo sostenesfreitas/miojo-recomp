@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
   - name: Newest release
-    url: https://github.com/NotRexed/Hookshot/releases/latest
+    url: https://git.notrexed.dev/Hookshot/Hookshot/releases/latest
     about: Every release includes all the fixes before it. Try the newest before reporting.
   - name: Issue guidelines
     url: https://github.com/NotRexed/Hookshot/issues/159

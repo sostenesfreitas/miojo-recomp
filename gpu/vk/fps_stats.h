@@ -130,12 +130,12 @@ void columns(const Ring<N>& r, int64_t now, int64_t window, int count, int* out,
     }
 }
 
-/// The Game frame rate cap row's rate (0 60, then 90, 120, 144, 165, 240; 6 Uncapped: 0, no rate); HOS_FPS_MAX over it
+/// The Game frame rate cap row's rate (0 60, then 90, 120, 144, 165, 240; 6 Uncapped: 0, no rate; 7 30); HOS_FPS_MAX over it
 /// (env_max, 0 when not set: host/nn_vi.c fps_max's rules, 1000 and over is uncapped)
 inline int cap_rate(int fps_cap, int env_max = 0) {
-    static const int rates[] = {60, 90, 120, 144, 165, 240, 0};
-    if (env_max > 0) return env_max >= 1000 ? 0 : std::max(env_max, 60);
-    return fps_cap >= 0 && fps_cap <= 6 ? rates[fps_cap] : 60;   // (a value this build does not know: 60, as the host)
+    static const int rates[] = {60, 90, 120, 144, 165, 240, 0, 30};
+    if (env_max > 0) return env_max == 30 ? 30 : env_max >= 1000 ? 0 : std::max(env_max, 60);
+    return fps_cap >= 0 && fps_cap <= 7 ? rates[fps_cap] : 60;   // (a value this build does not know: 60, as the host)
 }
 /// The frame time the game aims for, in ms: the cap's, or with V-Sync On (FIFO, no frame generation) the display's refresh
 /// when that is slower; 0 when there is none (Uncapped, without V-Sync)

@@ -3,7 +3,8 @@
 The buttons stopped while the game's window was behind another one, but the gyro kept turning the camera: the motion
 path did not look at the window. Now it follows the buttons' rule: with the game's window in front, or behind another
 window when the player asked for the pads there (the Insert menu's "Controller in background", or
-HOS_INPUT_BACKGROUND=1; =0 keeps them to the window in front whatever the menu says). Otherwise the pad reads at rest.
+HOS_INPUT_BACKGROUND=1; =0 keeps them to the window in front whatever the menu says), and not while the Insert menu
+is open, where the buttons and sticks are held back too. Otherwise the pad reads at rest.
 
 pads_in_background and motion_counts are cut out of host/nn_hid.c unchanged and compiled with a table of cases, and
 GetSixAxisSensorStates is checked to ask motion_counts before it reads the pad's motion.
@@ -21,14 +22,17 @@ RUN_ALL_ARGS = ["--cc", "gcc"]
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# (front, HOS_INPUT_BACKGROUND or None, the menu's row, whether motion counts)
+# (front, HOS_INPUT_BACKGROUND or None, the menu's row, the Insert menu open, whether motion counts)
 CASES = [
-    (1, None, 0, 1),     # in front: counts
-    (1, "0", 0, 1),      # in front, the variable set to 0: still counts (it only decides the background)
-    (0, None, 0, 0),     # behind another window: the pad at rest
-    (0, None, 1, 1),     # behind, "Controller in background" on: counts
-    (0, "1", 0, 1),      # behind, HOS_INPUT_BACKGROUND=1: counts whatever the menu says
-    (0, "0", 1, 0),      # behind, HOS_INPUT_BACKGROUND=0: at rest whatever the menu says
+    (1, None, 0, 0, 1),     # in front: counts
+    (1, "0", 0, 0, 1),      # in front, the variable set to 0: still counts (it only decides the background)
+    (0, None, 0, 0, 0),     # behind another window: the pad at rest
+    (0, None, 1, 0, 1),     # behind, "Controller in background" on: counts
+    (0, "1", 0, 0, 1),      # behind, HOS_INPUT_BACKGROUND=1: counts whatever the menu says
+    (0, "0", 1, 0, 0),      # behind, HOS_INPUT_BACKGROUND=0: at rest whatever the menu says
+    (1, None, 0, 1, 0),     # in front, the Insert menu open: at rest
+    (0, None, 1, 1, 0),     # behind, "Controller in background" on, the Insert menu open: at rest
+    (0, "1", 0, 1, 0),      # behind, HOS_INPUT_BACKGROUND=1, the Insert menu open: at rest
 ]
 
 
@@ -56,20 +60,21 @@ def main():
     if gate < 0 or read < 0 or gate > read or "count && counts ?" not in six:
         sys.exit("FAIL: GetSixAxisSensorStates reads the pad's motion without asking motion_counts first")
 
-    table = ",\n".join(f'    {{{f}, {"NULL" if e is None else chr(34) + e + chr(34)}, {m}, {want}}}'
-                       for f, e, m, want in CASES)
+    table = ",\n".join(f'    {{{f}, {"NULL" if e is None else chr(34) + e + chr(34)}, {m}, {i}, {want}}}'
+                       for f, e, m, i, want in CASES)
     fixture = f"""#include <stdio.h>
 #include <stdlib.h>
 {function(src, "pads_in_background")}
 {function(src, "motion_counts")}
 int main(void) {{
-    static const struct {{ int front; const char *env; int menu, want; }} cases[] = {{
+    static const struct {{ int front; const char *env; int menu, insert, want; }} cases[] = {{
 {table}
     }};
     for (unsigned i = 0; i < sizeof cases / sizeof *cases; i++)
-        if (motion_counts(cases[i].front, cases[i].env, cases[i].menu) != cases[i].want) {{
-            fprintf(stderr, "FAIL: front %d, HOS_INPUT_BACKGROUND %s, menu %d: %d, not %d\\n", cases[i].front,
-                    cases[i].env ? cases[i].env : "unset", cases[i].menu, !cases[i].want, cases[i].want);
+        if (motion_counts(cases[i].front, cases[i].env, cases[i].menu, cases[i].insert) != cases[i].want) {{
+            fprintf(stderr, "FAIL: front %d, HOS_INPUT_BACKGROUND %s, menu %d, Insert open %d: %d, not %d\\n",
+                    cases[i].front, cases[i].env ? cases[i].env : "unset", cases[i].menu, cases[i].insert, !cases[i].want,
+                    cases[i].want);
             return 1;
         }}
     return 0;

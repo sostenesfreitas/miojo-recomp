@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define MKWVK_API_VERSION 21
+#define MKWVK_API_VERSION 22
 enum { HOS_OPT_CHEAT_HEARTS = 32, HOS_OPT_CHEAT_FLIGHT, HOS_OPT_CHEAT_ACTION, HOS_OPT_CHEAT_CAMERA, HOS_OPT_CHEAT_SPEED, HOS_OPT_CHEAT_AMMO, HOS_OPT_CHEAT_TIMELOCK, HOS_OPT_CHEAT_MOONJUMP };
 /* (hookshot) the Gameplay tab's Text size (host/oot_text_size.c): 0 the game's, 1 110%, 2 125%, 3 150%, 4 175% */
 enum { HOS_OPT_TEXT_SIZE = 10 };
@@ -51,6 +51,9 @@ enum { HOS_OPT_FOV = 51 };
    and Navi waking Link. 44 stays reserved for Skip title, 49 and 50 for Walk, 60 for the item wheel. A new option id
    answered by the existing option callback does not change MkwVkHost or MkwVkRenderer.) */
 enum { HOS_OPT_SKIP_OPENING = 52 };
+/* The Auto run row (Controls): 0 Off, 1 On, A (the sprint) kept held after it is let go (host/auto_run.h,
+   host/nn_hid.c). */
+enum { HOS_OPT_AUTO_RUN = 55 };
 
 /* (hookshot) the controls' names (host/nn_hid.c, host/pad_sdl.c, the pad_ and key_ lines of hookshot_options.ini):
    the Switch's buttons in nn::hid's bit order, and a gamepad's inputs by position (the bottom face button first:
@@ -60,13 +63,12 @@ enum { HOS_SW_A, HOS_SW_B, HOS_SW_X, HOS_SW_Y, HOS_SW_LS, HOS_SW_RS, HOS_SW_L, H
 enum { HOS_PAD_SOUTH, HOS_PAD_EAST, HOS_PAD_WEST, HOS_PAD_NORTH, HOS_PAD_BACK, HOS_PAD_GUIDE, HOS_PAD_START,
        HOS_PAD_LSTICK, HOS_PAD_RSTICK, HOS_PAD_LSHOULDER, HOS_PAD_RSHOULDER, HOS_PAD_UP, HOS_PAD_DOWN, HOS_PAD_LEFT,
        HOS_PAD_RIGHT, HOS_PAD_LTRIGGER, HOS_PAD_RTRIGGER, HOS_PAD_RPADDLE1, HOS_PAD_LPADDLE1,
-       HOS_PAD_RPADDLE2, HOS_PAD_LPADDLE2, HOS_PAD_N };
+       HOS_PAD_RPADDLE2, HOS_PAD_LPADDLE2, HOS_PAD_TOUCHPAD, HOS_PAD_N };
 /* (hookshot) the inputs that have prompt artwork (host/prompts.c, nx2/prompt_assets.py's PADS): the prompt font's code
-   points go by this count, so the paddles past it show their Switch button's default icon */
+   points go by this count, so the paddles and the touchpad past it show their Switch button's default icon. HOS_PAD_TOUCHPAD:
+   a DualShock 4's or DualSense's touchpad click; while no row of the Controls page takes it, it opens the Insert menu as F1
+   does (gpu/vk/vk_menu.cpp) */
 enum { HOS_PAD_ART_N = HOS_PAD_RTRIGGER + 1 };
-/* (hookshot) a DualShock 4's or DualSense's touchpad click, which opens the Insert menu as F1 does (host/pad_sdl.c,
-   gpu/vk/vk_menu.cpp): its own bit past HOS_PAD_N, so it is not one of the inputs the Controls page binds */
-enum { HOS_PAD_TOUCHPAD = 31 };
 enum { HOS_BIND_PAD, HOS_BIND_KEY };
 /* (hookshot) the controller faces of the button prompts (host/prompts.c): the Switch, then nx2/prompt_faces.py FACES' order,
    then the keyboard's (nx2/prompt_keys.py: the keys bound, not the pad inputs); the Button prompts row's value is one more (0
@@ -195,6 +197,10 @@ typedef struct MkwVkHost {
     /* (version 20, hookshot) the main screen's size in pixels, as host/hos_main.c takes its shape at the start (Windows: the
        primary's; Linux: SDL's primary desktop), for the Insert menu's Aspect ratio and Output resolution rows: 0 when not known */
     int (*screen_size)(int *width, int *height);
+    /* (version 22, hookshot) ultrawide: how far the loading cover between two areas is closed, 0 (not shown) to 1 (black),
+       while the game draws it in the middle 16:9 with the menus (wide_menus's keep_mask) and so leaves the sides open
+       (host/hos_main.c hos_wide_cover); 0 when it covers the whole picture itself. Asked at each present */
+    float (*wide_cover)(void);
 } MkwVkHost;
 
 /* One completed temporal-upscale sample; all zero while inactive. */

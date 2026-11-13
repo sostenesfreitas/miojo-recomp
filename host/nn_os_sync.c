@@ -40,7 +40,7 @@ typedef struct Obj {
        condvar: its waiters, those a signal has given the mutex to and not yet out, the mutex they wait with
        (cv_mixed: waiters with more than one: no handoff) */
     int reserved;
-    int cv_waiting, cv_owed, cv_mixed;
+    int cv_waiting, cv_in, cv_owed, cv_mixed;   /* (cv_waiting: counted before cv->lk, read by Signal without it; cv_in: under cv->lk) */
     struct Obj *cv_mutex, *cv_owed_mutex[8];
     /* multi-wait holder: its event; multi-wait: linked holders */
     uint64_t event;
@@ -282,7 +282,9 @@ static int wait_until(Obj *o, int64_t deadline) {
     if (!deadline) return hos_cv_sleep(&o->cv, &o->lk, INFINITE), 1;
     int64_t left = deadline - hos_now_ns();
     if (left <= 0) return 0;
-    hos_cv_sleep(&o->cv, &o->lk, (DWORD)((left + 999999) / 1000000));
+    /* (in steps of at most ~24 days: 0xFFFFFFFF ms is INFINITE; callers wait again until the deadline) */
+    const int64_t ms = (left + 999999) / 1000000;
+    hos_cv_sleep(&o->cv, &o->lk, (DWORD)(ms < 0x7FFFFFFF ? ms : 0x7FFFFFFF));
     return 1;
 }
 
@@ -442,16 +444,24 @@ static int handoff_on(void) {   /* HOS_NO_HANDOFF=1: the old way (any thread may
     return v;
 }
 /* a waiter in: (cv->lk held) */
+/* a waiter counted in for SignalConditionVariable's check, before it takes cv->lk: a signal that reads 0 then came
+   before this waiter started to wait. Counted after cv->lk instead, a signal made without the guest mutex could read 0
+   while the waiter held cv->lk between its generation read and cv_enter, and return without the wake the old Signal
+   (which waited for cv->lk) gave it. cv_leave counts it out. */
+static void cv_count_in(Obj *cv) {
+    __atomic_add_fetch(&cv->cv_waiting, 1, __ATOMIC_SEQ_CST);
+}
 static void cv_enter(Obj *cv, Obj *m) {
-    if (cv->cv_waiting && cv->cv_mutex != m) cv->cv_mixed = 1;
-    if (!cv->cv_waiting) cv->cv_mixed = 0;
+    if (cv->cv_in && cv->cv_mutex != m) cv->cv_mixed = 1;
+    if (!cv->cv_in) cv->cv_mixed = 0;
     cv->cv_mutex = m;
-    cv->cv_waiting++;
+    cv->cv_in++;
 }
 /* a waiter out (cv->lk held): whether a signal reserved its mutex m for it. A reservation made on another mutex (a
    waiter with a different one came in after the signal) is given back: never left owed to nobody */
 static int cv_leave(Obj *cv, Obj *m) {
-    cv->cv_waiting--;
+    cv->cv_in--;
+    __atomic_sub_fetch(&cv->cv_waiting, 1, __ATOMIC_SEQ_CST);   /* (counted in by cv_count_in) */
     if (cv->cv_owed <= 0) return 0;
     Obj *r = cv->cv_owed_mutex[--cv->cv_owed];
     if (r == m) return 1;
@@ -460,7 +470,7 @@ static int cv_leave(Obj *cv, Obj *m) {
 }
 /* a signal (cv->lk held): the mutex reserved for the waiter it wakes */
 static void cv_reserve(Obj *cv) {
-    if (!handoff_on() || cv->cv_mixed || !cv->cv_mutex || cv->cv_waiting <= cv->cv_owed || cv->cv_owed >= 8) return;
+    if (!handoff_on() || cv->cv_mixed || !cv->cv_mutex || cv->cv_in <= cv->cv_owed || cv->cv_owed >= 8) return;
     cv->cv_owed_mutex[cv->cv_owed++] = cv->cv_mutex;
     __atomic_add_fetch(&cv->cv_mutex->reserved, 1, __ATOMIC_SEQ_CST);
 }
@@ -576,15 +586,43 @@ HLE(_ZN2nn2os28IsMutexLockedByCurrentThreadEPKNS0_9MutexTypeE) {
 /* ---- condition variable ---------------------------------------------------------------------------------- */
 HLE(_ZN2nn2os27InitializeConditionVariableEPNS0_21ConditionVariableTypeE) { fresh(ARG(0), K_COND); }
 HLE(_ZN2nn2os25FinalizeConditionVariableEPNS0_21ConditionVariableTypeE) { drop(ARG(0)); }
+/* A signal with no waiter returns at once (~2,500 signals a frame in Hyrule: each took cv->lk and made a wake call, a
+   waiter there or not), as glibc's pthread_cond_signal does, and as Horizon's user mode does when the key reads 0. No
+   waiter that can still miss its predicate's change is missed: a waiter counts itself in (cv_enter) under cv->lk before
+   mutex_release_all gives the guest mutex back (sequentially consistent), so a signaller that holds the mutex, having
+   taken it after that, reads the count with the waiter in; a waiter woken and not yet out (cv_leave) still counts. A
+   signaller that does not hold the mutex can miss a waiter between its gen snapshot and its sleep, as on Horizon: with
+   the predicate changed under the mutex that waiter has not yet looked at it. HOS_CV_SIGNAL_ALWAYS=1: every signal takes
+   the lock, as before (tests/test_cv_signal_early.py) */
+static int cv_signal_always(void) {
+    static int v = -1;   /* (atomic: the first signals of several threads read it at once) */
+    int on = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (on < 0) __atomic_store_n(&v, on = env_on("HOS_CV_SIGNAL_ALWAYS"), __ATOMIC_RELAXED);
+    return on;
+}
 HLE(_ZN2nn2os23SignalConditionVariableEPNS0_21ConditionVariableTypeE) {
     Obj *cv = obj(ARG(0), K_COND);
     if (watched_cv(ARG(0))) watch_log("signal", watch_mutex(), ARG(0), c, NULL);
     HOS_CHAIN(HOS_CHAIN_SIGNAL, cv->key);
+    if (!__atomic_load_n(&cv->cv_waiting, __ATOMIC_SEQ_CST) && !cv_signal_always()) return;
     AcquireSRWLockExclusive(&cv->lk);
     cv_reserve(cv);
     cv->gen++;
     ReleaseSRWLockExclusive(&cv->lk);
     WakeConditionVariable(&cv->cv);
+}
+/* (hookshot) Broadcast: every waiter wakes. Left to the guest SDK, it signals the kernel key at cv+4, which no HLE waiter
+   sleeps on, so its waiters slept on until some Signal (the movie framework's reply and buffer queues, NVIDIA's OS layer:
+   untimed waits). Horizon moves all the waiters onto the mutex, so each is owed it, as a Signal's one is (cv_reserve: one mutex for all of them, at most 8 owed). */
+HLE(_ZN2nn2os26BroadcastConditionVariableEPNS0_21ConditionVariableTypeE) {
+    Obj *cv = obj(ARG(0), K_COND);
+    if (watched_cv(ARG(0))) watch_log("broadcast", watch_mutex(), ARG(0), c, NULL);
+    HOS_CHAIN(HOS_CHAIN_SIGNAL, cv->key);
+    AcquireSRWLockExclusive(&cv->lk);
+    for (int n = cv->cv_waiting - cv->cv_owed; n > 0; n--) cv_reserve(cv);
+    cv->gen++;
+    ReleaseSRWLockExclusive(&cv->lk);
+    WakeAllConditionVariable(&cv->cv);
 }
 HLE(_ZN2nn2os21WaitConditionVariableEPNS0_21ConditionVariableTypeEPNS0_9MutexTypeE) {
     Obj *cv = obj(ARG(0), K_COND), *m = obj(ARG(1), K_MUTEX);
@@ -595,6 +633,7 @@ HLE(_ZN2nn2os21WaitConditionVariableEPNS0_21ConditionVariableTypeEPNS0_9MutexTyp
         if (i < 8) watch_cvs[i] = ARG(0);
         watch_log("cv wait", ARG(1), ARG(0), c, m);
     }
+    cv_count_in(cv);
     AcquireSRWLockExclusive(&cv->lk);
     uint64_t gen = cv->gen;
     cv_enter(cv, m);
@@ -915,6 +954,20 @@ static void sema_release(Obj *s, int n) {
     WakeAllConditionVariable(&s->cv);
     poke_multiwait(s);
 }
+/* an acquire that waits at most ns (<= 0: does not wait); whether it got one */
+static int sema_acquire_for(Obj *s, int64_t ns) {
+    const int64_t now = hos_now_ns();
+    const int64_t deadline = ns <= 0 ? now : ns > INT64_MAX - now ? INT64_MAX : now + ns;   /* (a huge TimeSpan: no wrap) */
+    const int chain = ns > 0 && s->sem <= 0 && hos_chain_on;
+    if (chain) hos_chain_note(HOS_CHAIN_WAIT, s->key, 0);
+    AcquireSRWLockExclusive(&s->lk);
+    while (s->sem <= 0 && wait_until(s, deadline) && hos_now_ns() < deadline) {}
+    const int ok = s->sem > 0;
+    if (ok) s->sem--;
+    ReleaseSRWLockExclusive(&s->lk);
+    if (chain) hos_chain_note(HOS_CHAIN_WOKE, s->key, 0);
+    return ok;
+}
 HLE(_ZN2nn2os19InitializeSemaphoreEPNS0_13SemaphoreTypeEii) { sema_init(ARG(0), (int)ARG(1), (int)ARG(2)); }
 HLE(_ZN2nn2os17FinalizeSemaphoreEPNS0_13SemaphoreTypeE) { drop(ARG(0)); }
 HLE(_ZN2nn2os16AcquireSemaphoreEPNS0_13SemaphoreTypeE) { sema_acquire(obj(ARG(0), K_SEMA)); }
@@ -925,6 +978,12 @@ HLE(_ZN2nn2os21AcquireLightSemaphoreEPNS0_18LightSemaphoreTypeE) { sema_acquire(
 HLE(_ZN2nn2os21ReleaseLightSemaphoreEPNS0_18LightSemaphoreTypeE) { sema_release(obj(ARG(0), K_SEMA), 1); }
 /* (hookshot) the count overload, which OoT imports: left to the guest SDK it would bypass the host's state */
 HLE(_ZN2nn2os21ReleaseLightSemaphoreEPNS0_18LightSemaphoreTypeEi) { sema_release(obj(ARG(0), K_SEMA), (int)ARG(1)); }
+/* (hookshot) the timed and try acquires: left to the guest SDK they read its count words, which the HLE never writes, and
+   wait on a kernel key no HLE release signals (the C library's timed semaphore wait and NVIDIA's OS layer call
+   TimedAcquireSemaphore). */
+HLE(_ZN2nn2os21TimedAcquireSemaphoreEPNS0_13SemaphoreTypeENS_8TimeSpanE) { RET(sema_acquire_for(obj(ARG(0), K_SEMA), (int64_t)ARG(1))); }
+HLE(_ZN2nn2os26TimedAcquireLightSemaphoreEPNS0_18LightSemaphoreTypeENS_8TimeSpanE) { RET(sema_acquire_for(obj(ARG(0), K_SEMA), (int64_t)ARG(1))); }
+HLE(_ZN2nn2os24TryAcquireLightSemaphoreEPNS0_18LightSemaphoreTypeE) { RET(sema_acquire_for(obj(ARG(0), K_SEMA), 0)); }
 
 /* ---- message queues (normal and light): the guest's buffer size is the capacity ------------------------------ */
 static void queue_init(uint64_t key, int capacity) {
@@ -1248,6 +1307,7 @@ HLE(_ZN2nn2os17TryWaitTimerEventEPNS0_14TimerEventTypeE) {
 HLE(_ZN2nn2os26TimedWaitConditionVariableEPNS0_21ConditionVariableTypeEPNS0_9MutexTypeENS_8TimeSpanE) {
     Obj *cv = obj(ARG(0), K_COND), *m = obj(ARG(1), K_MUTEX);
     int64_t deadline = hos_now_ns() + ((int64_t)ARG(2) > 0 ? (int64_t)ARG(2) : 0);
+    cv_count_in(cv);
     AcquireSRWLockExclusive(&cv->lk);
     uint64_t gen = cv->gen;
     cv_enter(cv, m);

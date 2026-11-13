@@ -41,6 +41,9 @@ int main(void) {
     n = 0;
     for (int i = 0; i < 1440; i++) n += frame_whole(&w, a, bits(60.0f / 144.0f), 1);
     CHECK(n >= 599 && n <= 601);
+    n = 0;
+    for (int i = 0; i < 30; i++) n += frame_whole(&w, b + 16, bits(2.0f), 1);
+    CHECK(n == 60);   /* (30 fps: one second still advances sixty counter ticks) */
     CHECK(frame_whole(&w, b, bits(0.42f), 1) == 0 && frame_whole(&w, b, bits(0.42f), 1) == 0 && frame_whole(&w, b, bits(0.42f), 1) == 1);
     n = 0;
     for (int i = 0; i < 4; i++) n += frame_whole(&w, b + 8, bits(1.25f), 1);   /* (the step times 3: its fractions kept) */

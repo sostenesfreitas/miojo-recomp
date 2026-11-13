@@ -65,6 +65,7 @@ int made_usage = 0, made_format = 0, dispatched_mode = -1;
 uint64_t dispatched_pipe = 0;
 float dispatched_sharp = -1, dispatched_x0 = -1, dispatched_x1 = -1;
 int dispatched_side = -1;
+float dispatched_cover = -1.0f;
 VkImageView sampled_view = 0;
 VkImageBlit last_blit;
 VkImageCopy last_copy;
@@ -72,7 +73,7 @@ VkImageCopy last_copy;
 bool make_pipe(Pipe& p, const uint32_t* code, size_t bytes, std::initializer_list<int> types, uint32_t push) {
     const bool pq = code == FG_SCALE_PQ_COMP_SPV;
     CHECK((pq ? bytes == sizeof FG_SCALE_PQ_COMP_SPV : code == FG_SCALE_COMP_SPV && bytes == sizeof FG_SCALE_COMP_SPV));
-    CHECK(types.size() == 3 && push == 20);
+    CHECK(types.size() == 3 && push == 24);
     CHECK(*types.begin() == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && *(types.begin() + 1) == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     const bool fail = pq ? pq_pipe_fail : pipe_fail;
     ++pipe_calls; p.set = 1; p.layout = 2; p.pipe = fail ? 0 : pq ? 5 : 3; return !fail;
@@ -111,13 +112,13 @@ void vkCmdCopyImage(int, VkImage src, int, VkImage dst, int, int count, const Vk
 }
 void pass(int, const Pipe& p, std::initializer_list<std::pair<VkImageView, VkSampler>> b,
           uint32_t w, uint32_t h, const void* data, uint32_t bytes) {
-    CHECK((p.pipe == 3 || p.pipe == 5) && b.size() == 3 && b.begin()->first && b.begin()->second == 4 && bytes == 20);
+    CHECK((p.pipe == 3 || p.pipe == 5) && b.size() == 3 && b.begin()->first && b.begin()->second == 4 && bytes == 24);
     CHECK((b.begin() + 2)->first && (b.begin() + 2)->second == 4);
     CHECK((b.begin() + 1)->first && !(b.begin() + 1)->second);
-    struct PC { int mode; float sharp; float x0, x1; int side; } pc;
+    struct PC { int mode; float sharp; float x0, x1; int side; float cover; } pc;
     std::memcpy(&pc, data, sizeof pc);
     ++dispatches; dispatched_mode = pc.mode; dispatched_sharp = pc.sharp;
-    dispatched_side = pc.side; dispatched_x0 = pc.x0; dispatched_x1 = pc.x1;
+    dispatched_side = pc.side; dispatched_x0 = pc.x0; dispatched_x1 = pc.x1; dispatched_cover = pc.cover;
     dispatched_w = w; dispatched_h = h; sampled_view = b.begin()->first; dispatched_pipe = p.pipe;
 }
 void logf(const char*, ...) { CHECK(dispatches > 0); ++logs; }
@@ -158,6 +159,29 @@ int main() {
     CHECK(dispatches == 1 && dispatched_mode == 0 && dispatched_sharp == 0.0f);
     CHECK(dispatched_side == 2 && dispatched_x0 == 0.25f && dispatched_x1 == 0.75f);
     wide_now = WideSides{}; CHECK(!draw()); CHECK(dispatches == 1);
+    // (the loading cover in the middle 16:9 alone runs the pass too, the sides closed by as much as it is, with no menu sides;
+    // with the blurred sides of a loading screen it closes those)
+    reset(); wide_now = WideSides{0.25f, 0, 65535}; CHECK(draw());
+    CHECK(dispatches == 1 && dispatched_side == 0 && dispatched_cover == 1.0f && dispatched_x0 == 0.25f && dispatched_x1 == 0.75f);
+    reset(); wide_now = WideSides{0.25f, 0, 32768}; CHECK(draw());
+    CHECK(dispatched_cover > 0.4999f && dispatched_cover < 0.5001f);
+    reset(); wide_now = WideSides{0.25f, 2}; CHECK(draw()); CHECK(dispatched_cover == 0.0f);
+    reset(); wide_now = WideSides{0.25f, 1, 65535}; CHECK(draw());
+    CHECK(dispatches == 2 && dispatched_side == 1 && dispatched_cover == 1.0f);
+    // (a frame the display thread shows, frame generation's: the cover is in its sides already, framegen_record's copy; the
+    // menu sides are still this pass's)
+    wide_cover_in_frame = true;
+    reset(); wide_now = WideSides{0.25f, 0, 65535}; CHECK(!draw()); CHECK(dispatches == 0);
+    reset(); wide_now = WideSides{0.25f, 2, 65535}; CHECK(draw()); CHECK(dispatched_side == 2 && dispatched_cover == 0.0f);
+    wide_cover_in_frame = false;
+    reset(); wide_now = WideSides{0.25f, 0, 65535}; CHECK(draw()); CHECK(dispatched_cover == 1.0f);
+    // (the reading may be of the game's next frame: a frame's sides take the larger of its reading and the one before, so an
+    // opening cover's sides follow a present behind and a closing cover's at once)
+    {
+        const float read[] = {0.0f, 0.25f, 1.0f, 1.0f, 0.75f, 0.5f, 0.5f, 0.25f, 0.0f, 0.0f};
+        const float held[] = {0.0f, 0.25f, 1.0f, 1.0f, 1.0f, 0.75f, 0.5f, 0.5f, 0.25f, 0.0f};
+        for (int i = 0; i < 10; i++) CHECK(wide_cover_held(read[i]) == held[i]);
+    }
     // (the blurred sides: first the picture at 1/8, then the pass, which reads it)
     reset(); wide_now = WideSides{0.25f, 1}; CHECK(draw());
     CHECK(dispatches == 2 && dispatched_side == 1 && dispatched_x0 == 0.25f && dispatched_x1 == 0.75f);

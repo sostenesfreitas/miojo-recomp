@@ -106,14 +106,16 @@ inline Choice choose(const Hardware& h) {
                : h.rdna4 && !h.fsr4_built ? "the game's own upscaler (this build has no FSR 4)" : "the game's own upscaler");
     }
     // The output: the screen's own size where the tier has the memory for its frame (the menu checks it offers it); else the
-    // game's
-    if (h.screen_w > 0 && h.screen_h > 0 && !(h.screen_w == kGameW && h.screen_h == kGameH)) {
-        const int need = output_tier(h.screen_w, h.screen_h);
+    // game's. Each side rounded down to 8, as the menu offers the screen's sizes (display_modes.h offered): a 1366x768 screen's
+    // is 1360x768 there, and the size as the screen gives it would not be found
+    const int sw = h.screen_w > 0 ? h.screen_w & ~7 : 0, sh = h.screen_h > 0 ? h.screen_h & ~7 : 0;
+    if (sw > 0 && sh > 0 && !(sw == kGameW && sh == kGameH)) {
+        const int need = output_tier(sw, sh);
         if (c.tier >= need) {
-            c.output_w = h.screen_w, c.output_h = h.screen_h;
-            std::snprintf(b, sizeof b, "output %dx%d (the screen's)", h.screen_w, h.screen_h);
+            c.output_w = sw, c.output_h = sh;
+            std::snprintf(b, sizeof b, "output %dx%d (the screen's)", sw, sh);
         } else {
-            std::snprintf(b, sizeof b, "output 2048x1152 (the screen's %dx%d needs tier %d)", h.screen_w, h.screen_h, need);
+            std::snprintf(b, sizeof b, "output 2048x1152 (the screen's %dx%d needs tier %d)", sw, sh, need);
         }
         add(c, b);
     } else {

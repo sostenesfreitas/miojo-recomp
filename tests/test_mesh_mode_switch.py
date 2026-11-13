@@ -87,7 +87,7 @@ def check_source():
     if '"mesh_shaders"' in block(menu, "const char* ini_key("):
         raise SystemExit("FAIL: ini_key still names mesh_shaders: the game would write it")
     save = block(menu, "void save() {")
-    kept = save[:save.index('fopen(ini_path().c_str(), "w")')]
+    kept = save[:save.index('fopen(part.c_str(), "w")')]
     if 'mine |= key == "mesh_shaders";' not in kept:
         raise SystemExit("FAIL: save() keeps an old mesh_shaders= line among the lines it does not write")
     if "mesh_mode" in (vk / "vk_menu.h").read_text(encoding="utf-8"):

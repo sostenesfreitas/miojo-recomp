@@ -158,11 +158,18 @@ def check_sources():
     if not m:
         raise SystemExit("RX_REC_BOUNDARIES not found in vk_recorder.h")
     bounds = dict((f, k) for k, f in re.findall(r"\b([KM])\((\w+)\)", m.group(1)))
-    bmacros = dict(re.findall(r"#define (\w+)\(\.\.\.\) \(::mkwvk::rec::boundary\(::mkwvk::rec::B_\w+\), (::vkx::|::)\w+\(__VA_ARGS__\)\)", work))
-    for f, q in bmacros.items():
-        if "#define %s(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_%s), %s%s(__VA_ARGS__))" % (f, f, q, f) not in work:
-            problems.append("vk_work.h: %s's macro calls another function" % f)
-    if set(bmacros) != set(bounds) or any(bmacros[f] != ("::vkx::" if k == "K" else "::") for f, k in bounds.items() if f in bmacros):
+    timed = {"vkWaitForFences": "fences", "vkWaitSemaphores": "timeline", "vkQueueWaitIdle": "idle",
+             "vkDeviceWaitIdle": "idle", "vkGetQueryPoolResults": "queries"}
+    bmacros = {f: (b, call) for f, b, call in re.findall(
+        r"^#define (\w+)\(\.\.\.\) \(::mkwvk::rec::boundary\(::mkwvk::rec::B_(\w+)\), (.+)\)$", work, re.M)}
+    for f, k in bounds.items():
+        q = "::vkx::" if k == "K" else "::"
+        mask = ", VK_QUERY_RESULT_WAIT_BIT" if f == "vkGetQueryPoolResults" else ""
+        call = ("::mkwvk::gpu_wait_stats::%s(%s%s%s, __VA_ARGS__)" % (timed[f], q, f, mask)
+                if f in timed else "%s%s(__VA_ARGS__)" % (q, f))
+        if bmacros.get(f) != (f, call):
+            problems.append("vk_work.h: %s does not drain first and call its own driver function" % f)
+    if set(bmacros) != set(bounds):
         problems.append("vk_work.h's boundary macros and RX_REC_BOUNDARIES differ: only in vk_work.h %s, only in vk_recorder.h %s"
                         % (sorted(set(bmacros) - set(bounds)), sorted(set(bounds) - set(bmacros))))
     unwrapped = {}
@@ -264,6 +271,7 @@ def build(cxx, headers, out, recorder_text, name, extra=(), work_text=None):
     (d / "vk_loader.h").write_text(test_loader(), encoding="utf-8")
     (d / "vk_work.h").write_text(work_text or (VK / "vk_work.h").read_text(encoding="utf-8"), encoding="utf-8")
     (d / "vk_recorder.h").write_text(recorder_text, encoding="utf-8")
+    (d / "gpu_wait_stats.h").write_text((VK / "gpu_wait_stats.h").read_text(encoding="utf-8"), encoding="utf-8")
     exe = d / "recorder_sync_test.exe"
     cmd = [cxx, "-std=c++20", "-include", ENV_ON_H, "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-missing-field-initializers", "-DVK_NO_PROTOTYPES",
            "-D_CRT_SECURE_NO_WARNINGS",
@@ -334,8 +342,8 @@ def unordered_too(rec, f):
 
 def no_wait(work_h, f):
     """vk_work.h with f's boundary macro calling the driver at once (no drain, no wait)"""
-    return broken(work_h, "#define %s(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_%s), ::vkx::%s(__VA_ARGS__))" % (f, f, f),
-                  "#define %s(...) (::vkx::%s(__VA_ARGS__))" % (f, f), f)
+    return broken(work_h, "#define %s(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_%s), " % (f, f),
+                  "#define %s(...) (" % f, f)
 
 
 EXIT_LINES = ("recorder parked in idle() holding sleep_mu: 1; ExitProcess", "DLL detach: the global destructors ran to the end")
@@ -350,6 +358,7 @@ def exit_test(cxx, headers, out, recorder_text, name):
     (d / "vk_loader.h").write_text(test_loader(), encoding="utf-8")
     (d / "vk_work.h").write_text((VK / "vk_work.h").read_text(encoding="utf-8"), encoding="utf-8")
     (d / "vk_recorder.h").write_text(recorder_text, encoding="utf-8")
+    (d / "gpu_wait_stats.h").write_text((VK / "gpu_wait_stats.h").read_text(encoding="utf-8"), encoding="utf-8")
     src = str(ROOT / "tests" / "recorder_exit_test.cpp")
     flags = ["-std=c++20", "-include", ENV_ON_H, "-O2", "-Wall", "-Wextra", "-Werror", "-DVK_NO_PROTOTYPES", "-D_CRT_SECURE_NO_WARNINGS"]
     for cmd in ([cxx, *flags, "-shared", "-DRX_EXIT_DLL", "-I" + str(d), "-I" + str(headers), src, "-o", str(d / "rx_exit.dll")],

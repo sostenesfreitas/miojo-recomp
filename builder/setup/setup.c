@@ -403,12 +403,24 @@ static int copy_part_tree(const wchar_t *from, const wchar_t *to) {
     return ok;
 }
 
+/* A folder tar.exe has just written can stay open a few seconds in an antivirus scan or the search indexer: MoveFileW then fails
+   with access denied or a sharing violation. Those are tried again for up to 20 s, any other error is returned at once.
+   On failure GetLastError is the last try's. */
+static BOOL move_retry(const wchar_t *from, const wchar_t *to) {
+    for (int tries = 1;; tries++) {
+        if (MoveFileW(from, to)) return TRUE;
+        const DWORD error = GetLastError();
+        if ((error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION) || tries == 80) return FALSE;
+        Sleep(250);
+    }
+}
+
 static int publish_install(const wchar_t *staged, const wchar_t *final, int portable) {
-    if (!portable || GetFileAttributesW(final) == INVALID_FILE_ATTRIBUTES) return MoveFileW(staged, final) != 0;
+    if (!portable || GetFileAttributesW(final) == INVALID_FILE_ATTRIBUTES) return move_retry(staged, final) != 0;
     wchar_t backup[MAX_PATH];
     const int n = home_path(backup, L"%ls.rollback-%lu-%llu", final, GetCurrentProcessId(), GetTickCount64());
     if (n < 0 || n >= MAX_PATH || !MoveFileW(final, backup)) return 0;
-    if (!MoveFileW(staged, final)) {
+    if (!move_retry(staged, final)) {
         const DWORD error = GetLastError();
         /* If restoration is prevented externally, the complete old installation remains in .rollback-* for recovery. */
         MoveFileW(backup, final);
@@ -534,33 +546,32 @@ static int json_string_after(const char *p, const char *end, char *out, int n) {
     return 1;
 }
 
-/* The API link of the asset called name in a release's JSON (in an asset object its own "url" comes before its "name") */
+/* The download link of the asset called name in a release's JSON (its "browser_download_url", after its "name") */
 static int asset_from_json(const char *json, size_t len, const char *name, char *out, int n) {
     const char *end = json + len, *at = NULL;
     char v[600];
     for (const char *p = json; (p = strstr(p, "\"name\"")) && p < end; p += 6)
         if (json_string_after(p + 6, end, v, sizeof v) && !strcmp(v, name)) { at = p; break; }
     if (!at) return 0;
-    const char *url = NULL;
-    for (const char *p = json; p + 5 <= at; p++)
-        if (!strncmp(p, "\"url\"", 5)) url = p;
-    return url && json_string_after(url + 5, end, out, n) && !strncmp(out, "https://api.github.com/", 23);
+    const char *close = strchr(at, '}'), *url = strstr(at, "\"browser_download_url\"");
+    return url && close && url < close && json_string_after(url + 22, end, out, n) &&
+           !strncmp(out, "https://git.notrexed.dev/", 25);
 }
 
 /* repo "owner/name", tag NULL for the latest release */
 static int api_asset_url(const char *repo, const char *tag, const char *name, char *out, int n) {
     char api[1024];
-    if (tag) snprintf(api, sizeof api, "https://api.github.com/repos/%s/releases/tags/%s", repo, tag);
-    else snprintf(api, sizeof api, "https://api.github.com/repos/%s/releases/latest", repo);
+    if (tag) snprintf(api, sizeof api, "https://git.notrexed.dev/api/v1/repos/%s/releases/tags/%s", repo, tag);
+    else snprintf(api, sizeof api, "https://git.notrexed.dev/api/v1/repos/%s/releases/latest", repo);
     Mem m = {0};
     const int found = http_get(api, mem_sink, &m, 0, L"application/vnd.github+json") && m.p && asset_from_json(m.p, m.n, name, out, n);
     free(m.p);
     return found;
 }
 
-/* https://github.com/<owner>/<repo>/releases/download/<tag>/<name> or .../releases/latest/download/<name> -> its API link */
+/* https://git.notrexed.dev/<owner>/<repo>/releases/download/<tag>/<name> or .../releases/latest/download/<name> -> the link the API gives */
 static int api_link_for(const char *url, char *out, int n) {
-    static const char pre[] = "https://github.com/";
+    static const char pre[] = "https://git.notrexed.dev/";
     char repo[256], tag[256], name[260];
     if (strncmp(url, pre, sizeof pre - 1)) return 0;
     const char *p = url + sizeof pre - 1, *slash = strchr(p, '/');
@@ -661,8 +672,8 @@ static const char *manifest_url(void) {
     if (!tag[0] && HOOKSHOT_SETUP_RELEASE[0] && strlen(HOOKSHOT_SETUP_RELEASE) < sizeof tag) strcpy(tag, HOOKSHOT_SETUP_RELEASE);
     if (e && *e) snprintf(u, sizeof u, "%s", e);
     else if (tag[0])
-        snprintf(u, sizeof u, "https://github.com/NotRexed/Hookshot/releases/download/%s/hookshot-setup.txt", nightly_tag(tag) ? "nightly" : tag);
-    else snprintf(u, sizeof u, "%s", "https://github.com/NotRexed/Hookshot/releases/latest/download/hookshot-setup.txt");
+        snprintf(u, sizeof u, "https://git.notrexed.dev/Hookshot/Hookshot/releases/download/%s/hookshot-setup.txt", nightly_tag(tag) ? "nightly" : tag);
+    else snprintf(u, sizeof u, "%s", "https://git.notrexed.dev/Hookshot/Hookshot/releases/latest/download/hookshot-setup.txt");
     return u;
 }
 
@@ -694,7 +705,7 @@ static DWORD WINAPI work(LPVOID unused) {
     int ok = 0;
     for (int attempt = 0; attempt < TRIES && !ok; attempt++) {
         if (attempt) {
-            status(L"GitHub didn't answer (%lu). Trying again in %d s...", g_http_status, waits[attempt - 1]);
+            status(L"The download server didn't answer (%lu). Trying again in %d s...", g_http_status, waits[attempt - 1]);
             Sleep(waits[attempt - 1] * 1000);
             status(L"Looking for the latest Hookshot Builder...");
         }
@@ -715,10 +726,10 @@ static DWORD WINAPI work(LPVOID unused) {
     if (!ok)
         fail(g_http_status == 404
                  ? L"The latest Hookshot release has no setup files yet. Download HookshotBuilder.zip from the releases page for now: "
-                   L"https://github.com/NotRexed/Hookshot/releases/latest"
-             : g_http_status ? L"GitHub's download servers are failing right now (an error 500 or above, tried 8 times over 3 minutes). "
-                               L"This is on GitHub's side: try again in a few minutes, or later today."
-                             : L"Could not reach GitHub to get the Hookshot Builder. Check your internet connection and try again.");
+                   L"https://git.notrexed.dev/Hookshot/Hookshot/releases/latest"
+             : g_http_status ? L"The download server is failing right now (an error 500 or above, tried 8 times over 3 minutes). "
+                               L"This is on the server's side: try again in a few minutes, or later today."
+                             : L"Could not reach git.notrexed.dev to get the Hookshot Builder. Check your internet connection and try again.");
 
     char tag[128] = "", run[260] = "";
     Part parts[MAX_PARTS];
@@ -748,7 +759,7 @@ static DWORD WINAPI work(LPVOID unused) {
         if (want[0] && strcmp(want, tag)) {
             wchar_t ww[128], wt[128];
             MultiByteToWideChar(CP_UTF8, 0, want, -1, ww, 128), MultiByteToWideChar(CP_UTF8, 0, tag, -1, wt, 128);
-            fail(L"GitHub answered with the setup list of %ls, not %ls (its download links can lag right after a release). Try the "
+            fail(L"The server answered with the setup list of %ls, not %ls (its download links can lag right after a release). Try the "
                  L"update again in a few minutes.", wt, ww);
         }
     }
@@ -784,7 +795,7 @@ static DWORD WINAPI work(LPVOID unused) {
                 int got = 0;
                 for (int attempt = 0; attempt < TRIES && !got; attempt++) {   /* (a server error or a dropped connection: again) */
                     if (attempt) {
-                        status(L"Part %d of %d: GitHub didn't answer (%lu). Trying again in %d s...", i + 1, nparts, g_http_status,
+                        status(L"Part %d of %d: the download server didn't answer (%lu). Trying again in %d s...", i + 1, nparts, g_http_status,
                                waits[attempt - 1]);
                         Sleep(waits[attempt - 1] * 1000);
                     }
@@ -813,8 +824,8 @@ static DWORD WINAPI work(LPVOID unused) {
                     if (!got && !retryable(g_http_status)) break;
                 }
                 if (!got) DeleteFileW(part), fail(retryable(g_http_status)
-                    ? L"Downloading part %d of %d failed: GitHub's download servers are failing right now (tried 8 times over 3 "
-                      L"minutes). This is on GitHub's side. The parts already downloaded are kept: run HookshotBuilder.exe again in a "
+                    ? L"Downloading part %d of %d failed: the download server is failing right now (tried 8 times over 3 "
+                      L"minutes). This is on the server's side. The parts already downloaded are kept: run HookshotBuilder.exe again in a "
                       L"few minutes and it carries on from here."
                     : L"Downloading part %d of %d failed. Check your connection and free space, then try again.", i + 1, nparts);
                 if (strcmp(have, p->sha)) DeleteFileW(part), fail(L"Part %d of %d did not download correctly (its checksum differs). Try again.", i + 1, nparts);
@@ -862,8 +873,14 @@ static DWORD WINAPI work(LPVOID unused) {
                 w(p->from, wf, 260), w(p->to, wt, 260);
                 home_path(from, L"%ls\\%ls", dest, wf);
                 home_path(to, L"%ls\\%ls", dest, wt);
-                if (GetFileAttributesW(to) == INVALID_FILE_ATTRIBUTES && !MoveFileW(from, to))
-                    fail(L"Could not set up part %d of %d (renaming %ls).", i + 1, nparts, wf);
+                if (GetFileAttributesW(to) == INVALID_FILE_ATTRIBUTES && !move_retry(from, to)) {
+                    const DWORD e = GetLastError();
+                    if (e == ERROR_ACCESS_DENIED || e == ERROR_SHARING_VIOLATION)
+                        fail(L"Could not set up part %d of %d (renaming %ls, Windows error %lu). Another program is holding the files just unpacked, "
+                             L"often an antivirus scan: run the setup again, and if it happens again allow the folder %ls in it.",
+                             i + 1, nparts, wf, e, g_home.root);
+                    fail(L"Could not set up part %d of %d (renaming %ls, Windows error %lu).", i + 1, nparts, wf, e);
+                }
             }
         }
         wchar_t staged_exe[MAX_PATH];
@@ -872,7 +889,7 @@ static DWORD WINAPI work(LPVOID unused) {
         if (!builder_ready(staged_exe))
             fail(L"The Builder or its self-contained .NET runtime is incomplete after unpacking (%ls). Your antivirus may have quarantined files from %ls. Check its quarantine/history, then run the setup again. No complete installation was published.", staged_exe, install);
         if (!publish_install(install, final_dir, g_home.portable))
-            fail(L"Could not finish installing into %ls. A preserved repair backup, if restoration was blocked, is beside it as .rollback-*.", final_dir);
+            fail(L"Could not finish installing into %ls (Windows error %lu). A preserved repair backup, if restoration was blocked, is beside it as .rollback-*.", final_dir, GetLastError());
         wcscpy(install, final_dir);
         write_small(marker, tag);
         write_parts(install, parts, nparts);

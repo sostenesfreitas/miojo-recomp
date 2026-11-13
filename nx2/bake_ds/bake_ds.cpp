@@ -705,7 +705,7 @@ uint64_t disk_stamp(uint64_t translator_stamp, uint32_t depth) {   // (live: vk_
                                 "RX_VK_GP_", "RX_VK_FOLLOW", "RX_VK_NO_FOLLOW", "RX_VK_NO_F16", "RX_VK_SHARED", "RX_VK_MESH",
                                 "RX_VK_NO_INVARIANT", "RX_VK_MARKERS", "RX_VK_NO_CBUF_LOAD_RULE",
                                 "RX_VK_PTR_SPLIT_FALLBACK", "RX_VK_ALL_GLOBAL_PROGS", "RX_VK_NO_EXTREGS", "RX_VK_NO_DRAW_PARAMS",
-                                "RX_VK_MISS_LOG", "RX_VK_BLOCK_PROBE", "EDEN_"})
+                                "RX_VK_MISS_LOG", "RX_VK_BLOCK_PROBE", "RX_VK_LOWER_SKIP", "EDEN_"})
             if (!std::strncmp(*e, pre, std::strlen(pre))) add(*e, std::strlen(*e));
     }
     return h;
@@ -1482,6 +1482,22 @@ int run_translate(const Options& o) {
                 for (int i = 0; i < 16; i++) vrt.generic_input_types[i] = attribute_type_of(av.attributes[i]);
                 vrt.previous_stage_stores.mask.set();
                 vrt.convert_depth_mode = o.depth != 0;
+                // (the fragment stage translated first, as vk_shader.cpp translate_into: its noperspective inputs are written
+                // times Position.w by the vertex stage and interpolated perspective-correct, the AMD clipped-vertex workaround;
+                // a bank baked without it would keep the old interpolation)
+                std::unique_ptr<Translation> ft;
+                Shader::RuntimeInfo frt{};
+                if (by_stage[1]) {
+                    OfflineEnv fenv{*by_stage[1], Shader::Stage::Fragment};
+                    ft = translate(fenv, true);
+                    questions += fenv.texture_questions;
+                    if (!ft->program.info.loads_indexed_attributes && vrt.xfb_count == 0) {
+                        for (size_t i = 0; i < ft->program.info.interpolation.size(); ++i)
+                            if (ft->program.info.interpolation[i] == Shader::Interpolation::NoPerspective)
+                                vrt.noperspective_outputs.set(i);
+                        frt.scaled_noperspective_inputs = vrt.noperspective_outputs.any();
+                    }
+                }
                 StageResult v;
                 v.info = t->program.info;
                 v.nvn_stage = 0;
@@ -1491,11 +1507,7 @@ int run_translate(const Options& o) {
                 if (v.spirv.empty()) err = "vertex EmitSPIRV returned no words";
                 v.vk_stage = kVkVertex;
                 pr.stages.push_back(std::move(v));
-                if (err.empty() && by_stage[1]) {
-                    OfflineEnv fenv{*by_stage[1], Shader::Stage::Fragment};
-                    auto ft = translate(fenv, true);
-                    questions += fenv.texture_questions;
-                    Shader::RuntimeInfo frt{};
+                if (err.empty() && ft) {
                     frt.previous_stage_stores = t->program.info.stores;
                     for (int i = 0; i < 8; i++) frt.color_output_types[i] = static_cast<Shader::AttributeType>(no_types[i]);
                     uint32_t float_targets = 0;

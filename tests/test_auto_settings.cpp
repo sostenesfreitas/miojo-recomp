@@ -1,5 +1,6 @@
 // auto_settings (gpu/vk/auto_settings.h): the Quality preset "Auto (this PC)"'s rules. tests/test_auto_settings.py
 #include "../gpu/vk/auto_settings.h"
+#include "../gpu/vk/display_modes.h"
 #include "../gpu/vk/upscaler_rows.h"
 namespace ur = mkwvk::upscaler_rows;
 
@@ -222,6 +223,18 @@ int main() {
         uw.vram_mb = 8192;
         u = choose(uw);
         expect(u.output_w == 0 && std::strstr(u.why, "needs tier 4"), "the same screen at Balanced: the game's");
+    }
+    {   // (a screen whose sides are not multiples of 8: its size as the menu offers it, each side rounded down to 8)
+        namespace dm = mkwvk::display_modes;
+        const int screens[][4] = {{1366, 768, 1360, 768}, {1600, 900, 1600, 896}, {1680, 1050, 1680, 1048}};
+        for (const auto& s : screens) {
+            Hardware lap;
+            lap.vendor = NVIDIA, lap.rtx = true, lap.dlss_built = true, lap.vram_mb = 6144, lap.screen_w = s[0], lap.screen_h = s[1];
+            const Choice l = choose(lap);
+            const std::vector<dm::Size> menu = dm::offered({{(uint32_t)s[0], (uint32_t)s[1]}});
+            const bool listed = std::find(menu.begin(), menu.end(), dm::Size{(uint32_t)l.output_w, (uint32_t)l.output_h}) != menu.end();
+            expect(l.output_w == s[2] && l.output_h == s[3] && listed, "a screen not a multiple of 8: its size as the menu offers it");
+        }
     }
 
     if (failures) return EXIT_FAILURE;

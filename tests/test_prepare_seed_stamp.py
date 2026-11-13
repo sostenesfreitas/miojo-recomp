@@ -17,21 +17,14 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 RUN_ALL_ARGS = ["--cxx", "g++"]
 
 ROOT = Path(__file__).resolve().parents[1]
 DRAW = ROOT / "gpu" / "vk" / "vk_draw.cpp"
-
-
-def block(text, marker):
-    start = text.index(marker)
-    at = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[at] == "{") - (text[at] == "}")
-        at += 1
-    return text[start:at]
 
 
 def main():

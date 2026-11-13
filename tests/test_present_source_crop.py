@@ -29,14 +29,15 @@ def main():
     fg = (a.source / "gpu/vk/vk_framegen.cpp").read_text(encoding="utf-8")
     structs = fg[fg.index("struct Img {"):fg.index("int64_t now_ns()")]
     functions = "\n".join([block(replay, "void blit_crop_to_rect("), block(replay, "void blit_crop("),
-                           block(fg, "bool framegen_record("), block(fg, "VkImage framegen_hdr(")])
+                           block(fg, "int fixed_frames("), block(fg, "bool framegen_record("),
+                           block(fg, "VkImage framegen_hdr(")])   # (fixed_frames: the frames a game frame gets, framegen_record asks it)
     template = (ROOT / "tests/present_source_crop_test.cpp").read_text(encoding="utf-8")
     fixture = template.replace("/* ACTUAL_STATE */", structs).replace("/* ACTUAL_FUNCTIONS */", functions)
     with tempfile.TemporaryDirectory(prefix="present-source-crop-") as temp:
         cpp, exe = Path(temp) / "fixture.cpp", Path(temp) / "fixture.exe"
         cpp.write_text(fixture, encoding="utf-8")
         subprocess.run([a.cxx, "-std=c++20", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers",
-                        "-pthread", "-I" + str(a.headers), "-I" + str(a.source / "gpu/vk"),
+                        "-pthread", "-D_CRT_SECURE_NO_WARNINGS", "-I" + str(a.headers), "-I" + str(a.source / "gpu/vk"),
                         str(cpp), "-o", str(exe)], check=True)
         subprocess.run([str(exe)], check=True, timeout=30)
 

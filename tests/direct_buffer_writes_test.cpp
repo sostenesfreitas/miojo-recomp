@@ -25,7 +25,7 @@ static std::mutex pools_mu;
 static std::atomic<uint64_t> pools_gen{1};
 static std::atomic<bool> par_active{false};
 static thread_local TlPool tl_pools[1024];
-static uint64_t mirror_epoch = 7, mem_rec_value = 21;
+static uint64_t mirror_epoch = 7, mem_rec_value = 21, mirror_bytes = 0;
 static bool mirrors = true, mirror_upload = true, have_pool = true, mapping_valid = true;
 static std::vector<Pool*> mirror_wanted;
 static std::vector<WriteBack> writebacks;
@@ -46,6 +46,7 @@ static bool wb_leave_out(uint64_t, uint64_t, std::vector<std::pair<uint64_t, uin
 static bool wb_skips_log() { return false; }
 static void wb_skip_note(uint64_t, uint64_t) {}
 static bool mirror_on() { return mirrors; }
+static uint64_t mirror_budget() { return 2048ull << 20; }
 static void note_in_place_read(bool = false) {}   // (the readback's part wait: tests/test_readback_part.py checks every such read is noted)
 static Pool* pool_of(uint64_t guest, uint64_t size) {
     ++lookups;

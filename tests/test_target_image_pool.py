@@ -12,18 +12,11 @@ python -I -B tests/test_target_image_pool.py
 from pathlib import Path
 import re
 import unittest
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 class TargetImagePoolTests(unittest.TestCase):
@@ -69,6 +62,30 @@ class TargetImagePoolTests(unittest.TestCase):
         self.assertIn(": 10;", frame[frame.index('getenv("RX_VK_DEAD_EVERY")'):])
         self.assertIn("frame_no % (dead_targets ? dead_every : 600)", frame)
 
+    def test_a_dead_target_is_what_every_newer_target_over_it_has_drawn_together(self):
+        # (several over parts of it add up; judged one by one they left the big ones, 3-4 GB, issue 2180)
+        frame = block(self.tex, "void texture_frame(uint64_t completed)")
+        rule = frame[frame.index("const auto drawn_over_shifted"):frame.index("static const uint64_t dead_min_unused")]
+        self.assertIn("target_overlap::DrawnOver over;", rule)
+        self.assertIn("over.add(lo, hi, tex->last_frame, (*it)->gpu", rule)
+        self.assertIn("over.an_eighth(hi - lo)", rule)
+        self.assertNotIn("target_overlap::shifted_over", rule)
+
+    def test_a_view_inside_a_target_is_not_a_new_target(self):
+        # (5bfa6aa, PR #899: a live scene target's sub-rects redrawn as views must not make it a dead one)
+        hdr = (ROOT / "gpu" / "vk" / "target_overlap.h").read_text(encoding="utf-8")
+        add = block(hdr, "void add(")
+        self.assertIn("if (olo == lo) return;", add)   # (drawn_over's own case)
+        self.assertIn("if (olo >= lo && ohi <= hi) return;", add)
+
+    def test_a_finalized_map_keeps_its_keep_against_a_view_inside_it(self):
+        # (keep_finalized: a 260 x 260 normal map the game finalized and samples again has a view drawn inside it; the
+        # view is not a new target, so the map is not drawn over and keeps its keep)
+        keep = block(self.tex, "const auto keep_finalized = [&](const Texture* tex)")
+        self.assertIn("return !drawn_over(tex) && !drawn_over_shifted(tex);", keep)
+        hdr = (ROOT / "gpu" / "vk" / "target_overlap.h").read_text(encoding="utf-8")
+        self.assertIn("if (olo >= lo && ohi <= hi) return;", block(hdr, "void add("))
+
     def test_a_pooled_image_is_taken_before_one_is_made_and_still_cleared_from_undefined(self):
         make = block(self.tex, "Texture* create(const Key& key")
         take = make.index("pool_take(pool_key, x.image, x.allocation, x.views)")
@@ -83,6 +100,8 @@ class TargetImagePoolTests(unittest.TestCase):
         self.assertRegex(later, r"if \(tex\.pool_key && tex\.allocation && tex\.sparse_chunks\.empty\(\) && pool_cap\(\)\)")
         self.assertIn("d.view_map = std::move(tex.views)", later)
         self.assertIn("d.views.push_back(kv.second)", later)   # (the others' views destroyed, as before)
+        self.assertIn("pool_put(d);", later)   # (pooled at eviction for the next frame: test_target_image_reuse)
+        self.assertIn("dead.push_back(std::move(d));", later)
 
     def test_the_dead_list_pools_before_it_destroys_and_the_pool_is_trimmed_each_present(self):
         frame = block(self.tex, "void texture_frame(uint64_t completed)")

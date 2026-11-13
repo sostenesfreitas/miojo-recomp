@@ -214,6 +214,8 @@ def main():
         print("\n".join(chunks.end_side(side, tables)), flush=True)
         took("runtime tables and standalone files (beside the edits)" if side else "runtime tables and standalone files")
         L.report()
+        if L.stats["entry_gotos"]:   # (nx2/lift_fixes.py, 4)
+            print("functions with code below their entry, started at it by a goto: %d" % L.stats["entry_gotos"])
         print("interrupt polls: %d loop headers in %d functions" % (poll.stats["polls"], poll.stats["functions"]))
         print("wrote %d code files to %s (%.0fs)" % (len(files), gen, time.time() - t0))
     print("done (%.0fs)" % (time.time() - t0))

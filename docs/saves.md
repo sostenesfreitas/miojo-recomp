@@ -8,6 +8,14 @@ your Hookshot save to one of them, at the same spot: nothing is converted, the f
 You need your own copy of the game. Nothing here
 comes with game files.
 
+## From the Builder
+
+The Builder looks for these saves on its first page, as it looks for your game files. When it finds one, a **Bring in a
+save** section lists it under the game files: pick **Continue from ...** before building, and once the build is done the
+save is copied into the new game (the save the game folder had is backed up first, to the folder named under "Copy with
+the script"). **Start a new game**, the default, leaves the game's own save alone. It finds the emulators below and
+Longshot; for another folder, use the script.
+
 ## The files
 
 Every one of them keeps one folder per user profile, holding:

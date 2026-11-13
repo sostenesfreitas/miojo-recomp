@@ -21,7 +21,9 @@ UI_M00, UI_M11 = "(2.0f / 3840.0f)", "(2.0f / 2160.0f)"   # (the UI's full-scree
 # whole; the Insert menu's Ultrawide menus row clears the menus' bits 1 and 3 (vk_framegen.cpp): their layout then
 # keeps its 16:9 shape in the middle, as the HUD's does, instead of being stretched over the whole picture. Bit 0, the
 # item wheel's background (the last frame of play, blurred, HUD and all), and bit 2, the fades, keep covering it all: bit 0
-# cleared, that capture went into the middle at twice its width)
+# cleared, that capture went into the middle at twice its width. Screen 3, the loading fade between two areas, is noted
+# for the host as its projection is set up, at each area change: in the middle it leaves the sides open, and the renderer
+# closes them by as much as it is closed, host/hos_main.c hos_wide_cover)
 KEEP_VTABLES = (MAIN + 0x4bed098, MAIN + 0x4be4fb0, MAIN + 0x4be61c8, MAIN + 0x4be7b30)
 
 
@@ -44,6 +46,7 @@ HUD = ("{ extern volatile float hos_wide_squeeze; const float _q = hos_wide_sque
        "memcpy(&_m00, c->vreg[1], 4); memcpy(&_m11, (const uint8_t *)c->vreg[4] + 4, 4); "
        "if (_m00 == %s && _m11 == %s) { const uint64_t _vt = recomp_load64(c, c->x[0] - 0x1b8); "
        "extern volatile uint32_t hos_wide_keep_mask; const uint32_t _kb = %s; "
+       "if (_kb == 8u) { extern volatile uint64_t hos_wide_cover_screen; hos_wide_cover_screen = c->x[0] - 0x1b8; } "
        "if (!(_kb & hos_wide_keep_mask)) { float _row[4]; memcpy(_row, c->vreg[1], 16); for (int _k = 0; _k < 4; _k++) _row[_k] *= _q; "
        "memcpy(c->vreg[1], _row, 16); } } } }   /* (nx2/oot_wide.py: HUD in the middle 16:9) */"
        % (UI_M00, UI_M11, " : ".join("_vt == 0x%xULL ? %du" % (v, 1 << k) for k, v in enumerate(KEEP_VTABLES)) + " : 0u"))

@@ -159,7 +159,7 @@ public:
 
     Stream& operator<<(Id value) {
         if (value.value == 0) {
-            // (super build) thrown, not std::abort(): a program whose SPIR-V would name an undefined value is not
+            // thrown, not std::abort(): a program whose SPIR-V would name an undefined value is not
             // translated (the caller's catch says so), rather than ending the process with nothing in the log
             throw std::runtime_error("sirit: an operand with no SPIR-V definition (null Id)");
         }

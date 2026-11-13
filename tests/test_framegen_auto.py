@@ -105,7 +105,18 @@ int main() {
     CHECK(multiplier() == 3);                                /* a fixed setting is not Auto's */
     opts.framegen = 0;
     CHECK(multiplier() == 1);
-    std::printf("PASS: Auto gives each of the display's refreshes a frame, and no more\n");
+    /* a fixed multiplier: as many frames a game frame as the display shows, the asked one at most (the game keeps its rate) */
+    const int64_t f60 = 16666667, f30 = 33333333, f45 = 22222222;
+    CHECK(fixed_frames(8, 180, f60) == 3);                   /* 8x at 60 fps on 180 Hz: 3 shown, 2 made */
+    CHECK(fixed_frames(8, 180, 15873016) == 3);              /* 63 fps: still 3 */
+    CHECK(fixed_frames(2, 180, f60) == 2);                   /* below the display: as asked */
+    CHECK(fixed_frames(8, 60, f60) == 1);                    /* at the refresh: the game's frame alone */
+    CHECK(fixed_frames(4, 60, f30) == 2);                    /* 30 fps on 60 Hz: 2x */
+    CHECK(fixed_frames(8, 144, f45) == 3);                   /* 45 fps on 144 Hz: 3 (135 a second) */
+    CHECK(fixed_frames(8, 240, f30) == 8);                   /* 30 fps on 240 Hz: all 8 */
+    CHECK(fixed_frames(8, 0, f60) == 8 && fixed_frames(8, 180, 0) == 8);   /* unknown refresh or frame time: as asked */
+    CHECK(fixed_frames(1, 180, f60) == 1 && fixed_frames(0, 180, f60) == 1);
+    std::printf("PASS: Auto gives each of the display's refreshes a frame, and no more; a fixed multiplier no more than shown\n");
 }
 '''
 
@@ -118,7 +129,7 @@ def main():
     decl = source.index("int display_refresh_mhz();")
     if source.find("namespace {") < decl:
         raise SystemExit("display_refresh_mhz is declared in the unnamed namespace: vk_main.cpp's is another function")
-    fixture = PREFIX + "\n".join(block(source, m) for m in ("int auto_cap()", "int multiplier()", "int auto_slots(")) + MAIN
+    fixture = PREFIX + "\n".join(block(source, m) for m in ("int auto_cap()", "int multiplier()", "int fixed_frames(", "int auto_slots(")) + MAIN
     with tempfile.TemporaryDirectory(prefix="framegen-auto-") as tmp:
         cpp = Path(tmp) / "fixture.cpp"
         exe = Path(tmp) / "fixture"

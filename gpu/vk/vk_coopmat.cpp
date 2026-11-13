@@ -135,7 +135,12 @@ bool run_shader(const std::vector<uint32_t>& code, std::vector<uint32_t>& data) 
     }
     vkBindBufferMemory(dev.device, buffer, memory, 0);
     uint32_t* words = nullptr;
-    vkMapMemory(dev.device, memory, 0, size, 0, (void**)&words);
+    if (vkMapMemory(dev.device, memory, 0, size, 0, (void**)&words) != VK_SUCCESS || !words) {
+        logf("vk: cooperative matrix test: the buffer could not be mapped");
+        vkDestroyBuffer(dev.device, buffer, nullptr);
+        vkFreeMemory(dev.device, memory, nullptr);
+        return false;
+    }
     std::memcpy(words, data.data(), size);
 
     VkDescriptorSetLayoutBinding b{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
@@ -198,15 +203,19 @@ bool run_shader(const std::vector<uint32_t>& code, std::vector<uint32_t>& data) 
         vkEndCommandBuffer(cmd);
         VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         VkFence fence{};
-        vkCreateFence(dev.device, &fci, nullptr, &fence);
+        if (vkCreateFence(dev.device, &fci, nullptr, &fence) != VK_SUCCESS) fence = VK_NULL_HANDLE;   // (no fence: not submitted, so all is freed below)
         VkCommandBufferSubmitInfo csi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
         csi.commandBuffer = cmd;
         VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
         si.commandBufferInfoCount = 1, si.pCommandBufferInfos = &csi;
-        ok = vkQueueSubmit2(dev.queue, 1, &si, fence) == VK_SUCCESS &&
-             vkWaitForFences(dev.device, 1, &fence, VK_TRUE, 5000000000ull) == VK_SUCCESS;
+        const bool submitted = fence && vkQueueSubmit2(dev.queue, 1, &si, fence) == VK_SUCCESS;
+        ok = submitted && vkWaitForFences(dev.device, 1, &fence, VK_TRUE, 5000000000ull) == VK_SUCCESS;
         if (ok) std::memcpy(data.data(), words, size);
         else logf("vk: cooperative matrix test: the dispatch did not complete");
+        if (submitted && !ok) {   // (it may still be running: what it uses is left alive rather than destroyed under it)
+            if (module) vkDestroyShaderModule(dev.device, module, nullptr);
+            return false;
+        }
         vkDestroyFence(dev.device, fence, nullptr);
         vkDestroyCommandPool(dev.device, cmd_pool, nullptr);
         vkDestroyDescriptorPool(dev.device, pool, nullptr);

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -20,6 +21,67 @@ inline uint64_t key(uint64_t vbuf, uint64_t ibuf, int count, int base_vertex, ui
     return (h & ~0xffull) | (uint64_t)std::clamp(nth, 0, 255);
 }
 inline bool same_model(uint64_t a, uint64_t b) { return a >> 8 == b >> 8; }
+
+/// (hookshot) A copy of a model, for pair_by_place: where it is (place_of) and which draw of the model it is (its n-th)
+struct Placed {
+    float place[3];
+    int nth;
+};
+
+/// (hookshot) Which of the frame before's copies of a model each of this frame's copies is, by place: for each of `now`, an
+/// index into `then`, or -1 (none: the camera's motion then, never another copy's). All copies are paired at once, the
+/// nearest pairs first, and never further apart than `reach` (in world units, moved in one frame). On a tie (the same
+/// geometry drawn twice for one object, both at one place) the same n-th draw pairs first.
+/// By draw order alone, the four Gossip Stones drawn in another order took each other's places as their own frame before,
+/// and DLSS Frame Generation drew a stone part way to the next one. Taking the nearest free copy in draw order also failed:
+/// in a row of evenly spaced stones, a stone whose own frame before is missing (not drawn, or drawn by the other model the
+/// game uses for them) took its neighbour's
+inline std::vector<int> pair_by_place(const std::vector<Placed>& now, const std::vector<Placed>& then, float reach) {
+    struct Candidate {
+        double d;     // (squared)
+        bool other;   // (not the same n-th: on a tie at one place, the same n-th pairs first)
+        int i, j;
+    };
+    std::vector<Candidate> candidates;
+    const double r2 = (double)reach * (double)reach;
+    for (int i = 0; i < (int)now.size(); i++)
+        for (int j = 0; j < (int)then.size(); j++) {
+            double d = 0.0;
+            for (int c = 0; c < 3; c++) {
+                const double e = (double)now[i].place[c] - (double)then[j].place[c];
+                d += e * e;
+            }
+            if (std::isfinite(d) && d <= r2) candidates.push_back({d, now[i].nth != then[j].nth, i, j});
+        }
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        return a.d != b.d ? a.d < b.d : a.other != b.other ? !a.other : a.i != b.i ? a.i < b.i : a.j < b.j;
+    });
+    std::vector<int> pairs(now.size(), -1);
+    std::vector<char> taken(then.size(), 0);
+    for (const Candidate& c : candidates)
+        if (pairs[c.i] < 0 && !taken[c.j]) pairs[c.i] = c.j, taken[c.j] = 1;
+    return pairs;
+}
+
+/// (hookshot) Where a skinned draw is, to tell copies of one model apart: its origin plus the mean of its bones'
+/// translations. pose: the origin (12 bytes, then 4 of padding), then nbones 3 x 4 row-major matrices, as the actor pass
+/// keeps it (world = sum(w B p) + origin). A model placed by its origin differs there; copies placed by their bones at one
+/// origin differ in the bones (the game's copies of one model share an origin on a grid of 10 units, the Gossip Stones
+/// among them); the sum is the place either way. Bones with a translation that is not finite are left out
+inline void place_of(const uint8_t* pose, uint32_t nbones, float place[3]) {
+    float o[3];
+    std::memcpy(o, pose, sizeof o);
+    double t[3] = {0.0, 0.0, 0.0};
+    uint32_t used = 0;
+    for (uint32_t b = 0; b < nbones; b++) {
+        float m[12];
+        std::memcpy(m, pose + 16 + (size_t)b * 48, sizeof m);
+        if (!std::isfinite(m[3]) || !std::isfinite(m[7]) || !std::isfinite(m[11])) continue;
+        t[0] += m[3], t[1] += m[7], t[2] += m[11];
+        used++;
+    }
+    for (int c = 0; c < 3; c++) place[c] = o[c] + (used ? (float)(t[c] / used) : 0.0f);
+}
 
 /// shaders/dlss_actor.vert's push constants (the fragment stage's the same)
 struct Push {

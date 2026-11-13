@@ -70,18 +70,18 @@ what does not yet. Open problems are collected in tracking issues, linked below.
 | Kokiri Forest: reaching gameplay and walking around | ✅ Works |
 | Sound, controller, keyboard and saves | ✅ Works |
 | In-game menu, frame generation and upscaling | ✅ Works |
-| Flicker (the picture flashing too bright while moving) | ✅ Fixed in v2.0.2 ([#645](https://github.com/NotRexed/Hookshot/pull/645)) |
-| Ground fog vanishing when looking down | ✅ Fixed in v2.0.2 ([#638](https://github.com/NotRexed/Hookshot/pull/638)) |
+| Flicker (the picture flashing too bright while moving) | ✅ Fixed in v2.0.2 (#645) |
+| Ground fog vanishing when looking down | ✅ Fixed in v2.0.2 (#638) |
 | Models with missing pieces (doors, fences, parts of trees) | ✅ Fixed where tested, more play needed |
 | Stutter when entering new areas | ⚠️ Still happens the first time you visit a place. The next visits are smooth |
 | Performance | ⚠️ Depends on the PC: some reach a steady 60 fps, others stay below it, more so in Hyrule Field |
-| Hyrule Field, Castle Town, Kakariko and the dungeons | ⚠️ Players got there, with open bugs: lighting and shadows ([#1004](https://github.com/NotRexed/Hookshot/issues/1004)), crashes and freezes ([#2507](https://github.com/NotRexed/Hookshot/issues/2507)) |
-| Ultrawide and 4:3 | ✅ Works. The Aspect ratio row's default, Monitor's shape, widens the 3D to the screen and keeps the HUD and movies in the middle 16:9 ([#2119](https://github.com/NotRexed/Hookshot/pull/2119)) |
+| Hyrule Field, Castle Town, Kakariko and the dungeons | ⚠️ Players got there, with open bugs: lighting and shadows (#1004), crashes and freezes (#2507) |
+| Ultrawide and 4:3 | ✅ Works. The Aspect ratio row's default, Monitor's shape, widens the 3D to the screen and keeps the HUD and movies in the middle 16:9 ([#2119](https://git.notrexed.dev/Hookshot/Hookshot/commit/145eed2650d9d2cebad85a8a0052d302086015c7)) |
 | NVIDIA cards | ✅ Works. The most tested |
-| AMD cards | ⚠️ Many tested: reports from the RX 6600, RX 6800 XT, RX 7800 XT, RX 7900 XTX and RX 9070 XT. On Windows, the RX 6000 cards (Navi 21 and 22) draw task and mesh shaders through the compute fallback by default, as the driver lost the GPU with them ([#1747](https://github.com/NotRexed/Hookshot/pull/1747), [#1992](https://github.com/NotRexed/Hookshot/pull/1992), [#2215](https://github.com/NotRexed/Hookshot/pull/2215)). Driver crashes and device lost are still reported ([#996](https://github.com/NotRexed/Hookshot/issues/996)) |
-| Intel cards | ❓ Few reports, many of them black screens or crashes ([#999](https://github.com/NotRexed/Hookshot/issues/999)) |
-| Cards without mesh shaders (such as AMD RX 5000 and older) | ❌ Not supported: parts of the picture are missing. Since v2.0.6 a fallback runs the mesh programs as compute shaders on cards with buffer device addresses ([#640](https://github.com/NotRexed/Hookshot/issues/640)); it leaves out the mesh draws that take their count from a buffer |
-| Linux | ✅ Works with the AppImage. Tested on several distributions (CachyOS, Fedora, Bazzite, SteamOS) and cards, with open problems on some AMD cards ([#1000](https://github.com/NotRexed/Hookshot/issues/1000)) |
+| AMD cards | ⚠️ Many tested: reports from the RX 6600, RX 6800 XT, RX 7800 XT, RX 7900 XTX and RX 9070 XT. On Windows, the RX 6000 cards (Navi 21 and 22) draw task and mesh shaders through the compute fallback by default, as the driver lost the GPU with them (#1747, [#1992](https://git.notrexed.dev/Hookshot/Hookshot/commit/1396428d0bfcde68b5c7bd63f9837564d9af1a05), [#2215](https://git.notrexed.dev/Hookshot/Hookshot/commit/f95d80f5371821420c5a47a0c7e9f73e7f484abc)). Driver crashes and device lost are still reported ([#996](https://git.notrexed.dev/Hookshot/Hookshot/commit/f95d80f5371821420c5a47a0c7e9f73e7f484abc)) |
+| Intel cards | ❓ Few reports, many of them black screens or crashes (#999) |
+| Cards without mesh shaders (such as AMD RX 5000 and older) | ❌ Not supported: parts of the picture are missing. Since v2.0.6 a fallback runs the mesh programs as compute shaders on cards with buffer device addresses ([#640](https://git.notrexed.dev/Hookshot/Hookshot/commit/07773abd1dc7d79d56a690207e9bc7db7272076d)); it leaves out the mesh draws that take their count from a buffer |
+| Linux | ✅ Works with the AppImage. Tested on several distributions (CachyOS, Fedora, Bazzite, SteamOS) and cards, with open problems on some AMD cards (#1000) |
 
 ## Install and play
 
@@ -109,7 +109,7 @@ you start the game from its launcher, which also updates it.
 For a portable install on an external SSD, run the downloaded setup with `--portable`; see
 [Portable Hookshot Builder](docs/windows-portable-builder.md) for folder, move and repair behavior.
 
-1. Open the [latest release](https://github.com/NotRexed/Hookshot/releases/latest) and download `HookshotBuilder.exe`.
+1. Open the [latest release](https://git.notrexed.dev/Hookshot/Hookshot/releases/latest) and download `HookshotBuilder.exe`.
 2. Run it. It downloads the rest of Hookshot Builder (about 500 MB), checks it, and opens it.
 3. Pick your game. The builder looks for `.nup` files in your Downloads, Desktop and Documents folders and lists them
    under **Found on this PC**. Not listed? Press **Browse…**, drop the file on the window, or choose
@@ -128,7 +128,7 @@ The first start prepares the game's shaders, which takes a while. Later starts a
 
 ### On Linux
 
-1. Open the [latest release](https://github.com/NotRexed/Hookshot/releases/latest) and download
+1. Open the [latest release](https://git.notrexed.dev/Hookshot/Hookshot/releases/latest) and download
    `Hookshot-<version>-x86_64.AppImage`. It is Hookshot Builder with everything it needs inside.
 2. Allow it to run as a program. In most file managers: right-click it, open **Properties**, and turn on
    "Allow executing file as program" (the words differ between desktops). Or in a terminal:
@@ -175,7 +175,7 @@ When a new release is out, the launcher says "Update available". Press **Update*
 `hookshot` (or the AppImage) on Linux. It downloads only the parts that changed and builds the game again in the same
 folder. The build files of the last build are gone by then (see [Where the files go](#where-the-files-go)), so an
 update takes about as long as the first build. Your saves and settings are kept. What changed is on the
-[Releases page](https://github.com/NotRexed/Hookshot/releases).
+[Releases page](https://git.notrexed.dev/Hookshot/Hookshot/releases).
 
 <details>
 <summary>What an update keeps and replaces, and updating from the command line</summary>
@@ -200,7 +200,7 @@ with `--update <game folder>`.
 ### Latest development build
 
 Want a fix before it is in a release? The
-[latest development build](https://github.com/NotRexed/Hookshot/releases/tag/nightly) is made from `main` after every
+[latest development build](https://git.notrexed.dev/Hookshot/Hookshot/releases/tag/nightly) is made from `main` after every
 change, with the same files as a release. It is untested and may break your saves or settings: copy them first (see
 above).
 
@@ -208,7 +208,7 @@ above).
   (without `--tag nightly` it installs the latest release instead).
 - **Linux:** download `Hookshot-<version>-x86_64.AppImage` from it and use it as above.
 
-To go back, install the [latest release](https://github.com/NotRexed/Hookshot/releases/latest) the usual way.
+To go back, install the [latest release](https://git.notrexed.dev/Hookshot/Hookshot/releases/latest) the usual way.
 
 ### Where the files go
 
@@ -248,7 +248,7 @@ the network or with other programs:
 - On Linux the game starts through a small script (`play-diagnostics.sh`). It keeps the game's first error messages in
   `hookshot_startup.log` in the game folder, using a private temporary folder there that it removes when the game exits.
 
-Only download Hookshot from this repository's [Releases](https://github.com/NotRexed/Hookshot/releases). Each release
+Only download Hookshot from this repository's [Releases](https://git.notrexed.dev/Hookshot/Hookshot/releases). Each release
 lists its files' checksums in `SHA256SUMS`. A copy from anywhere else may not be ours.
 
 ### If something goes wrong
@@ -259,17 +259,17 @@ lists its files' checksums in `SHA256SUMS`. A copy from anywhere else may not be
 | A place has a wrong texture, or a floor or wall is missing | Look for `hookshot_damaged_files.txt` in the game folder. The build writes it when your game dump is incomplete (about 23.3 GB, a complete one is about 23.8 GB): it lists each damaged game file and the file put in its place. Dump the game again and build from the new dump; the file is then removed |
 | Linux Builder Play closed before the game log appeared | After the game exits, check `hookshot_startup.log` in the game folder for up to 64 KiB of startup stderr and its exit status. |
 | "Hookshot supports build e0f3ccfa" or "This version isn't supported" | Check that you chose the right game with its update installed |
-| The game opens and closes, or the log says "device lost" | Update your graphics driver. On AMD cards there are known crashes ([#708](https://github.com/NotRexed/Hookshot/issues/708), [#614](https://github.com/NotRexed/Hookshot/issues/614)) |
-| Parts of the picture are missing, or a message says your card has no mesh shader support | The card or its driver has no mesh shaders. Update the driver; older cards are not supported ([#640](https://github.com/NotRexed/Hookshot/issues/640)) |
+| The game opens and closes, or the log says "device lost" | Update your graphics driver. On AMD cards there are known crashes (#708, #614) |
+| Parts of the picture are missing, or a message says your card has no mesh shader support | The card or its driver has no mesh shaders. Update the driver; older cards are not supported ([#640](https://git.notrexed.dev/Hookshot/Hookshot/commit/07773abd1dc7d79d56a690207e9bc7db7272076d)) |
 | AMD: blocky textures, solid rectangles in the sky or unusually dark courtyard surfaces | Try the [RGBA8 texture workaround](#amd-texture-workaround). It uses more graphics memory |
 | Linux: the game does not start or the picture is broken | The game needs a Vulkan 1.3 driver with mesh shaders. Check with `vulkaninfo \| grep mesh`: it should list `VK_EXT_mesh_shader`. Update Mesa or the NVIDIA driver |
-| Steam Deck: the game freezes and closes in Kokiri Forest or the Great Deku Tree (`gfx_0.0.0 timeout` in `journalctl -k`) | `RX_VK_MESH_NOCULL=2c56dc1006942f74` in `hookshot_env.txt` gets past it with every model drawn (the culling pass that runs for seconds is turned off). `RX_VK_SKIP_CODE=2c56dc1006942f74` also gets past it, but the models those draws make go missing (see the [development guide](docs/development.md#switches-for-testing-and-debugging), [#817](https://github.com/NotRexed/Hookshot/issues/817)) |
+| Steam Deck: the game freezes and closes in Kokiri Forest or the Great Deku Tree (`gfx_0.0.0 timeout` in `journalctl -k`) | `RX_VK_MESH_NOCULL=2c56dc1006942f74` in `hookshot_env.txt` gets past it with every model drawn (the culling pass that runs for seconds is turned off). `RX_VK_SKIP_CODE=2c56dc1006942f74` also gets past it, but the models those draws make go missing (see the [development guide](docs/development.md#switches-for-testing-and-debugging), #817) |
 | "Your antivirus removed part of the build tools" | A false alarm on unsigned programs. Restore the files from Windows Security's Protection history, or add `%LOCALAPPDATA%\HookshotBuilder` to its exclusions, then press **Repair** |
 | Stutter the first time you see something | Normal for now: shaders are being prepared. It gets better when you pass through the same place again. You can help remove it for everyone: [send your pipeline list](#send-your-pipeline-list) |
 | Windows, NVIDIA: stutter every start in places you have seen, after the shaders were prepared | The driver's shader cache is too small to keep them all (the first start builds about 2 GB of pipelines into it). In the NVIDIA Control Panel, Manage 3D settings, set **Shader Cache Size** to **Unlimited** (or 10 GB). On Linux the game raises the driver's limit itself |
 | The game is in the wrong language | Change the code in `language.txt` in the game folder. The file lists them all, and an update keeps the one you set there |
 
-If the problem continues, [report it](https://github.com/NotRexed/Hookshot/issues/new/choose) with the version, where
+If the problem continues, [report it](https://git.notrexed.dev/Hookshot/Hookshot/issues/new/choose) with the version, where
 you were in the game, your graphics card, `hookshot_log.txt` and a screenshot or video. Never send game files. The
 in-game menu's **Gameplay → Bug report** gathers all of it in one press ([In-game menu](#in-game-menu)).
 
@@ -293,7 +293,7 @@ has more switches.
 #### AMD texture workaround
 
 For these AMD texture artifacts, try keeping decoded ASTC textures as RGBA8 instead of re-encoding them to BC3
-([#57](https://github.com/NotRexed/Hookshot/issues/57), [#1006](https://github.com/NotRexed/Hookshot/issues/1006)).
+(#57, #1006).
 Turn on **ASTC as RGBA8** in the menu's Debug tab, under Developer, and restart the game. (`RX_VK_ASTC_RGBA8=1` in
 `hookshot_env.txt` does the same, as earlier versions of this readme said; while that line is there the row shows its
 value and cannot be changed, so remove the line to choose in the menu.)
@@ -308,7 +308,8 @@ shows bands or blocks. Off unless set; `RX_VK_ASTC_RGBA8=1` above still wins whe
 ## In-game menu
 
 By default, press <kbd>Insert</kbd>, <kbd>F1</kbd> or <kbd>Esc</kbd> in game. On a controller, press Home or Select and
-Start together; on a DualShock 4 or DualSense, clicking the touchpad does the same as <kbd>F1</kbd>.
+Start together; on a DualShock 4 or DualSense, clicking the touchpad does the same as <kbd>F1</kbd>, unless a row of
+Controls takes the touchpad as its input.
 The same keys close it; with every Menu shortcut, <kbd>Esc</kbd> goes back a page or closes the open menu.
 <kbd>F1</kbd> always works. **Controls → Menu shortcut** can leave <kbd>Insert</kbd> free for another overlay (F1 only).
 With Insert or F1, or with F1 only, <kbd>Esc</kbd> does not open the menu: it only lets the mouse go. Options saved by
@@ -354,7 +355,7 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
 | | Frame generation | Off, Auto, 2x to 8x | Off |
 | | Frame generation by | Auto (NVIDIA DLSS Frame Generation where it runs: RTX 40 and newer, with a temporal Upscaler; else the built-in one; with frame generation on, the row shows who makes the frames, as Auto: DLSS FG, and why not DLSS FG when another does), Built-in FG (changes at once) | Auto |
 | | Frame pacing | Off, On | Off |
-| | Game frame rate cap | 60, 90, 120, 144, 165, 240 FPS, Uncapped (after a restart) | 60 FPS |
+| | Game frame rate cap | 60, 90, 120, 144, 165, 240 FPS, Uncapped, 30 FPS (after a restart) | 60 FPS |
 | | NVIDIA Reflex | Off, On, On + Boost (shown only on NVIDIA GPUs with `VK_NV_low_latency2`) | Off |
 | | AMD Anti-Lag 2 | Off, On (shown only on AMD GPUs with `VK_AMD_anti_lag`) | Off |
 | | Fullscreen | Off, On (the same as <kbd>F11</kbd>) | Off |
@@ -366,6 +367,7 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
 | | HDR peak brightness | 400 to 4000 nits (while HDR is on) | 1000 nits |
 | | HDR contrast | 50% to 200% around mid grey (while HDR is on) | 100% |
 | | HDR tone mapper | Vanilla (the game's curve), PsychoV35 (RenoDX's; with HDR set to Native. DLSS, FSR and TAAU do not take its scene yet: the game's own upscale runs) | Vanilla |
+| | Texture detail | Auto, Full, Medium, Low | Auto |
 | | Anisotropic filtering | Game's, 2x, 4x, 8x, 16x | 16x |
 | | GPU device | Auto, or each graphics card by name (after a restart) | Auto |
 | | VRAM budget | Auto, 3.6, 4.8, 6, 7.5, 9, 11 GB (2.2 GB only from the Minimum (4GB) preset); a quality preset sets it | Auto |
@@ -394,6 +396,7 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
 | | Invert camera Y | Off, On | Off |
 | | Camera speed | 50% to 400%, in steps of 25 | 100% |
 | | Stick dead zone | Default (24%), 5%, 10%, 15%, 20%, 30% | Default (24%) |
+| | Auto run | Off, On | Off |
 | | Rumble strength | Off, 25% to 150%, in steps of 25 | 100% |
 | | Layout preset | Nintendo (Def), Xbox / PC, Swap Face, Custom (on the Controls page) | Nintendo (Def) |
 | | Button prompts | Auto, Switch, Xbox, PlayStation 4, PlayStation 5, Steam Deck (on the Controls page) | Auto |
@@ -435,13 +438,15 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
   the frames that frame generation shows, so it has no effect while Frame generation is Off.
 - **Game frame rate cap** limits the frames the game renders. With a cap of 60 and Frame generation at 2x, the output
   can reach 120 FPS. Choose **Auto** in Frame generation to target the display's refresh rate instead of a fixed multiplier.
+  **30 FPS** reduces rendering work for handhelds and slower PCs while keeping real-time game speed. It is the last option
+  in the row so existing saved caps keep their meaning. At 30, Game speed follows real time even if Per frame is selected.
   A cap **past 60 is experimental**: the game keeps real time, but some cutscenes and bosses still count frames and can
   misbehave (Gohma running into the wall, the intro's narration running ahead: #1742). 60 is the safe choice.
   **Uncapped** renders as fast as the PC can (the game still keeps real time). A display that waits for its refresh still
-  holds the frames to its refresh rate: V-Sync on, or the driver's FIFO mode. `HOS_FPS_MAX=<61-1000>` sets a cap for one
+  holds the frames to its refresh rate: V-Sync on, or the driver's FIFO mode. `HOS_FPS_MAX=30` or `<61-1000>` sets a cap for one
   run.
 - **Bug report** writes a folder `bug-reports/<date>_<time>` in the game folder with what an issue needs: `report.txt`,
-  which answers the [game problem form](https://github.com/NotRexed/Hookshot/issues/new?template=1-game-problem.yml)'s
+  which answers the [game problem form](https://git.notrexed.dev/Hookshot/Hookshot/issues/new?template=1-game-problem.yml)'s
   questions under its own headings (the version, the map you are in, your graphics card and driver, CPU, RAM and
   system, the menu options and the `RX_`/`HOS_` switches you changed) and ends with a link that opens the form with them
   filled in (the switches by name only); `hookshot_log.txt` (this run's log so far) and `hookshot_log.1.txt` (the run
@@ -547,7 +552,9 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
   while the game was in front.
 - **Audio output** is the speakers the game mixes its sound for. Auto is 5.1 when your default output device has 5.1
   or more speakers, else stereo; Stereo or 5.1 chooses one whatever the device has (5.1 on stereo speakers is mixed
-  down). For one run, `HOS_AUDIO_CHANNELS=2` or `6` chooses stereo or 5.1 and wins over the menu.
+  down). Auto counts the speakers Windows names, not the channels: an audio interface whose outputs are not set up as
+  surround speakers (a Focusrite Scarlett's 8 outputs, for one) is stereo, so voices and the ocarina do not go to an
+  output with nothing connected. For one run, `HOS_AUDIO_CHANNELS=2` or `6` chooses stereo or 5.1 and wins over the menu.
 - **Microphone** is what the ocarina hears when the game's own microphone option is on (an instrument, or humming).
   Default follows Windows' default recording device; the list shows each microphone by name, and a change applies at
   once. A chosen microphone that is unplugged stays chosen (shown as not connected): Default stands in until it is
@@ -577,6 +584,11 @@ HDR, Detail, and GPU and memory (last: the rows to change when something is wron
   game's own camera speed option still picks the speed this multiplies.
 - **Stick dead zone:** how far a stick moves from center in any direction before it counts. Default is about 24%. Use
   a lower value for a precise stick or a higher one for a stick that drifts. The game also applies its own dead zone.
+- **Auto run:** the sprint goes on after the run button (A) is let go. Hold A for 0.4 s while moving (the roll, then
+  the sprint, as usual), let go, and A stays held for the game while the stick stays pushed; a short press (a roll on
+  its own) is not kept. Letting go of the stick or pressing A again stops it (a long hold keeps it again). Only while
+  Link is yours to move: an event (a talk, a cutscene), the pause menu, the map, the Insert menu and the ocarina's notes
+  end it, so A never picks an entry, skips text or plays a note there.
 - **Rumble strength** scales the controller's rumble: 100% is the game's own, Off turns it off. The game's HD rumble
   goes to a controller's heavy and light motors by its frequency.
 - **Motion controls** (Controls tab, Motion page): the controller's gyroscope aims where the game uses motion, as on the Switch. It works with
@@ -619,8 +631,8 @@ anything SDL reports as a Switch Pro Controller or Joy-Con, and that includes th
 `HOS_HD_RUMBLE=0` to give them the plain motor rumble.
 
 To change which gamepad button or key presses a Switch button, or which keys move and turn the camera, open the
-Controls tab's Controls page. Choose a row and a column (Gamepad or Keyboard), press <kbd>Enter</kbd> (or the bottom
-face button), then the new button or key. <kbd>Esc</kbd> cancels, <kbd>Delete</kbd> clears it, and Reset to defaults
+Controls tab's Controls page. Choose a row and a column (Input 1 or 2 for the gamepad, Key 1 or 2 for the keyboard: each
+control takes two of each), press <kbd>Enter</kbd> (or the bottom face button), then the new button or key. <kbd>Esc</kbd> cancels, <kbd>Delete</kbd> clears it, and Reset to defaults
 puts them all back. A gamepad button taken from another Switch button swaps with it. The page saves them in
 `hookshot_options.ini`.
 
@@ -797,7 +809,9 @@ without a format (`vk: fsr3: ... can run on this GPU` in the log). It upscales o
 scene's colour, its depth, motion from the camera with the skinned characters' own drawn over it (Link, his shield and
 the people around him keep their outline while they move), and the same camera jitter (`RX_VK_FSR_JITTER=0` turns it
 off). Things that move by themselves and are not skinned (Navi's body, props) can still trail. `RX_VK_FSR3_CHAIN=0` gives
-it the camera's motion alone, as before.
+it the camera's motion alone, as before. With HDR on **Native**, it takes the game's HDR colour as linear light, so
+highlights above the paper white are kept (`RX_VK_FSR3_HDR=0`: cut at the paper white, as before; with
+`RX_VK_FSR3_CHAIN=0` they are cut too).
 
 </details>
 
@@ -894,7 +908,7 @@ in `hookshot_options.ini`, `RX_VK_FSR4=1` or `2` for one run, `RX_VK_FSR4=0` to 
   takes their place.
 - **Or fetched for you (Windows):** `make_game.py --fsr --fetch-fsr-runtime --accept-amd-license` downloads those two
   DLLs and AMD's license from AMD's FidelityFX SDK repository at the v2.4.0 tag, checks each against its SHA-256, and
-  puts them in the game folder (`HOOKSHOT_FFX_SDK=<folder>` keeps them between builds, default `workfx-sdk`).
+  puts them in the game folder (`HOOKSHOT_FFX_SDK=<folder>` keeps them between builds, default `work/ffx-sdk`).
   `python -I scripts/ffx_sdk.py --accept-amd-license --game <game folder>` does the same for a game built already.
   Without `--accept-amd-license` nothing is downloaded (the script asks when run by hand), as with NVIDIA's license for
   DLSS. AMD DLLs already in the game folder that are not v2.4.0's (a newer SDK put there by hand) are left alone, and
@@ -961,7 +975,7 @@ movie networks.
 `RX_VK_SKIP_CODE=<prefix,...>` leaves out the draws of every program with a stage whose native code key starts with one
 of the prefixes (the keys the log prints after "its code:"). On a Steam Deck, `RX_VK_SKIP_CODE=2c56dc1006942f74`
 avoids a GPU hang in Kokiri Forest and the Great Deku Tree: the GPU runs for seconds in the programs that share that
-task shader (a culling pass) until the kernel resets it ([#817](https://github.com/NotRexed/Hookshot/issues/817)).
+task shader (a culling pass) until the kernel resets it (#817).
 It is a workaround, not a fix: those are task + mesh programs, so the geometry they draw goes with them, and key models
 are missing while it is set. Off unless set.
 
@@ -1012,7 +1026,7 @@ pipelines before the title, and every player's play adds to it. To send yours:
 1. In the game, open the menu (Insert or F1), go to the **Debug** tab and choose **Save my pipeline list** (under Developer). Or, in
    Hookshot Builder's launcher page for the game folder, press **Save my pipeline list**.
 2. It saves `hookshot-pipelines-<date>.zip` in your Downloads folder, copies a filled-in report to the clipboard and
-   opens the [Submit your pipelines](https://github.com/NotRexed/Hookshot/issues/2034) issue in your browser.
+   opens the Submit your pipelines issue in your browser.
 3. Attach the zip to a comment there, paste the report and fill in where you played.
 
 The zip holds only `hookshot_pipeline_states.bin` (shader hashes, formats and draw state, and the hashes of the compute
@@ -1050,6 +1064,7 @@ Hookshot exists thanks to the work of many people:
   SDK shaders; builds made with FSR 4 (optional; AMD's DLLs are never bundled) use AMD FidelityFX Super Resolution 4
   through AMD's MIT-licensed FSR API headers. Both are AMD's technology. AMD, Radeon and FidelityFX are trademarks of Advanced Micro
   Devices, Inc.
+  **Longshot**: Fork of Hookshot, for some bug fixes and launcher additions
 - **[kinnay/zbic](https://github.com/kinnay/zbic)**, **Opus** and **SDL**: decompression, audio and controllers.
 - **[sostenesfreitas/ocarina-recomp](https://github.com/sostenesfreitas/ocarina-recomp)**: this README's layout, and its notes
   confirmed the mesh stage's control section.

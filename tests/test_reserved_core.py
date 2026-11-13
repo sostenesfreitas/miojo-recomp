@@ -44,6 +44,14 @@ def main():
         'hos_reserved_cpus no longer asks last_fastest_core on Linux'
     assert '/sys/devices/cpu_core/cpus' in linux and 'parse_cpu_list(' in linux and 'pick_reserved_core(' in linux, \
         "Linux's last_fastest_core no longer reads the performance cores from /sys/devices/cpu_core/cpus"
+    vk_replay = (ROOT / 'gpu/vk/vk_replay.cpp').read_text(encoding='utf-8')
+    pin_mask = block(vk_replay, 'uint64_t replay_pin_mask()')
+    assert '_WIN32' not in pin_mask and 'host->reserved_cpus' in pin_mask, \
+        'replay_pin_mask must use host->reserved_cpus on Linux as well as Windows'
+    posix = (ROOT / 'host/posix/win32_posix.c').read_text(encoding='utf-8')
+    assert 'apply_process_affinity(t->th)' in block(posix, 'static HThread *thread_self(void)') and \
+        'apply_process_affinity(t->th)' in block(posix, 'static void *thread_entry(void *p)'), \
+        'win32_posix.c must reset new threads to process_affinity so helper threads do not inherit ReplayPin on Linux'
     fixture = r'''
 #include <cstdint>
 #include <cstdio>

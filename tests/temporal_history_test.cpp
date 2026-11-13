@@ -3,6 +3,7 @@
 #define _CRT_SECURE_NO_WARNINGS 1
 #endif
 #include "gpu/vk/dlss_math.h"
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -11,9 +12,11 @@
 #include <limits>
 
 namespace dlss_math = mkwvk::dlss_math;
+static void logf(const char*, ...) {}   // (the camera cut's log line)
 struct State {
     uint64_t last_frame = 99;
     float last_vp[16]{}, last_jitter[2]{};
+    std::chrono::steady_clock::time_point last_at{};   // (the camera cut's time between frames)
     struct { unsigned width = 1920, height = 1080; } frame;
 };
 struct Camera { float current[16]{}; };

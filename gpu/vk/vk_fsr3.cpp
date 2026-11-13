@@ -701,6 +701,8 @@ VkImageView output_view() { return g.output.view; }
 
 namespace mkwvk {
 
+extern std::atomic<bool> present_native_pq;   // (vk_replay.cpp do_present: the game presents its own HDR10 picture, Native)
+
 namespace {
 
 int env_switch(const char* name) {   // (-1: unset)
@@ -794,11 +796,16 @@ bool fsr3_wanted() { return !fsr3_on_chain() && fsr3_chosen(); }
 // skinned draws' own drawn over the camera's (vk_temporal.cpp actor_motion), and the jitter the host gave the camera. The
 // passes' picture (RGBA16F at the output size) is copied into the chain's output, which the chain squares back into the
 // network's output with dlss_out.comp, as fsr3_upscale's own last pass does.
+// With the game's native HDR the chain gives it linear light past 1 instead, and takes its picture back linear (chain_hdr):
+// the passes are built for HDR colour (FFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT) and work out their own exposure.
 namespace {
 struct ChainState {
     std::chrono::steady_clock::time_point last{};
     uint64_t drawn = 0;
     bool told = false;
+    // (HDR colour this frame, as chain_prepare decided it; a change of encoding starts a new history: the one kept was in
+    // the other)
+    bool hdr = false, hdr_changed = false;
 };
 ChainState& chain_state() {
     static ChainState& c = *new ChainState;   // (never destroyed: as the chain's own state)
@@ -810,6 +817,15 @@ int chain_prepare(VkCommandBuffer, uint32_t rw, uint32_t rh, uint32_t ow, uint32
     // (the passes' pipelines and images for these sizes, here and not in the evaluation: an image that cannot be made now
     // (VRAM full as the size changes) is "not this frame", and the next frame tries again, as fsr3_upscale's own path did)
     *in_w = rw, *in_h = rh;
+    // (the game's native HDR: what the game presents, not the option and the swapchain: with Native picked and the game's
+    // picture not PQ, the scene is LDR. RX_VK_FSR3_HDR=0: the colour clamped at the paper white with Native too, as before)
+    static const bool hdr_allowed = env_switch("RX_VK_FSR3_HDR") != 0;
+    const bool hdr = hdr_allowed && present_native_pq.load(std::memory_order_relaxed);
+    ChainState& c = chain_state();
+    if (hdr != c.hdr) {
+        logf("vk: fsr3 on the chain: %s", hdr ? "HDR colour, linear (the game's native HDR)" : "LDR colour (the game's native HDR off)");
+        c.hdr = hdr, c.hdr_changed = true;
+    }
     const int r = fsr3::prepare_sizes(rw, rh, ow, oh);
     if (r == 0) *why = "its images could not be made at this size";
     if (r < 0) *why = "its passes could not be made";
@@ -836,7 +852,8 @@ bool chain_evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
                            ? (float)std::min(250.0, std::chrono::duration<double, std::milli>(now - c.last).count())
                            : 16.667f;
     c.last = now;
-    ai.reset = f.reset;
+    ai.reset = f.reset || c.hdr_changed;
+    c.hdr_changed = false;
     // (what the scene's transparent draws changed, when RX_VK_REACTIVE asks for it and there were any: vk_reactive.h. The
     // same mask DLSS gets on this chain, as large as the chain's inputs; without one FSR's default reactivity, as before)
     if (reactive::Mask m; reactive::mask(cmd, f.render_w, f.render_h, f.color.width, f.color.height, f.color.view, m))
@@ -859,12 +876,15 @@ bool chain_evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
 }
 void chain_release() { fsr3::release(); }   // (the passes stay; their images are made again when FSR 3.1 draws next)
 uint64_t chain_memory() { return fsr3::memory(); }   // (its internal images, for the chain's status line)
-// (fsr_depth: its passes are built with FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH, scripts/fsr3_shaders.py; retry: an
+/// It takes HDR colour while the game presents its native HDR (chain_prepare): the chain gives it linear light, unclamped
+bool chain_hdr() { return chain_state().hdr; }
+// (hdr: linear light past 1 with the game's native HDR, chain_hdr; fsr_depth: its passes are built with
+// FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH, scripts/fsr3_shaders.py; retry: an
 // evaluation that fails (no room for its constants in the frame's stream) leaves that frame to the network, and the next one
 // tries again. Named, so a field added to TemporalEngine cannot shift these into another)
 const TemporalEngine kChainEngine{.name = "AMD FSR 3.1", .short_name = "FSR 3.1", .start = chain_start,
                                   .prepare = chain_prepare, .evaluate = chain_evaluate, .release = chain_release,
-                                  .memory = chain_memory, .fsr_depth = true, .retry = true};
+                                  .memory = chain_memory, .hdr = chain_hdr, .fsr_depth = true, .retry = true};
 } // namespace
 
 const TemporalEngine* fsr3_engine() { return &kChainEngine; }

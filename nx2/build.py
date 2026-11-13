@@ -2,9 +2,9 @@
 
 The flags are a64-kit's for lifted code (its build.py, cmd_native): -O1, LoopRotate's header copies capped (most of
 the compile time in goto-dense giant functions otherwise), capture tracking past LLVM's 100 uses (the context
-parameter is A64_NOESC), one section per function. The guest model is the 64-bit window (rtgen.py), shadowing the
-vendored rt/, with the loop-header interrupt polls on (A64_POLLING, nx2/poll.py). Incremental: an object is rebuilt
-only when its source or the flags changed.
+parameter is A64_NOESC), one section per function, no lifetime markers. The guest model is the 64-bit window
+(rtgen.py), shadowing the vendored rt/, with the loop-header interrupt polls on (A64_POLLING, nx2/poll.py).
+Incremental: an object is rebuilt only when its source or the flags changed.
 
 hookshot_game.dll = the lifted chunks + a64-kit's tables and runtime + nx2/rt/eden_shim.c (the emulator ABI, mkw_host.h)
 + mkw_info.c (the image base and main's build id, generated here from work/image/image.json). Linking it is also the
@@ -33,6 +33,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -131,6 +132,94 @@ def no_throttle(handle=None):
     except (OSError, ValueError, TypeError):
         pass
 
+# (the dev-loop proposal's A4) a link whose inputs are the last one's is not run again. Its key: the command, each object's key
+# (its .o.sha1 stamp; its size and time without one), and the contents of the other files the command names (libraries,
+# resources, the symbol order), kept beside the output as <output>.linkkey with the output's size. A link that fails, or an
+# output of another size, forgets it. 3 s for the exe and less for the DLL on Windows, every build
+def link_inputs(cmd, output):
+    """The files a link reads: the objects of its @response files, and the other existing files it names (not its outputs)"""
+    objs, others = [], []
+    for arg in cmd:
+        if arg.startswith("@") and os.path.isfile(arg[1:]):
+            with open(arg[1:], encoding="utf-8") as f:
+                objs += [line.strip().strip('"') for line in f if line.strip()]
+            others.append(arg[1:])
+            continue
+        # (a file inside an option: -Xlink=/order:@<file>, --symbol-ordering-file=<file>; a whole argument too)
+        m = re.match(r"^(?:-Xlink=)?(?:/\w+:@?|-Wl,|--[\w-]+=)(.+)$", arg)
+        for path in (arg, m.group(1) if m else None):
+            if path and os.path.isfile(path) and os.path.abspath(path) != os.path.abspath(output) and not path.endswith(".map"):
+                others.append(path)
+                break
+    return objs, others
+
+
+def link_key(cmd, output):
+    h = hashlib.sha1("\0".join(cmd).encode(), usedforsecurity=False)
+    # (the compiler and its libraries: a new one compiles every object again to the same keys, and the link must follow it)
+    cc = shutil.which(cmd[0]) or cmd[0]
+    st = os.stat(cc)
+    h.update(("%s %d %d\n" % (cc, st.st_size, st.st_mtime_ns)).encode())
+    with contextlib.suppress(OSError), open(os.path.join(kit.WORK, "system_headers.txt"), "rb") as f:
+        h.update(f.read())
+    objs, others = link_inputs(cmd, output)
+    for obj in objs:
+        stamp = obj + ".sha1"
+        try:
+            with open(stamp) as f:
+                h.update(("%s %s\n" % (obj, f.read())).encode())
+        except OSError:
+            st = os.stat(obj)
+            h.update(("%s %d %d\n" % (obj, st.st_size, st.st_mtime_ns)).encode())
+    for path in others:
+        with open(path, "rb") as f:
+            h.update(path.encode() + b"\0" + hashlib.sha1(f.read(), usedforsecurity=False).digest())
+    return h.hexdigest()
+
+
+def run_link(cmd, output):
+    """subprocess.run(cmd) for a link, or nothing when its inputs are the last successful one's (link_key)"""
+    keyfile = output + ".linkkey"
+    try:
+        key = link_key(cmd, output)
+    except OSError:   # (an input gone: the linker says which)
+        key = None
+    try:
+        with open(keyfile) as f:
+            old = f.read().split()
+    except OSError:
+        old = []
+    if key and os.path.exists(output) and old == [key, str(os.path.getsize(output))]:
+        print("  (%s: its inputs are the last link's, not linked again)" % os.path.basename(output), flush=True)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    with contextlib.suppress(OSError):
+        os.remove(keyfile)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode == 0 and key and os.path.exists(output):
+        with open(keyfile, "w") as f:
+            f.write("%s %d\n" % (key, os.path.getsize(output)))
+    return r
+
+
+COMPDB = "compile_commands.json"
+
+
+def write_compdb(out, jobs):
+    """(the dev-loop proposal's A8) <build>/compile_commands.json: every compile this build runs, as compile_one runs it, for clangd
+    and clang-tidy (nx2/dev.py compdb puts it at the checkout's top). The lifted code's and the host's commands name the lift's
+    gen/ and rt64/ folders, which are this build's; a failure to write it is no failed build"""
+    entries = [{"directory": os.getcwd(), "file": src, "output": obj, "arguments": [cc] + list(fl) + ["-c", src, "-o", obj]}
+               for cc, src, obj, fl, deps in jobs]
+    tmp = os.path.join(out, COMPDB + ".new")
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(entries, f, indent=0)
+        os.replace(tmp, os.path.join(out, COMPDB))
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+
+
 def linker(*opts):
     """Linker options, each as an argument of its own after -Xlinker. The ones that name a file (the map, the link order) are in
     the build files folder, which the player chooses (make_game.py --work), and the compiler splits -Wl, (and so
@@ -149,7 +238,7 @@ def HOT_ORDER():
 
 
 HOST_LIBS = ["-lpthread", "-ldl", "-lm"] if LINUX else \
-    ["-lwinhttp", "-luser32", "-lwinmm", "-ladvapi32", "-lole32", "-lshell32", "-lgdi32", "-ldbghelp"]
+    ["-luser32", "-lwinmm", "-ladvapi32", "-lole32", "-lshell32", "-lgdi32", "-ldbghelp"]
 GPU = os.path.join(kit.HERE, "..", "gpu")
 # FFmpeg (libavcodec's VP8/VP9 decoders, swscale) for nn::codec's video decoders (host/nn_video.c): the static build
 # in the Eglantine clone's package cache
@@ -638,7 +727,9 @@ def flags(gen, rt64, opt, polls):
     return target() + CPU + [
         "-I" + rt64, "-I" + gen, "-I" + os.path.join(kit.KIT, "rt"), "-I" + NX2_RT, "-Wno-everything",
         "-fno-strict-aliasing", "-mcx16", "-" + opt, "-g0", "-mllvm", "-rotation-max-header-size=0",
-        "-ffunction-sections", "-mllvm", "-capture-tracking-max-uses-to-explore=5000"] + \
+        "-ffunction-sections", "-mllvm", "-capture-tracking-max-uses-to-explore=5000",
+        # (a compiler's peak memory ~10% lower on a lifted chunk and on a hot piece, clang 23; the lifted code runs as fast)
+        "-Xclang", "-disable-lifetime-markers"] + \
         (["-DA64_POLLING"] if polls else []) + WRITE_TRACK
 
 
@@ -664,6 +755,10 @@ def flag_text(fl):
             continue
         if f.startswith("--sysroot="):
             f = "--sysroot=<sysroot>"
+        elif f.startswith("-fprofile-instr-use="):
+            # (the play profile's path: its contents are in -DHOOKSHOT_PROFILE_SHA1 beside it. Its path kept two checkouts, or a
+            # build from a checkout other than the work folder's, from sharing the eight hot pieces, ~10-20 minutes to compile)
+            f = "-fprofile-instr-use=<profile>"
         else:
             f = f.replace(kit.ROOT, "<root>")
         kept.append(f)
@@ -680,6 +775,7 @@ def key_of(src, fl, deps):
     """object_key, without reading a source HASHES still knows: the key worked out from it before, for these flags and headers,
     is the same"""
     part = kept_part(fl, deps)
+    USED.setdefault(src, set()).add(part)
     entry, st = known(src)
     if entry is not None and part in entry["keys"]:
         return entry["keys"][part]
@@ -700,6 +796,12 @@ HASH_SCHEME = 1
 RACY_NS = 2 * 10 ** 9
 HASHES = {}   # (source path -> {"stat": [size, mtime_ns, id], "sha1": the content's, "keys": {kept_part: object key}})
 HASHES_AT = [0]   # (when the record read in was written, in ns: entries for files written after it, less RACY_NS, are not trusted)
+# (hckrman101 on #2702) a record is written under the time its build started, before it stat'd and read any source: the save
+# comes after the whole plan, seconds later, and the 2 s rule is about the stat. And it keeps, for each source this build looked
+# at, only the keys this build asked for: a header's edit added a key to every renderer source, and the file only grew. A source
+# this build did not look at (a renderer-only build's lifted C) keeps its record as it was
+HASHES_STARTED = [0]
+USED = {}   # (source path -> the kept_parts key_of was asked for this build; content_sha1's sources with none)
 
 
 def file_stat(src):
@@ -733,6 +835,7 @@ def remember(src, st, content):
 
 def content_sha1(src):
     """A source's content's sha1, from the record when it still describes the file"""
+    USED.setdefault(src, set())
     entry, st = known(src)
     if entry is not None:
         return entry["sha1"]
@@ -740,7 +843,9 @@ def content_sha1(src):
 
 
 def load_hashes(out):
+    HASHES_STARTED[0] = time.time_ns()   # (before any source is stat'd: the time the next record is written under)
     HASHES.clear()
+    USED.clear()
     HASHES_AT[0] = 0
     try:
         with open(os.path.join(out, HASH_CACHE), encoding="utf-8") as f:
@@ -759,8 +864,12 @@ def load_hashes(out):
 
 def save_hashes(out):
     """The record of the sources this build saw, for the next one (written atomically; a failure only costs the next build a read)"""
-    data = {"scheme": HASH_SCHEME, "written_ns": time.time_ns(),
-            "files": {src: e for src, e in sorted(HASHES.items()) if os.path.exists(src)}}
+    def kept(src, e):
+        if src not in USED:
+            return e
+        return dict(e, keys={part: key for part, key in e["keys"].items() if part in USED[src]})
+    data = {"scheme": HASH_SCHEME, "written_ns": HASHES_STARTED[0] or time.time_ns(),
+            "files": {src: kept(src, e) for src, e in sorted(HASHES.items()) if os.path.exists(src)}}
     tmp = os.path.join(out, HASH_CACHE + ".new")
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
@@ -1275,6 +1384,7 @@ def main():
     global GATE
     GATE = None if os.environ.get("HOOKSHOT_MEM_GATE") == "0" else MemoryGate()
     eta_jobs = GATE.expected(a.jobs) if GATE else a.jobs   # (the countdown with the compilers the memory holds, not --jobs)
+    write_compdb(out, jobs)
     counted, expected, pending = os.environ.get("HOOKSHOT_TIMES"), {}, []
     if counted:
         work_jobs, keys = plan_jobs(jobs)
@@ -1336,11 +1446,10 @@ def main():
         exe = os.path.join(out, EXE)   # (+ hookshot.map: crash offsets -> f_<guest address>)
         t = time.time()
         # (--export-dynamic-symbol: the window's state, which the Vulkan back end's own Win32 calls read by name)
-        r = subprocess.run([cc] + target() + ["-fuse-ld=lld", "-o", exe] + linker("-Map=" + exe + ".map") +
-                           ["-Wl,--gc-sections", "-Wl,--export-dynamic-symbol=hos_posix_*", "@" + rsp] + HOT_ORDER() +
-                           (["-fprofile-instr-generate"] if PGO == "gen" else []) +
-                           (FFMPEG_LX[1] if FFMPEG_LX else []) + HOST_LIBS,
-                           capture_output=True, text=True)
+        r = run_link([cc] + target() + ["-fuse-ld=lld", "-o", exe] + linker("-Map=" + exe + ".map") +
+                     ["-Wl,--gc-sections", "-Wl,--export-dynamic-symbol=hos_posix_*", "@" + rsp] + HOT_ORDER() +
+                     (["-fprofile-instr-generate"] if PGO == "gen" else []) +
+                     (FFMPEG_LX[1] if FFMPEG_LX else []) + HOST_LIBS, exe)
         undefined = sorted({l.strip() for l in (r.stdout + r.stderr).splitlines() if "undefined symbol" in l})
         if r.returncode:
             print("link FAILED (%.0fs), %d undefined symbols" % (time.time() - t, len(undefined)))
@@ -1354,7 +1463,7 @@ def main():
     elif a.standalone and not vk_only:
         exe = os.path.join(out, "hookshot.exe")   # (+ hookshot.map: crash offsets -> f_<guest address>)
         t = time.time()
-        r = subprocess.run([cc] + toolchain.native_target() + toolchain.native_link() +
+        r = run_link([cc] + toolchain.native_target() + toolchain.native_link() +
                            ["-o", exe] + linker("/map:" + exe[:-4] + ".map") + [toolchain.link_opt("/stack:8388608"), "@" + rsp] + HOT_ORDER() + HOST_LIBS +
                            ([toolchain.link_opt("/nodefaultlib:clang_rt.profile.lib")] if PGO == "gen" else []) +
                            ([os.path.join(kit.WORK, "hookshot.res")] if os.path.exists(os.path.join(kit.WORK, "hookshot.res")) else []) +   # (nx2/make_icon.py)
@@ -1365,7 +1474,7 @@ def main():
                             ["-lbcrypt", "-lmfplat", "-lmfuuid", "-lstrmiids", "-lole32"] if FFMPEG else []) +
                            ([os.path.join(dav1d_windows(), "lib", "libdav1d.a")] if dav1d_windows() else []) +
                            (["-lc++", "-lunwind"] if toolchain.mingw() else []),   # (llvm-mingw: the C++ parts' runtime, linked in; MSVC's comes by itself)
-                           capture_output=True, text=True)
+                           exe)
         undefined = sorted({l.strip() for l in (r.stdout + r.stderr).splitlines() if "undefined symbol" in l})
         if r.returncode:
             print("link FAILED (%.0fs), %d undefined symbols" % (time.time() - t, len(undefined)))
@@ -1411,7 +1520,7 @@ def main():
         else:
             link = [cc] + toolchain.native_target() + toolchain.native_link() + \
                 ["-shared", "-o", vdll] + linker("/map:" + vdll[:-4] + ".map") + ["@" + vrsp, "-luser32"] +                 (["-lc++", "-lunwind"] if toolchain.mingw() else []) + ngx_link(NGX_SDK, toolchain.mingw())
-        r = subprocess.run(link, capture_output=True, text=True)
+        r = run_link(link, vdll)
         if r.returncode:
             undefined = sorted({l.strip() for l in (r.stdout + r.stderr).splitlines() if "undefined symbol" in l})
             print("%s link FAILED, %d undefined symbols" % (VK_LIB, len(undefined)))

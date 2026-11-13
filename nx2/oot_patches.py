@@ -471,6 +471,10 @@ WHOLE_SITES = (
      "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@"
      "    recomp_store32(c,c->x[19] + 60,c->x[8]);@",
      "c->x[19] + 60"),
+    # (the floor web's simulation steps: keep each object's fraction before the existing 0..3 clamp, issues 2667/2271)
+    ("void f_80652cb0(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[22]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@",
+     "c->x[19] + 2296"),
 )
 WHOLE_SITES = tuple((h.replace("@", "\n"), o.replace("@", "\n"), k) for h, o, k in WHOLE_SITES)
 WHOLE_MARK = "/* (the step's whole frames: nx2/oot_patches.py) */"
@@ -716,7 +720,7 @@ def patch_heap_retry(s):
 # (the wait action's start and tick, code_033.c; the anchors carry call-return PC literals, so each is once in its function)
 OC_DECL = ("extern volatile int hos_oc_wait;\nextern volatile int hos_oc_last_kind;\n"
            "extern volatile unsigned hos_oc_beat;\n"
-           "#define HOS_OC_BUTTONS(k) ((k) == 1 || (k) == 2 || (k) == 3 || (k) == 10)\n")
+           "#define HOS_OC_BUTTONS(k) ((k) == 1 || (k) == 2 || (k) == 3 || (k) == 10 || (k) == 11)\n")
 OC_ENTRY_HEAD = "void f_828a9190(Ctx *__restrict A64_NOESC c) {"
 OC_ENTRY_OLD = ("    c->x[1]=recomp_load32(c,c->x[19] + 32);\n"
                 "    { uint64_t _r = ((uint64_t)0 | ((c->x[0]) << 0)); c->x[20] = _r; }\n"
@@ -724,7 +728,7 @@ OC_ENTRY_OLD = ("    c->x[1]=recomp_load32(c,c->x[19] + 32);\n"
 OC_ENTRY_NEW = ("    c->x[1]=recomp_load32(c,c->x[19] + 32);\n"
                 "    hos_oc_last_kind = (int)c->x[1], hos_oc_wait = HOS_OC_BUTTONS(c->x[1]) ? 1 : 2, hos_oc_beat++;"
                 "   /* (nx2/oot_patches.py: the note wait began; 1 and 3 are the field ocarina, 2 a song lesson, "
-                "10 the scarecrow's recording, 13 a dialogue's, which stays the game's) */\n"
+                "10 the scarecrow's recording, 11 the scarecrow's recall of it, 13 a dialogue's, which stays the game's) */\n"
                 "    { uint64_t _r = ((uint64_t)0 | ((c->x[0]) << 0)); c->x[20] = _r; }\n"
                 "c->x[30] = 0x828a91e4ULL; f_832b35d0(c);")
 OC_TICK_HEAD = "void f_828a9280(Ctx *__restrict A64_NOESC c) {"

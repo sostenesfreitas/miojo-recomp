@@ -62,9 +62,26 @@ int main() {
     CHECK(rule_target(2873 * MB, 3285 * MB, 2811 * MB) == 2811 * MB - kExcessSlack);   // (the excess: 126 MB go, not 413)
     CHECK(rule_target(2873 * MB, 3285 * MB, 2811 * MB) > rule_target(2873 * MB, 2811 * MB));
     CHECK(rule_target(2873 * MB, 2560 * MB, 2560 * MB) == 2560 * MB / 8 * 7);      // (over its size: 7/8 of it, as before)
-    CHECK(rule_target(2873 * MB, 2560 * MB, 2500 * MB) == 2560 * MB / 8 * 7);      // (both: the lower of the two)
-    CHECK(rule_target(2873 * MB, 2880 * MB, 2200 * MB) == 2200 * MB - kExcessSlack);
-    CHECK(rule_target(100 * MB, 3285 * MB, 32 * MB) == 0);                         // (never under nothing)
+    CHECK(rule_target(2600 * MB, 2560 * MB, 2500 * MB) == 2560 * MB / 8 * 7);      // (both: the lower of the two)
+    CHECK(rule_target(2873 * MB, 2560 * MB, 2500 * MB) == 2500 * MB / 8 * 7);      // (both, the rule's excess a large one: its own cut)
+    CHECK(rule_target(2873 * MB, 2880 * MB, 2740 * MB) == 2740 * MB - kExcessSlack);
+    CHECK(rule_target(33 * MB, 3285 * MB, 32 * MB) == 0);                          // (never under nothing)
+    // and only a small excess, up to a sixteenth of the rule's budget (half of what the cut takes): a larger one is an area
+    // that has come in or textures made again as fast as they go, and is cut to 7/8 as before. Issue 2780's Lake Hylia, a 10 GB
+    // card with a 4 GB budget set by hand: 4,022 MB of textures, 383 MB over the line at each pass
+    CHECK(excess_small(2873 * MB, 2811 * MB) && !excess_small(4022 * MB, 3639 * MB));
+    CHECK(!excess_small(2811 * MB, 2811 * MB) && !excess_small(2800 * MB, 2811 * MB));   // (no excess is not a small one)
+    CHECK(rule_target(4022 * MB, 4096 * MB, 3639 * MB) == 3639 * MB / 8 * 7);      // (383 MB over 3,639: the cut, 455 MB under it)
+    CHECK(rule_target(4022 * MB, 4096 * MB, 3639 * MB) == rule_target(4022 * MB, 3639 * MB));   // (as RX_VK_EVICT_EXCESS=0 does)
+    CHECK(rule_target(2873 * MB, 2880 * MB, 2200 * MB) == 2200 * MB / 8 * 7);      // (673 MB over 2,200)
+    {   // (the edge: a sixteenth is still small, a byte more is not; and the cut is never above the trim it replaces)
+        const uint64_t rule = 3200 * MB, edge = rule + rule / kExcessSmall;
+        CHECK(rule_target(edge, 4096 * MB, rule) == rule - kExcessSlack);
+        CHECK(rule_target(edge + 1, 4096 * MB, rule) == rule / 8 * 7);
+        CHECK(rule / 8 * 7 < rule - kExcessSlack);
+    }
+    CHECK(rule_target(100 * MB, 3285 * MB, 32 * MB) == 32 * MB / 8 * 7);
+    CHECK(rule_target(100 * MB, 3285 * MB, 0) == 0);                               // (a budget of nothing: everything may go)
     CHECK(hold_target(100, 60, 4637 * MB, 5000 * MB, 4500 * MB) == 4637 * MB);     // (the count over 90%: one unused 100 presents still goes)
     CHECK(hold_target(59, 60, 4637 * MB, 5000 * MB, 4500 * MB) == UINT64_MAX);     // (one used in the last 60: never)
     CHECK(hold_target(100, 120, 4637 * MB, 5000 * MB, 4500 * MB) == UINT64_MAX);   // (nor before the pass's own time, whatever that is)

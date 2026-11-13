@@ -116,6 +116,30 @@ class HashCacheTests(unittest.TestCase):
                 self.assertEqual(build.HASHES, {})
                 self.assertEqual(build.key_of(str(self.src), FLAGS, DEPS), build.object_key(str(self.src), FLAGS, DEPS))
 
+    def test_the_record_is_written_under_the_time_its_build_started(self):
+        """(hckrman101 on #2702) the 2 s rule is about when each source was stat'd: the build's start, not the save after the plan"""
+        with mock.patch.object(build.time, "time_ns", return_value=1000):
+            build.load_hashes(str(self.dir))
+        build.key_of(str(self.src), FLAGS, DEPS)
+        with mock.patch.object(build.time, "time_ns", return_value=9 * 10 ** 18):
+            build.save_hashes(str(self.dir))
+        data = json.loads((self.dir / build.HASH_CACHE).read_text(encoding="utf-8"))
+        self.assertEqual(data["written_ns"], 1000)
+
+    def test_a_source_this_build_looked_at_keeps_only_the_keys_it_asked_for(self):
+        other = self.dir / "code_002.c"
+        other.write_bytes(b"void f_80000010(void) {}\n")
+        os.utime(other, (MINUTE_AGO, MINUTE_AGO))
+        build.key_of(str(self.src), FLAGS, DEPS)
+        build.key_of(str(self.src), FLAGS, DEPS + b"/* an old header */")
+        build.key_of(str(other), FLAGS, DEPS)
+        build.key_of(str(other), FLAGS, DEPS + b"/* an old header */")
+        self.next_build()
+        build.key_of(str(self.src), FLAGS, DEPS)   # (this build: the source and one key; the other source not at all)
+        self.next_build()
+        self.assertEqual(list(build.HASHES[str(self.src)]["keys"]), [build.kept_part(FLAGS, DEPS)])
+        self.assertEqual(len(build.HASHES[str(other)]["keys"]), 2)
+
     def test_a_file_gone_is_not_kept_in_the_record(self):
         build.key_of(str(self.src), FLAGS, DEPS)
         self.src.unlink()

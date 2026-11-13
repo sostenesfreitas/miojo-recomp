@@ -32,15 +32,18 @@ static class Program
         checks++;
     }
 
-    static void Update(string game, bool expected, bool shaders = true, bool fsr = false)
+    /// fsr: AMD's runtime fetched (the license accepted). built: the folder built with FSR 4 (--fsr), which follows the saved
+    /// tick alone; null: as fsr
+    static void Update(string game, bool expected, bool shaders = true, bool fsr = false, bool? built = null)
     {
         var w = new Window { prepareNow = shaders };
         w.UpdateBuild(new Tools(), game);
         Check(w.Dlss == expected, "Wrong DLSS decision for the saved choice and existing installation.");
         Check(w.Fsr == fsr, "Wrong AMD FSR 4 decision for the saved choice and existing installation.");
         var args = new List<string> { "--update", game };
+        if (built ?? fsr) args.Add("--fsr");
         if (!shaders) args.Add("--no-prepare-shaders");
-        Check(w.Args!.SequenceEqual(args), "The DLSS choice changed the update/shader arguments.");
+        Check(w.Args!.SequenceEqual(args), $"Wrong update/shader arguments: [{string.Join(" ", w.Args!)}], not [{string.Join(" ", args)}].");
     }
 
     static void Main()
@@ -92,8 +95,11 @@ static class Program
             // placeholders only: none of AMD's files are used.
             File.WriteAllText(Window.SettingsPath, "{\"Fsr\":true,\"FsrLicense\":true}");
             Update(game, false, fsr: true);
+            Update(game, false, shaders: false, fsr: true);
             File.WriteAllText(Window.SettingsPath, "{\"Fsr\":true}");
-            Update(game, false); // A tick saved before AMD's license was asked fetches nothing.
+            // A tick saved before AMD's license was asked fetches nothing, and still builds with FSR 4 (the mark is then
+            // written, and the Builder stops offering Update for it).
+            Update(game, false, built: true);
             File.WriteAllText(Window.SettingsPath, "{\"Fsr\":false}");
             Update(game, false);
             File.WriteAllText(Path.Combine(game, ".hookshot_fsr"), "");
@@ -101,7 +107,7 @@ static class Program
             File.WriteAllText(Path.Combine(game, "amd_fidelityfx_upscaler_vk.dll"), "authored upscaler placeholder");
             Update(game, false); // A DLL alone does not accept AMD's license.
             File.WriteAllText(Path.Combine(game, "LICENSE-AMD-FSR-SDK.md"), "authored license placeholder");
-            Update(game, false, fsr: true);
+            Update(game, false, fsr: true, built: false);   // (no saved tick: make_game.py's mark keeps the folder's FSR 4)
             File.Delete(Path.Combine(game, ".hookshot_fsr"));
             Update(game, false); // Built without FSR 4 since: not opted back in.
             Console.WriteLine($"Builder DLSS update checks passed ({checks} assertions).");

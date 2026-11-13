@@ -290,6 +290,7 @@ FIXTURE_HEAD = r'''
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <iterator>
 #include <mutex>
 #include <string>
@@ -528,6 +529,7 @@ def check_game(tool, draw, cxx):
         block(draw, "std::vector<StateRec> state_list_read("), block(draw, "std::vector<uint64_t> state_list_computes("),
         block(draw, "struct ComputePlan {", True), block(draw, "ComputePlan computes_plan("),
         "std::mutex state_mu;\nFILE* state_file = nullptr;\nstd::unordered_set<uint64_t> state_seen;",
+        block(draw, "static void cut_part_record(") if "static void cut_part_record(" in draw else "",
         block(draw, "void state_open_locked()"), block(draw, "void state_record_compute(uint64_t key)")))
     head, _, tail = FIXTURE_MAIN.partition("@READERS@")
     fixture = FIXTURE_HEAD + readers.replace("@STUBS@", head) + tail

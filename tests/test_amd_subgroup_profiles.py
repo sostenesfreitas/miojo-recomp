@@ -30,6 +30,7 @@ enum VkShaderStageFlagBits : uint32_t {
 };
 using VkShaderStageFlags = uint32_t;
 constexpr uint32_t VK_DRIVER_ID_AMD_PROPRIETARY = 1;
+constexpr uint32_t VK_DRIVER_ID_MESA_RADV = 3;   // (the RADV branch of the fragment shuffle fallback)
 struct {
     uint32_t sg32_stages = 0, subgroup_size = 32, subgroup_max = 32, driver_id = 0;
     struct { bool shaderFloat16 = true; } vk12;   // (k10: f16 lowered where the GPU has none; here it has)

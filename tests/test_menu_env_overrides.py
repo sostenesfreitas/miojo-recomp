@@ -3,7 +3,8 @@
 RX_VK_FRAMEGEN_MULT, RX_VK_PACE, RX_VK_UPSCALE, HOS_REALTIME_STEP, HOS_DYNRES and HOS_OUTPUT_RES are applied to the
 rows in menu_init. They used to be copied into the rows as if chosen, so the next save (any row changed in the menu)
 wrote them into the player's options for good. Compile the menu's real save() and the overrides' part of menu_init with
-small stand-ins and check what the file gets. No game or GPU is needed.
+small stand-ins and check what the file gets. On Linux, a save that cannot write a byte leaves the file as it was and no
+part file, and an options file that is a link stays one, also to a file not made yet. No game or GPU is needed.
 """
 import argparse
 import os
@@ -60,7 +61,18 @@ int ultrawide_read = 1, aspect_started = -1;
 bool aspect_follows_host(int) { return false; }
 #ifdef _WIN32
 static int setenv(const char* name, const char* value, int) { return _putenv_s(name, value); }
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>   // (save(): MoveFileExA)
 #endif
+#ifdef __linux__
+#include <csignal>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+static int logged;   // (save()'s line when the options file could not be written)
+void logf(const char*, ...) { logged++; }
 
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL %d: %s\n", __LINE__, #x); return 1; } } while (0)
 /* OPTIONS */
@@ -156,7 +168,37 @@ int main(int argc, char** argv) {
     env_release(&opts.realtime);
     save();
     CHECK(has("game_speed=1\n"));
-    std::puts("PASS: the environment's rows last for the run; the options file keeps the player's");
+    CHECK(!logged && !std::fopen((ini_file + ".new").c_str(), "r"));
+#ifdef __linux__
+    // A save that cannot be written (a full disk: no byte may be written here): the options file as it was, no part file left
+    const std::string before = slurp();
+    rlimit was{};
+    getrlimit(RLIMIT_FSIZE, &was);
+    rlimit none = was;
+    none.rlim_cur = 0;
+    std::signal(SIGXFSZ, SIG_IGN);
+    CHECK(setrlimit(RLIMIT_FSIZE, &none) == 0);
+    opts.sharpness = 70;
+    save();
+    setrlimit(RLIMIT_FSIZE, &was);
+    CHECK(!before.empty() && slurp() == before && logged == 1);
+    CHECK(!std::fopen((ini_file + ".new").c_str(), "r"));
+    save();   // (and the next save that can write does)
+    CHECK(has("sharpness=70\n"));
+    // The options file a link: its target written and the link kept, also when the target is not made yet
+    const std::string target = ini_file + ".target";
+    std::remove(ini_file.c_str());
+    CHECK(symlink(target.c_str(), ini_file.c_str()) == 0);
+    struct stat st;
+    for (int sharpness : {60, 50}) {   // (the target missing, then there)
+        opts.sharpness = sharpness;
+        save();
+        CHECK(lstat(ini_file.c_str(), &st) == 0 && S_ISLNK(st.st_mode));
+        CHECK(has(("sharpness=" + std::to_string(sharpness) + "\n").c_str()) && logged == 1);
+        CHECK(!std::fopen((ini_file + ".new").c_str(), "r") && !std::fopen((target + ".new").c_str(), "r"));
+    }
+#endif
+    std::puts("PASS: the environment's rows last for the run; the options file keeps the player's, also when a save fails");
 }
 """
 

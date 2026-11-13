@@ -6,9 +6,10 @@ files, so a copy is all it takes.
     python -I scripts/oot_saves.py export <name>  [--profile ID] [--keep-settings] [--dry-run] [--force]
     python -I scripts/oot_saves.py import --from DIR   (a save from any folder into Hookshot)
     python -I scripts/oot_saves.py export --to DIR     (Hookshot's save into any folder)
+    --json (any command): one line of JSON on stdout instead of text, for the builders' Saves page
 
 import copies into Hookshot, export copies out of it. <name> is one of EMULATORS below: lichii, frizti, orchid,
-pokedinner, eden, eglantine or nx2navi (to-lichii and to-hookshot still work: they are export lichii and import
+pokedinner, eden, eglantine, nx2navi or longshot (Hookshot with add-ons: the same save files) (to-lichii and to-hookshot still work: they are export lichii and import
 lichii). --from/--to name the other side's folder instead of where it is looked for: the save folder itself (the one
 with account.sav and slot_*), or a folder above it (an emulator's data folder, a portable user folder, NX2navi's game
 folder), which is searched for the game's saves. --hookshot DIR does the same for Hookshot's side: its data folder
@@ -20,7 +21,9 @@ Standard library only; the guide is docs/saves.md.
 """
 import argparse
 import collections
+import contextlib
 import datetime
+import json
 import os
 import re
 import shutil
@@ -30,6 +33,7 @@ import sys
 
 TITLE = "0400486024DEC000"
 NO_ACCOUNT = "0000000000000000"
+USER_ID = "5a3c9e1f0b7d24680000000000000001"   # (the one user Hookshot plays as: user_uid, host/nn_applet.c)
 WINDOWS = os.name == "nt"
 
 Program = collections.namedtuple("Program", "name display folders processes aliases")
@@ -52,6 +56,8 @@ EMULATORS = [
     Program("nx2navi", "NX2navi", {"linux": ["{home}/Games/Ocarina"],
                                    "windows": ["{localappdata}/Programs/NX2navi/game", "C:/Games/Ocarina"]},
             ["nx2navi", "ocarina"], []),
+    # (Longshot: Hookshot with add-ons and the same save code, so its saves copy as they are. Windows: its builder's game folder)
+    Program("longshot", "Longshot", {"linux": ["{data}/longshot"], "windows": ["{home}/Games/Longshot"]}, ["longshot"], []),
 ]
 HOOKSHOT = Program("hookshot", "Hookshot", {"linux": ["{data}/hookshot"], "windows": []}, ["hookshot"], [])
 FOLDER = Program("folder", "the folder", {"linux": [], "windows": []}, [], [])
@@ -340,16 +346,67 @@ def program_named(name):
                % (name, ", ".join(p.name for p in EMULATORS)))
 
 
+def save_info(path):
+    out = []
+    for s in slots(path):
+        p = os.path.join(path, s, "progress.sav")
+        when = datetime.datetime.fromtimestamp(os.path.getmtime(p)).isoformat(timespec="seconds") if os.path.isfile(p) else None
+        out.append({"slot": s, "saved": when})
+    return out
+
+
+def list_json(args):
+    """list as one JSON object: Hookshot's save, and every other program's folder with saves (programs that share a
+    folder are one entry, named by the first of them, as import takes it)"""
+    out = {"sources": [], "running": running_games()}
+    try:
+        folder, found = locate(HOOKSHOT, args.hookshot, "--hookshot")
+        out["hookshot"] = {"folder": folder, "saves": [{"profile": k, "path": v, "slots": save_info(v)}
+                                                       for k, v in sorted(found.items())]}
+    except Fail as e:
+        out["hookshot"] = {"error": str(e)}
+    groups = collections.OrderedDict()
+    for program in EMULATORS:
+        used = next((d for d in folders(program) if os.path.isdir(d) and find_saves(d)), None)
+        if used:
+            groups.setdefault(used, []).append(program)
+    for where, programs in groups.items():
+        saves = [{"profile": k, "path": v, "slots": save_info(v), "pending": pending_commit(v)}
+                 for k, v in sorted(find_saves(where).items()) if slots(v)]
+        if saves:
+            out["sources"].append({"name": programs[0].name, "display": " / ".join(p.display for p in programs),
+                                   "folder": where, "saves": saves})
+    print(json.dumps(out))
+
+
+def hookshot_target(args):
+    """Hookshot's save folders for an import; when it has none yet, its save folder made (where the game makes it)"""
+    try:
+        return locate(HOOKSHOT, args.hookshot, "--hookshot")[1]
+    except Fail:
+        root = args.hookshot or (None if WINDOWS else folders(HOOKSHOT)[0])
+        if not root:
+            raise
+        if WINDOWS and not os.path.isdir(root):
+            raise Fail("no game folder at %s: build the game there first" % root)
+        user = WINDOWS or os.path.isdir(os.path.join(root, "user"))
+        save = os.path.join(root, *(["user"] if user else []), "save", USER_ID)
+        if not args.dry_run:
+            os.makedirs(save, exist_ok=True)
+        print("Hookshot has no save yet: made %s" % save, file=sys.stderr if args.json else sys.stdout)
+        return {USER_ID: save}
+
+
 def run(args):
     if args.command == "list":
-        list_all(args)
+        list_json(args) if args.json else list_all(args)
         return
     other = program_named(args.name) if args.name else FOLDER
     if other is FOLDER and not args.folder:
         raise Fail("%s what? Name the emulator (%s) or the folder (%s <folder>)"
                    % (args.command, ", ".join(p.name for p in EMULATORS), "--from" if args.command == "import" else "--to"))
     flag = "--from" if args.command == "import" else "--to"
-    _, hs = locate(HOOKSHOT, args.hookshot, "--hookshot")
+    hs = hookshot_target(args) if args.command == "import" else locate(HOOKSHOT, args.hookshot, "--hookshot")[1]
     _, em = locate(other, args.folder, flag)
     hs_id, hs_path = pick(hs, "Hookshot", "--hookshot <the user id folder>")
     em_id, em_path = pick(em, other.display, "--profile <id>", args.profile)
@@ -372,7 +429,13 @@ def run(args):
     while os.path.exists(backup):   # (two copies in the same second)
         n += 1
         backup = "%s-%d" % (base, n)
-    copy_saves(src, dst, backup, args.keep_settings, args.dry_run)
+    if args.json:
+        with contextlib.redirect_stdout(sys.stderr):   # (the text goes to stderr; stdout holds only the answer)
+            copy_saves(src, dst, backup, args.keep_settings, args.dry_run)
+        print(json.dumps({"ok": True, "from": src, "to": dst, "backup": None if args.dry_run else backup,
+                          "dry_run": args.dry_run, "slots": slots(src)}))
+    else:
+        copy_saves(src, dst, backup, args.keep_settings, args.dry_run)
 
 
 def main(argv=None):
@@ -390,6 +453,7 @@ def main(argv=None):
     p.add_argument("--dry-run", action="store_true", help="say what would happen and change nothing")
     p.add_argument("--force", action="store_true",
                    help="copy even if a game seems to be running, or NX2navi has a save waiting")
+    p.add_argument("--json", action="store_true", help="answer with one line of JSON (the builders' Saves page)")
     args = p.parse_args(argv)
     if args.command in ("to-lichii", "to-hookshot"):
         if args.name:
@@ -401,6 +465,8 @@ def main(argv=None):
     try:
         run(args)
     except Fail as e:
+        if args.json:
+            print(json.dumps({"error": str(e)}))
         print("error: %s" % e, file=sys.stderr)
         return 1
     return 0

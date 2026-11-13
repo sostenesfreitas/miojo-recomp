@@ -60,7 +60,7 @@ for name in $names; do
 done
 
 cd "$folder"
-# (--play already chose Play. The game's own update question stays for a bin/hookshot the player started themselves)
+# (--play already chose Play: a game built when it asked about updates itself does not ask again)
 export HOOKSHOT_NO_UPDATE_CHECK=1
 if [ -x ./bin/hookshot ]; then
     exec ./bin/hookshot

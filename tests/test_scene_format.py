@@ -19,6 +19,8 @@ RUN_ALL_ARGS = ["--cc", "gcc"]
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nx2"))
 import oot_patches  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 PICK = '''    { uint64_t _r = c->x[9] & 0x8ULL; _r &= 0xFFFFFFFFULL; c->x[9] = _r; }
     c->x[10] = 0x2cULL;
@@ -44,16 +46,6 @@ def function(text, name):
     at = text.index("void %s(Ctx *__restrict" % name)
     end = text.find("\nvoid f_", at + 1)
     return text[at:end if end >= 0 else len(text)]
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 def patch_checks():

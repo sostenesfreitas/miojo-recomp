@@ -2,7 +2,7 @@
   "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
   "format": 1,
   "name": "Hookshot",
-  "repo": "NotRexed/Hookshot",
+  "repo": "Hookshot/Hookshot",
   "game": {
     "kind": "iso_or_folder",
     "label": "Your copy of The Legend of Zelda: Ocarina of Time for Nintendo Switch 2, version 131072 (build e0f3ccfa): the .nup file, or the folder that holds its romfs and exefs.",

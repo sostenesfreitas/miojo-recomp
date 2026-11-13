@@ -29,7 +29,7 @@ class SdlAudioLibraryTests(unittest.TestCase):
 
     def test_audio_device_buffer_matches_audio_frame_quantum(self):
         text = SDL.read_text(encoding="utf-8")
-        start = text.index("int hos_sdl_audio_open(")
+        start = text.index("void *hos_sdl_audio_open(")
         fn = text[start:text.index("\n}", start)]
         self.assertIn('const char *env_samples = getenv("SDL_AUDIO_DEVICE_SAMPLE_FRAMES");', fn)
         self.assertIn('if (version == 3 && !env_samples) hos_sdl_hint("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "480");', fn)

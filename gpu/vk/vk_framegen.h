@@ -7,8 +7,9 @@ namespace mkwvk {
 
 bool framegen_on();
 /// Records the frame's processing into the present's recording (src: the window texture's view, sw x sh, the crop
-/// x, y, w, h); false when interpolation cannot run (the present goes to the window as without it)
-bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4]);
+/// x, y, w, h; cover: wide_sides_tick's, this frame's); false when interpolation cannot run (the present goes to the window
+/// as without it)
+bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4], float cover);
 /// (hookshot) Who made the made frames of the sets shown lately (the last 64, about a second at 60): what the Insert menu's
 /// Frame generation by row and the FPS counter name. None: none made (Off, nothing to blend from, none for half a second)
 enum class FgMaker { None, BuiltIn, Dlss, Fsr3 };
@@ -44,8 +45,13 @@ VkImageView framegen_scaled_view();   // (hookshot) the view of framegen_scale's
 /// else the SDR picture, expanded
 VkImage framegen_hdr(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4], uint32_t dw, uint32_t dh,
                      bool pq = false);
-/// Each present: ultrawide's menus (the Insert menu's setting to the game's side, the sides blurred or black while a menu shows)
-void wide_sides_tick();
+/// Each present: ultrawide's menus (the Insert menu's setting to the game's side, the sides blurred or black while a menu shows);
+/// cover: how far the loading cover was closed when the game presented this frame (wide_cover_sample), the sides closed by as much
+void wide_sides_tick(float cover);
+/// How far the loading cover between two areas is closed now, 0 to 1 (0 unless ultrawide's menus are in the middle): asked as the
+/// game presents a frame, on its thread, and carried with that frame to wide_sides_tick, since the game goes on to the next one.
+/// The larger of this reading and the last (wide_cover_held): the game may already have moved the cover on for its next frame
+float wide_cover_sample();
 /// Whether ultrawide's menu sides can show at all: Ultrawide with a margin and the Insert menu's setting on
 bool wide_sides_possible();
 

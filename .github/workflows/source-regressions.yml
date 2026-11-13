@@ -1,7 +1,8 @@
 # Every game-free check, on every pull request to main and every push to it: tests/run_all.py runs each
 # tests/test_*.py and nx2/test_*.py (all of them, even after a failure), the C++ unit tests under gpu/vk/tests and a
 # byte-compile of every tracked Python file, and writes a table of them to the run's summary. A check that needs a GPU,
-# the game or MSVC says so, and why, in its own file (RUN_ALL_SKIP). No game data is involved.
+# the game or MSVC says so, and why, in its own file (RUN_ALL_SKIP). The separate lavapipe job executes three authored
+# Vulkan fixtures with validation; no game data is involved in either job.
 # Each system runs the tests in two parts at once (run_all.py --shard, split by tests/run_all_times.json): each part is
 # one job, and every check is in exactly one of them. Windows' own build checks (MSVC, the Builder) are in its part 1.
 # On Linux the C and C++ compiles go through ccache (the compilers in its PATH), with the cache main's runs leave
@@ -270,6 +271,40 @@ jobs:
         with:
           path: ${{ runner.temp }}/ccache
           key: ${{ steps.ccache.outputs.key }}
+
+  # Every source-check run, including docs-only PRs: these small fixtures also catch changes in the runner's Mesa.
+  # They execute on the CPU, not a hardware GPU; no window, swapchain or game data is involved.
+  vulkan-fixtures:
+    name: Vulkan fixtures (lavapipe, validation)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install software Vulkan and validation
+        run: |
+          start=$SECONDS
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++ mesa-vulkan-drivers vulkan-validationlayers libvulkan-dev vulkan-tools
+          dpkg-query -W -f '${Package}=${Version}\n' g++ mesa-vulkan-drivers vulkan-validationlayers libvulkan-dev libvulkan1 vulkan-tools
+          g++ --version
+          python3 --version
+          echo "Vulkan package setup: $((SECONDS - start)) seconds"
+      - name: Run every authored Vulkan fixture
+        shell: bash
+        run: |
+          # Ubuntu's older Mesa uses lvp_icd.x86_64.json; newer packages use lvp_icd.json.
+          # Refuse missing/ambiguous manifests rather than silently enumerating other drivers.
+          shopt -s nullglob
+          icds=(/usr/share/vulkan/icd.d/lvp_icd*.json)
+          if [ "${#icds[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one lavapipe ICD, found ${#icds[@]}"
+            exit 1
+          fi
+          export VK_DRIVER_FILES="${icds[0]}" VK_ICD_FILENAMES="${icds[0]}"
+          python3 -I -B tests/run_vulkan_fixtures.py --cxx g++ --headers /usr/include --device llvmpipe
 
   actionlint:
     name: Workflow lint (actionlint)

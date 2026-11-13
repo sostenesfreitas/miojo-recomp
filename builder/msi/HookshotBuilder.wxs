@@ -12,7 +12,7 @@
     <MediaTemplate EmbedCab="yes" />
     <Icon Id="HookshotIcon" SourceFile="../setup/hookshot.ico" />
     <Property Id="ARPPRODUCTICON" Value="HookshotIcon" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/NotRexed/Hookshot" />
+    <Property Id="ARPURLINFOABOUT" Value="https://git.notrexed.dev/Hookshot/Hookshot" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsDir" Name="Programs">

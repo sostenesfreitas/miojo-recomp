@@ -39,11 +39,12 @@ static BOOL move_fixture(LPCWSTR from, LPCWSTR to) {
     return MoveFileW(from,to);
 }
 #define MoveFileW move_fixture
+#define Sleep(ms) ((void)(ms))
 '''
     part_end = source.index("} Part;") + len("} Part;")
     code += source[source.rfind("typedef struct", 0, part_end):part_end] + "\n"
     for marker in ("static int home_path(", "static void rmtree(", "static void mkdirs(", "static void read_small(", "static int part_folder(",
-                   "static int copy_part_tree(", "static int publish_install(", "static int reuse_part("):
+                   "static int copy_part_tree(", "static BOOL move_retry(", "static int publish_install(", "static int reuse_part("):
         code += function(source, marker) + "\n"
     code += r'''
 int wmain(int argc, wchar_t **argv) {

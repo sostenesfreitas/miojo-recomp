@@ -61,7 +61,10 @@ cp scripts/ngx_sdk.py "$T/scripts/"
 cp -a gpu/vk gpu/compat gpu/third_party "$T/gpu/"
 cp -a third_party/imgui third_party/zstd third_party/fonts "$T/third_party/"
 mkdir -p "$T/third_party/zbic" "$T/third_party/a64-kit"
-cp -a third_party/zbic/zbic.so third_party/zbic/LICENSE third_party/zbic/PROVENANCE.md "$T/third_party/zbic/"
+# (the whole folder, not only its prebuilt helper: with DLSS ticked the builder drops HOOKSHOT_VK_PREBUILT, so nx2/build.py
+# compiles the back end from the sources inside the read-only image and reads third_party/zbic's zstd.c, zstd.h and
+# zstd_errors.h for its vk_zstd.o; shipping only zbic.so stopped those builds at FileNotFoundError on third_party/zbic/zstd.h)
+cp -a third_party/zbic "$T/third_party/"
 cp -a third_party/a64-kit/* "$T/third_party/a64-kit/"
 rm -f "$T/third_party/a64-kit/tools/lld-link.exe"
 if [ -d work ]; then
@@ -154,13 +157,15 @@ cp assets/hookshot.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/hookshot.pn
 # scripts/linux/publish_parts.sh uploads them: without --base the list named NotRexed/Hookshot's release, which a fork's
 # CI does not upload to, so a fork's update list named parts that were not there)
 python3 scripts/linux/make_parts.py "$APPDIR" "$VERSION" "$B/parts" \
-    --base "https://github.com/${GITHUB_REPOSITORY:-NotRexed/Hookshot}/releases/download/linux-parts"
+    --base "https://git.notrexed.dev/${HOOKSHOT_REPOSITORY:-Hookshot/Hookshot}/releases/download/linux-parts"
 
 # The update information AppImageUpdate and Gear Lever read: the newest .zsync of this repository's latest release (or of
 # the release HOOKSHOT_UPDATE_RELEASE names). appimagetool writes it into the image and makes the .zsync beside it with
 # its bundled zsyncmake, which names the AppImage by its file name, next to the .zsync on the same release.
-UPDATE_REPO=${GITHUB_REPOSITORY:-NotRexed/Hookshot}
-UPDATE_INFO=${HOOKSHOT_UPDATE_INFO:-"gh-releases-zsync|${UPDATE_REPO%%/*}|${UPDATE_REPO#*/}|${HOOKSHOT_UPDATE_RELEASE:-latest}|Hookshot-*-x86_64.AppImage.zsync"}
+UPDATE_REPO=${HOOKSHOT_REPOSITORY:-Hookshot/Hookshot}
+UPDATE_RELEASE=${HOOKSHOT_UPDATE_RELEASE:-latest}
+[ "$UPDATE_RELEASE" = latest ] && UPDATE_PATH=latest/download || UPDATE_PATH=download/$UPDATE_RELEASE
+UPDATE_INFO=${HOOKSHOT_UPDATE_INFO:-"zsync|https://git.notrexed.dev/$UPDATE_REPO/releases/$UPDATE_PATH/Hookshot-x86_64.AppImage.zsync"}
 OUT=$B/Hookshot-$VERSION-x86_64.AppImage
 rm -f "$OUT" "$OUT.zsync"
 # (from build-linux/: appimagetool writes the .zsync into the current folder)

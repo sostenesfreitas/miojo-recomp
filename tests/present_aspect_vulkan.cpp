@@ -3,10 +3,12 @@
 #include <vulkan/vulkan.h>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <vector>
 #include "vk_present_rect.h"
 using namespace mkwvk;
@@ -68,16 +70,39 @@ Image image(uint32_t width,uint32_t height) {
 void release(Buffer b){vkDestroyBuffer(device,b.object,nullptr);vkFreeMemory(device,b.memory,nullptr);}
 void release(Image i){vkDestroyImage(device,i.object,nullptr);vkFreeMemory(device,i.memory,nullptr);}
 struct Case { const char* name;uint32_t width,height;float aspect;PresentRect expected;bool padded; };
-int main() {
+std::string lower(std::string s) {
+    std::transform(s.begin(),s.end(),s.begin(),[](unsigned char c){return (char)std::tolower(c);});
+    return s;
+}
+VkPhysicalDevice pick_device(const std::vector<VkPhysicalDevice>& cards,const std::string& requested) {
+    VkPhysicalDevice selected=VK_NULL_HANDLE;
+    for(auto candidate:cards) {
+        VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(candidate,&props);
+        if(!requested.empty() && lower(props.deviceName).find(requested)==std::string::npos) continue;
+        if(!selected) selected=candidate;
+        if(props.deviceType==VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) return candidate;
+    }
+    if(!selected) {
+        std::fprintf(stderr,"No Vulkan device matched '%s'; devices seen:\n",requested.c_str());
+        for(auto candidate:cards) {
+            VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(candidate,&props);
+            std::fprintf(stderr,"  %s\n",props.deviceName);
+        }
+    }
+    return selected;
+}
+int main(int argc,char** argv) {
+    std::string requested;
+    if(argc==3 && std::strcmp(argv[1],"--device")==0 && argv[2][0]) requested=lower(argv[2]);
+    else if(argc!=1) { std::fprintf(stderr,"usage: %s [--device NAME_SUBSTRING]\n",argv[0]); return 2; }
     VkApplicationInfo app{};app.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO;app.pApplicationName="Hookshot F01 synthetic presentation";
     app.apiVersion=VK_API_VERSION_1_3;
     VkInstanceCreateInfo ici{};ici.sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;ici.pApplicationInfo=&app;
     VkInstance instance{};OK(vkCreateInstance(&ici,nullptr,&instance));
     uint32_t count=0;OK(vkEnumeratePhysicalDevices(instance,&count,nullptr));CHECK(count);
     std::vector<VkPhysicalDevice> cards(count);OK(vkEnumeratePhysicalDevices(instance,&count,cards.data()));
-    physical=cards[0];
-    for(auto candidate:cards){VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(candidate,&props);
-        if(props.deviceType==VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU){physical=candidate;break;}}
+    physical=pick_device(cards,requested);
+    if(!physical) { vkDestroyInstance(instance,nullptr); return 1; }
     VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(physical,&props);
     std::printf("DEVICE: %s, api %u.%u, driver %u\n",props.deviceName,VK_VERSION_MAJOR(props.apiVersion),VK_VERSION_MINOR(props.apiVersion),props.driverVersion);
     CHECK(props.apiVersion>=VK_API_VERSION_1_3);

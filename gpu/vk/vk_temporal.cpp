@@ -168,6 +168,7 @@ struct State {
     std::atomic<uint64_t> last_frame{0};   // (the frame an engine last drew: read on the game's thread too)
     float last_jitter[2]{};   // (its camera's jitter: the frame before's, for the next one)
     float last_vp[16]{};      // (its camera's view-projection: the frame before's)
+    std::chrono::steady_clock::time_point last_at{};   // (when it was taken: the camera cut's time between the two)
     TemporalJitter jitter;    // (one completed scene size, sequence and frame)
     std::unordered_map<VkImage, VkImageView> depth_views;
     uint64_t depth_views_gen = 0;
@@ -181,11 +182,16 @@ struct State {
         SkinnedDraw k;
         uint64_t key = 0;
         uint32_t nbones = 0;
+        // (its pose as the draw saw it, read at the draw with ub_read: the origin (12 bytes, then 4 of padding), then the
+        // nbones bones. Empty: not read, and the pose is copied from the game's memory at the upscale as before)
+        std::vector<uint8_t> pose;
     };
     std::vector<Skin> skins;
     struct Pose {
         uint32_t at = 0, nbones = 0;   // (bytes into its buffer: the origin, then the bones from at + 16)
         uint64_t frame = 0;
+        bool placed = false;           // (read at the draw: its place is known here, and the next frame pairs by place)
+        float place[3]{};              // (dlss_actor::place_of)
     };
     std::unordered_map<uint64_t, Pose> poses;
     std::unordered_map<uint64_t, uint32_t> model_bones;   // (by model: the bones its vertices use, 0 when unreadable)
@@ -204,7 +210,12 @@ struct State {
         void* map = nullptr;
     } uploads[6];               // (the cameras: a ring, one in use stays so for a few frames, as what later() frees)
     int upload_at = 0;
+    Upload pose_stages[6];      // (the poses read at the draws, staged for their copy into the pose buffer: a ring as the cameras')
+    int pose_stage_at = 0;
     uint64_t actor_draws = 0, actor_frames = 0, actor_skipped = 0;
+    // (since the last status line: the poses taken as their draws read them, and those copied from the game's memory at the
+    // upscale instead (not read at the draw, or RX_VK_DLSS_ACTOR_LIVE=1))
+    uint64_t poses_read = 0, poses_copied = 0;
     int64_t actor_ns = 0;       // (the CPU's time in it, since the last status line)
     uint64_t status_draws = 0, status_frames = 0;   // (actor_draws and _frames at the last status line: temporal_status)
     uint64_t status_drawn = 0, status_passed = 0;   // (since the last status line: frames an engine drew, and frames a network
@@ -491,8 +502,9 @@ uint64_t device_address(const BufferRef& r) {
 constexpr uint64_t kPoseBytes = 4 << 20;   // (a pose buffer: 280 bones of 48 bytes are 13 KB a draw, 300 of them)
 
 /// The skinned draws into the scene (cam's depth) with a pose of the frame before (the engine's last), drawn into the motion
-/// image over the camera's motion. Each one's bones and origin are copied on the GPU, from where the game has them, into
-/// this frame's pose buffer, for this frame and the next. before: the frame before's camera without its jitter. history:
+/// image over the camera's motion. Each one's pose (bones and origin), as its draw read it (temporal_note_skinned_draw),
+/// else copied on the GPU from where the game has it, goes into this frame's pose buffer, for this frame and the next.
+/// before: the frame before's camera without its jitter. history:
 /// the engine has the frame before. Returns the draws drawn
 int actor_motion(VkCommandBuffer cmd, const Camera& cam, const float* before, uint32_t rw, uint32_t rh, VkImageView dview,
                  bool history) {
@@ -521,25 +533,98 @@ int actor_motion(VkCommandBuffer cmd, const Camera& cam, const float* before, ui
     static const uint32_t tolerance = env_switch("RX_VK_DLSS_ACTOR_TOL") >= 0 ? (uint32_t)env_switch("RX_VK_DLSS_ACTOR_TOL") : 64;
     std::vector<ActorPush> draws;
     std::vector<uint32_t> counts;
+    // (the poses read at the draws go through a host-visible stage, copied into the pose buffer in one go after the loop: the
+    // GPU's order as the copies from the game's memory had it, and no write into a buffer a frame in flight still reads)
+    State::Upload& stage = s.pose_stages[s.pose_stage_at];
+    s.pose_stage_at = (s.pose_stage_at + 1) % (int)(sizeof s.pose_stages / sizeof s.pose_stages[0]);
+    const bool any_read = std::any_of(skins.begin(), skins.end(), [](const State::Skin& k) { return !k.pose.empty(); });
+    if (any_read && !stage.buffer &&
+        !create_buffer_cached(kPoseBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, stage.buffer, stage.memory, &stage.map))
+        stage = {};
+    std::vector<VkBufferCopy> staged;
+    // (which of the frame before's draws each of this frame's is. A draw with its pose read at the draw pairs by place (its
+    // origin plus its bones' mean translation: dlss_actor::place_of): all copies of its model at once, the nearest pairs
+    // first, never across more than RX_VK_DLSS_ACTOR_REACH world units between two engine frames (default 1: a running Link
+    // moves about 0.1 a frame, the Gossip Stones stand 2.3 apart; after a long frame a fast actor can go further and keeps the
+    // camera's motion for that frame): dlss_actor::pair_by_place. Else the same n-th draw of the model as before)
+    static const float reach = [] {
+        const char* e = getenv("RX_VK_DLSS_ACTOR_REACH");
+        if (!e || !*e) return 1.0f;
+        char* end = nullptr;
+        const float v = strtof(e, &end);
+        const bool ok = end != e && !*end && std::isfinite(v) && v >= 0.0f;
+        logf("vk: actor motion: copies of a model pair within %g world units a frame (RX_VK_DLSS_ACTOR_REACH=%s%s)",
+             ok ? (double)v : 1.0, e, ok ? "" : ": not a number of 0 or more, so the default");
+        return ok ? v : 1.0f;
+    }();
+    const auto read_at_draw = [&](const State::Skin& k) {
+        return !k.pose.empty() && stage.map && k.pose.size() == 16 + (size_t)k.nbones * 48;
+    };
+    struct Copies {
+        std::vector<dlss_actor::Placed> now, then;
+        std::vector<size_t> skin;    // (now's: its index in skins)
+        std::vector<uint64_t> key;   // (then's: its key)
+    };
+    std::unordered_map<uint64_t, Copies> models;
+    for (const auto& [key, p] : old)
+        if (p.placed) {
+            Copies& c = models[key >> 8];
+            c.then.push_back({{p.place[0], p.place[1], p.place[2]}, (int)(key & 0xff)});
+            c.key.push_back(key);
+        }
+    std::vector<float> places(skins.size() * 3, 0.0f);
+    for (size_t i = 0; i < skins.size(); i++) {
+        const State::Skin& k = skins[i];
+        if (k.k.depth != cam.depth || !read_at_draw(k)) continue;
+        float* place = &places[i * 3];
+        dlss_actor::place_of(k.pose.data(), k.nbones, place);
+        Copies& c = models[k.key >> 8];
+        c.now.push_back({{place[0], place[1], place[2]}, (int)(k.key & 0xff)});
+        c.skin.push_back(i);
+    }
+    std::vector<uint64_t> pair_key(skins.size(), 0);
+    std::vector<char> paired(skins.size(), 0);
+    for (const auto& [model, c] : models) {
+        if (c.now.empty() || c.then.empty()) continue;
+        const std::vector<int> pairs = dlss_actor::pair_by_place(c.now, c.then, reach);
+        for (size_t a = 0; a < pairs.size(); a++)
+            if (pairs[a] >= 0) pair_key[c.skin[a]] = c.key[pairs[a]], paired[c.skin[a]] = 1;
+    }
     uint32_t at = 0;
-    for (const auto& k : skins) {
+    for (size_t i = 0; i < skins.size(); i++) {
+        const State::Skin& k = skins[i];
         if (k.k.depth != cam.depth) continue;
         const uint32_t bytes = 16 + k.nbones * 48;
         if (at + bytes > kPoseBytes) break;
-        // (this frame's pose, from where the game has it: its bones, then its origin at the object's 0x40)
-        const BufferRef bones = gpu_buffer_bind(k.k.bones, (uint64_t)k.nbones * 48, false);
-        const BufferRef origin = gpu_buffer_bind(k.k.object + 0x40, 12, false);
-        if (!bones || !origin) {
-            s.actor_skipped++;
-            continue;
+        const bool placed = read_at_draw(k);
+        const float* place = &places[i * 3];
+        if (placed) {
+            std::memcpy((uint8_t*)stage.map + at, k.pose.data(), bytes);
+            staged.push_back({at, at, bytes});
+            s.poses_read++;
+        } else {
+            // (this frame's pose, from where the game has it now: its bones, then its origin at the object's 0x40)
+            const BufferRef bones = gpu_buffer_bind(k.k.bones, (uint64_t)k.nbones * 48, false);
+            const BufferRef origin = gpu_buffer_bind(k.k.object + 0x40, 12, false);
+            if (!bones || !origin) {
+                s.actor_skipped++;
+                continue;
+            }
+            const VkBufferCopy c0{origin.offset, at, 12}, c1{bones.offset, at + 16, (uint64_t)k.nbones * 48};
+            vkCmdCopyBuffer(cmd, origin.buffer, here.buffer, 1, &c0);
+            vkCmdCopyBuffer(cmd, bones.buffer, here.buffer, 1, &c1);
+            s.poses_copied++;
         }
-        const VkBufferCopy c0{origin.offset, at, 12}, c1{bones.offset, at + 16, (uint64_t)k.nbones * 48};
-        vkCmdCopyBuffer(cmd, origin.buffer, here.buffer, 1, &c0);
-        vkCmdCopyBuffer(cmd, bones.buffer, here.buffer, 1, &c1);
-        s.poses[k.key] = {at, k.nbones, now};
+        State::Pose& kept = s.poses[k.key];
+        kept = {at, k.nbones, now, placed, {place[0], place[1], place[2]}};
         const uint32_t mine = at;
         at += (bytes + 15) & ~15u;
-        const auto it = old.find(k.key);
+        // (the frame before's draw it pairs with: by place (above) when that frame's copies of its model were read at their
+        // draws too, else its n-th, as before)
+        auto it = old.end();
+        const auto m = placed ? models.find(k.key >> 8) : models.end();
+        if (m == models.end() || m->second.then.empty()) it = old.find(k.key);
+        else if (paired[i]) it = old.find(pair_key[i]);
         if (!history || it == old.end() || it->second.frame != s.last_frame || it->second.nbones != k.nbones) {
             s.actor_skipped++;
             continue;
@@ -559,11 +644,15 @@ int actor_motion(VkCommandBuffer cmd, const Camera& cam, const float* before, ui
         a.nbones = k.nbones;
         a.itype = (uint32_t)k.k.itype, a.base_vertex = k.k.base_vertex;
         a.stride = k.k.stride / 4, a.pos = k.k.pos, a.sets = (uint32_t)k.k.sets;
-        for (int i = 0; i < 2; i++) a.joints[i] = k.k.joints[i], a.weights[i] = k.k.weights[i];
+        for (int n = 0; n < 2; n++) a.joints[n] = k.k.joints[n], a.weights[n] = k.k.weights[n];
         a.formats = k.k.formats;
         a.tolerance = tolerance;
         draws.push_back(a);
         counts.push_back((uint32_t)k.k.count);
+    }
+    if (!staged.empty()) {
+        flush_mapped(stage.memory, at);
+        vkCmdCopyBuffer(cmd, stage.buffer, here.buffer, (uint32_t)staged.size(), staged.data());
     }
     s.pose_at ^= 1;
     if (draws.empty()) return 0;
@@ -647,12 +736,13 @@ void drop_all() {
             later([gone] { destroy_buffer(gone.buffer, gone.memory); });
             pb = {};
         }
-    for (auto& u : s.uploads)
-        if (u.buffer) {
-            const State::Upload gone = u;
-            later([gone] { destroy_buffer(gone.buffer, gone.memory); });
-            u = {};
-        }
+    for (auto* ring : {&s.uploads, &s.pose_stages})
+        for (auto& u : *ring)
+            if (u.buffer) {
+                const State::Upload gone = u;
+                later([gone] { destroy_buffer(gone.buffer, gone.memory); });
+                u = {};
+            }
     s.poses.clear(), s.skins.clear(), s.model_bones.clear();
     if (!s.depth_views.empty()) {
         auto old = std::move(s.depth_views);
@@ -748,12 +838,13 @@ int temporal_status(char* b, size_t n) {
     char passed[64] = "";
     if (s.status_passed) snprintf(passed, sizeof passed, ", %llu left to the game's network", (unsigned long long)s.status_passed);
     snprintf(b, n, "; %s: %llu frames drawn%s, %llu made, jitter %+.3f %+.3f px%s, actor motion %llu draws in %llu "
-             "frames (%.3f ms CPU a frame), its images %llu MB%s",
+             "frames (%.3f ms CPU a frame; poses %llu read at the draw, %llu copied later), its images %llu MB%s",
              name_of(mode), (unsigned long long)s.status_drawn, passed, (unsigned long long)s.engines_made,
              s.status_jitter[0], s.status_jitter[1], s.status_motion ? "" : " (no motion)",
              (unsigned long long)draws, (unsigned long long)frames, frames ? s.actor_ns / 1e6 / (double)frames : 0.0,
-             (unsigned long long)(own >> 20), feature);
+             (unsigned long long)s.poses_read, (unsigned long long)s.poses_copied, (unsigned long long)(own >> 20), feature);
     s.status_draws = s.actor_draws, s.status_frames = s.actor_frames, s.actor_ns = 0, s.status_drawn = s.status_passed = 0;
+    s.poses_read = s.poses_copied = 0;
     return mode;
 }
 
@@ -815,6 +906,15 @@ void temporal_note_skinned_draw(const SkinnedDraw& k) {
     }
     d.nbones = (uint32_t)std::min<uint64_t>(mb->second, std::min<uint64_t>(k.bones_size / 48, 280));
     if (!d.nbones) return;
+    // (its pose as this draw sees it: the origin and bones at the stream's place (ub_read: the submission's memory with the
+    // uniform updates before here over it). Copied from the game's memory at the upscale instead, a draw's pose could be another
+    // frame's or another draw's (the place pair_by_place needs, too). RX_VK_DLSS_ACTOR_LIVE=1: as before, for an A/B)
+    static const bool live = env_switch("RX_VK_DLSS_ACTOR_LIVE") == 1;
+    if (!live) {
+        d.pose.resize(16 + (size_t)d.nbones * 48);
+        if (!ub_read(k.object + 0x40, d.pose.data(), 12) || !ub_read(k.bones, d.pose.data() + 16, (uint64_t)d.nbones * 48))
+            d.pose.clear();
+    }
     int nth = 0;   // (the same model drawn twice in a frame: the n-th draw of it is the n-th the frame before)
     for (const auto& o : s.skins) nth += dlss_actor::same_model(o.key, model);
     d.key = dlss_actor::key(k.vbuf, k.ibuf, k.count, k.base_vertex, k.program, nth);
@@ -1010,6 +1110,26 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     float previous[16];
     std::memcpy(previous, s.last_vp, sizeof previous);
     dlss_math::unjitter(previous, s.last_jitter);
+    // (hookshot) A camera cut starts a new history: an area load, a spawn or a cutscene's cut moves the camera 5 to 180 m in one
+    // frame, and DLSS, FSR and their frame generation blended the new view with the old one (smears and ghosts after every load,
+    // frames generated between two unrelated pictures). Only the lost camera, another size or target, or a skipped frame started
+    // one before. dlss_math::camera_cut; RX_VK_TEMPORAL_CUT=0: off. Each cut is logged, 24 at most
+    {
+        static const bool cut_on = !getenv("RX_VK_TEMPORAL_CUT") || std::atoi(getenv("RX_VK_TEMPORAL_CUT")) != 0;
+        const auto at = std::chrono::steady_clock::now();
+        if (cut_on && !reset && s.last_at.time_since_epoch().count()) {
+            double move = 0, turn = 0;
+            const double ms = std::chrono::duration<double, std::milli>(at - s.last_at).count();
+            if (dlss_math::camera_cut(s.last_vp, cam.current, ms, &move, &turn)) {
+                reset = true;
+                static int cuts;
+                if (++cuts <= 24)
+                    logf("vk: temporal: camera cut (moved %.2f, turned %.1f degrees in %.1f ms): a new history (%d so far)", move,
+                         turn, ms, cuts);
+            }
+        }
+        s.last_at = at;
+    }
     const bool motion = !reset && dlss_math::reprojection(cam.current, previous, pc.reproject);
     if (!motion) reset = true;   // (without a valid reprojection, prior history has no mapping to this camera)
     pc.jitter[0] = cam.jitter[0], pc.jitter[1] = cam.jitter[1];

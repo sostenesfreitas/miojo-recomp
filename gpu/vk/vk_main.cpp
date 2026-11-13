@@ -1174,6 +1174,7 @@ void prepare_with_screen() {
             prep_skip[1].store(true);
         }
         if (!prepare_stopped()) {
+            if (update) state_list_run();   // (the shipped list's pipelines, as a start with no screen makes them)
             prep_done.store(0), prep_total.store(0);
             prep_stage.store(2);
             precompile_run(prep_progress);

@@ -176,6 +176,17 @@ int main(void) {
         CHECK(near(getf(PITCH), 20.5f));
         CHECK(hos_mouse_native() == 1);
     }
+    /* the mouse released (capture off): the game's camera is left alone, and the next captured frame starts from it */
+    state(4);
+    seed_at(10, 30);
+    frame(0, 0);
+    captured = 0;
+    putf(YAW, 10);   /* (the game's follow camera turns it) */
+    frame(0, 0);
+    CHECK(near(getf(YAW), 10.0f));
+    captured = 1;
+    frame(-10, 0);
+    CHECK(near(getf(YAW), 11.0f));   /* from the game's 10, not the mouse's old 30 */
     if (!fails) printf("PASS\n");
     return fails != 0;
 }

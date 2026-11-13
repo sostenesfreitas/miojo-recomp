@@ -1,4 +1,4 @@
-/* (hookshot) The sound manager's job at 60 Hz and the physics solver's steps rounded up, under a Frame rate cap above 60: the
+/* (hookshot) The sound manager's job at up to 60 Hz and the physics solver's steps rounded up, with a measured frame step: the
    lifted f_80435300, f_838ceb80 and f_838cfc10 call these (nx2/oot_patches.py); host/oot_high_fps.h has why and the logic.
    HOS_FPS_LOG (on, by the switches' rule: =0 is off): what they do, every 600 calls. */
 #include "hos.h"

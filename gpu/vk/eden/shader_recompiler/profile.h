@@ -50,6 +50,7 @@ struct Profile {
     /// (hookshot) float adds to storage buffers as one OpAtomicFAddEXT (VK_EXT_shader_atomic_float's
     /// shaderBufferFloat32AtomicAdd), not a compare-exchange loop; with support_descriptor_aliasing only (an f32 view)
     bool support_float32_atomic_add{};
+    bool support_native_narrow_global_store{};   // (hookshot) 8/16-bit global stores written directly, not a compare-exchange loop
     bool support_shared_int64_atomics{};
     bool support_derivative_control{};
     bool support_geometry_shader_passthrough{};

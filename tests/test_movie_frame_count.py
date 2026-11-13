@@ -114,6 +114,11 @@ int main(int argc, char **argv) {
         CHECK(n - was == 1 || n - was == 2);
     }
     CHECK(within(n - before, 600));
+    /* 30 fps: cues advance 60 movie frames per second, with the picture and sound. */
+    seconds(1.0 / 30);
+    before = n;
+    for (int i = 0; i < 300; i++) n = update(0);
+    CHECK(within(n - before, 600));
     /* two movies at once: each its own count (one carry for both would give each half) */
     seconds(1.0 / 120);
     before = n;

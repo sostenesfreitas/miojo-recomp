@@ -429,11 +429,49 @@ Each command prints plain lines; `--json` prints the replies. `--sock` overrides
 when done, 1 for an error reply, 2 when there is no game or the usage is bad, and 3 for a timeout. `launch --data`
 sets `XDG_DATA_HOME` for the run, so it plays from saves of its own. `--env NAME=VALUE` adds switches.
 
+### A benchmark route
+
+`scripts/hookshot_bench.py` drives a repeatable route through the client: the same places, the same settling time and
+the same measurement window every run, so two builds, two switches or two PCs compare by numbers.
+
+```
+python -I scripts/hookshot_bench.py ~/Games/Hookshot --name main --save ~/bench-save
+python -I scripts/hookshot_bench.py ~/Games/Hookshot --name parallel3 --save ~/bench-save --env RX_VK_PARALLEL=3
+python -I scripts/hookshot_bench.py ~/Games/Hookshot --name field --places HyruleField_Child --secs 120 --grep "VRAM:"
+```
+
+One run:
+1. Starts the game folder (`launch`) and waits for its first frame. A first start's preparation can take hours on a slow
+   driver, so it waits in 50-minute steps for up to 8 hours.
+2. Presses A until the newest save is loaded.
+3. For each place (default Kokiri Forest, then Hyrule Field, as a child), teleports there and waits until no event or
+   load is playing. It then lets the scene settle (`--settle`, 15 s) and measures for `--secs` (60) without touching
+   anything.
+4. Takes a screenshot of each place and quits.
+
+**Start every run from the same save (`--save`).** The game saves as it plays, a slot rewritten in each run, and Continue
+loads the newest, so without it the second run starts from wherever the first left off. `--save` takes a save folder
+(`<user id>` with `account.sav`, `option.sav` and `slot_NN/`; copy one aside once) and `--slot` one slot of it.
+- **Windows:** the game folder's own `user/save` is set aside as `user/save.hookshot_bench` while the run lasts, and put
+  back after the game has closed.
+- **Linux:** the save is copied into the run folder's own data folder (`launch --save`).
+
+A message that waits for a button (an event that lasts 8 s, such as the wake-up cucco a time of day hatches) is closed
+with A, before the window and in it. `summary.json` counts those presses.
+
+The numbers come from the game's own log lines over the window: the medians of `N presents, F fps; a frame: D draws`,
+`GPU time`, every part of `a frame's replay time (ms)`, and the highest `VRAM: U MB used of A MB allowed`. The bridge's fps
+and the process's memory at the end of the window are added, with the share of the window an event was playing in (the
+game's clock goes on: a dialogue that a time of day brings can land in it). `summary.json` in the run folder
+(`bench-runs/<time>-<name>`, which git ignores) holds them per place, with the build's version and the lines `--grep` asked for. The log,
+the screenshots and the summary stay in that folder. Compare runs made with the same save, settings and cache state:
+the first visit to a place after a cache change compiles pipelines, so run a route once first, or measure twice.
+
 ## Known limits
 
-- **Windows** is built and its pipe tested in CI only (the windows-2022 runner): the bridge inside a Windows game build,
-  `launch` on Windows, and refusing remote pipe clients (`PIPE_REJECT_REMOTE_CLIENTS`, which needs a second machine)
-  are not tested.
+- **Windows**: the pipe is tested in CI (the windows-2022 runner). The bridge inside a Windows game build was driven by
+  hand and by `hookshot_bench.py` (`launch`, `status`, `wait`, `press`, `teleport`, `shot`, `quit`; Windows 11, main
+  `de866017`). Refusing remote pipe clients (`PIPE_REJECT_REMOTE_CLIENTS`) needs a second machine and is not tested.
 - **The state is a guess** from the draws a frame (above). A scene with unusual counts can be misread; for OoT, `game`'s
   `event` and `loading` and `map` are the game's own.
 - **A teleport the game sent but that did not move Link**: `accepted` (the event manager's answer) is reported, not turned into an error: `false` was seen once, when the map did not change, but that it always means no move is not established. Otherwise `wait map` times out.
@@ -450,6 +488,7 @@ sets `XDG_DATA_HOME` for the run, so it plays from saves of its own. `--env NAME
 Linux, the named pipe on Windows (the CI's windows-2022 runner). On Windows it also checks the pipe's access control:
 another first instance of the name and a second bridge on it are refused, and the DACL, read back through a client's
 handle, is protected with a single ACE for the current user. `tests/test_hookshot_ctl.py` drives the client against a
-fake bridge on the same transports.
+fake bridge on the same transports. `tests/test_hookshot_bench.py` checks the benchmark route's steps against a stand-in
+bridge on a fake clock, and its sums against log lines in the game's own format.
 
 What is not tested is under Known limits.

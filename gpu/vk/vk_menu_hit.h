@@ -20,7 +20,15 @@ enum Part {
     kListLine,  // a list (the teleport list, the inventory): a line as shown (index, 0 the top one), side -1 the left half, 1 the right half
     kButton,    // the restart question's buttons: index 0 Later, 1 Restart now
 };
-enum CtlColumn { kCtlPrimary, kCtlAlternate, kCtlKeyboard, kCtlColumns };
+enum CtlColumn { kCtlPrimary, kCtlAlternate, kCtlKeyboard, kCtlKeyboard2, kCtlColumns };
+/// A key column's slot of the host's two keys per control (0 or 1); -1 for a gamepad column
+constexpr int ctl_key_slot(int col) { return col >= kCtlKeyboard ? col - kCtlKeyboard : -1; }
+/// The column a row's selection is in: a keys-only row (its gamepad cells off) keeps to the key columns
+constexpr int ctl_column(int col, bool keys_only) { return keys_only && col < kCtlKeyboard ? kCtlKeyboard : col; }
+/// The column after Left (dir -1) or Right (1): round all four, or round the two key columns on a keys-only row
+constexpr int ctl_step(int col, int dir, bool keys_only) {
+    return keys_only ? kCtlKeyboard + (ctl_key_slot(ctl_column(col, true)) + 1) % 2 : (col + kCtlColumns + dir) % kCtlColumns;
+}
 struct Hit {
     Part part = kNone;
     int index = -1;

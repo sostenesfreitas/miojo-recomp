@@ -58,7 +58,8 @@ const void* reflex_submit_id(const void* next, uint64_t = ~0ull) { return next; 
 std::chrono::steady_clock::time_point pend_since;
 int st_flushes = 0, st_reason[2]{};
 int64_t st_batched_cbs = 0;
-enum { FR_OTHER, FR_CAP }; int flush_reason = FR_OTHER;
+enum { FR_OTHER, FR_CAP, FR_READBACK }; int flush_reason = FR_OTHER;
+bool readback_send_now() { return false; }   // (held submits sent for a readback's wait: none waits here)
 bool batched = false;
 bool batch_on() { return batched; }
 bool batch_gpu_idle() { return false; }   // (#1993's flush at an idle GPU: none here)

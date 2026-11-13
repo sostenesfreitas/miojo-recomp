@@ -97,11 +97,26 @@ inline uint64_t rule_target(uint64_t total, uint64_t rule_budget) { return total
 /// second, all on screen again within the camera's turn, made again, over the line again: 2.5 <-> 2.95 GB every few seconds,
 /// 8-9 uploads a frame and 16-25 frames over 50 ms in 30 s, where the same scene loaded from a save (just under the line) had
 /// none. So for them what goes is the excess and kExcessSlack more, so that not every pass is one; the budget's size still asks
-/// for its 7/8
+/// for its 7/8.
+/// But only a small excess: that is the cache sitting at the line. One of more than a sixteenth of the rule's budget (half of
+/// what the cut to 7/8 takes) is not that: an area has come in, or the textures are made again as fast as a pass lets them
+/// go, and trimmed to the line the cache stays at it, every pass an eviction. Lake Hylia reached from Kakariko on a 10 GB card
+/// with a 4 GB budget set by hand and the hold at 90% (issue 2780) sat 383 MB over the line at each pass, 4,022 MB of textures
+/// in 8,288 MB and 6.3 uploads a frame at 12.7 fps, where the cut to 7/8 held 2,946 MB in 6,639 MB with no uploads at 42.4 fps
+/// (likely because the passes count presents: the slower the frame, the longer "unused for 60" is and the surer what goes is
+/// wanted again, and the trim never took the count far enough under the line for that to stop). So a large excess is cut to
+/// 7/8, as before. The bound is a share of the budget and not less: with 128 MB the Market on the 8 GB card had 22-102 passes
+/// in 60 s over it (181-199 MB on average) and let go of 11,100 textures, against 6,500 with the sixteenth and 14,500 with the
+/// cut at every pass
 inline constexpr uint64_t kExcessSlack = 64ull << 20;
+inline constexpr uint64_t kExcessSmall = 16;   // (the excess is small up to rule_budget / kExcessSmall)
+inline bool excess_small(uint64_t total, uint64_t rule_budget) {
+    return total > rule_budget && total - rule_budget <= rule_budget / kExcessSmall;
+}
 inline uint64_t rule_target(uint64_t total, uint64_t size_budget, uint64_t rule_budget) {
     uint64_t to = rule_target(total, size_budget);
-    if (rule_budget < size_budget && total > rule_budget) to = std::min(to, rule_budget - std::min(rule_budget, kExcessSlack));
+    if (rule_budget < size_budget && total > rule_budget)
+        to = std::min(to, excess_small(total, rule_budget) ? rule_budget - std::min(rule_budget, kExcessSlack) : rule_budget / 8 * 7);
     return to;
 }
 

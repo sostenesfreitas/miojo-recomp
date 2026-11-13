@@ -51,6 +51,14 @@ using SIZE_T = size_t;
 constexpr int MEM_COMMIT = 1, MEM_RESERVE = 2, PAGE_READWRITE = 4;
 struct MEMORY_BASIC_INFORMATION { uint8_t* BaseAddress; size_t RegionSize; int State; };
 void* VirtualAlloc(void* p, size_t, int, int) { return p; }
+// (import_fence.h's stand-in: how many stood, and how many allocations were made while one did)
+unsigned fences = 0, fenced_allocations = 0;
+bool fence_up = false;
+struct ImportFence {
+    const bool on;
+    ImportFence(uint8_t*, uint64_t, bool on_) : on(on_) { assert(!fence_up); if (on) fences++, fence_up = true; }
+    ~ImportFence() { if (on) fence_up = false; }
+};
 size_t VirtualQuery(void*, MEMORY_BASIC_INFORMATION*, size_t) { return 0; }
 VkResult vkGetMemoryHostPointerPropertiesEXT(VkDevice, VkExternalMemoryHandleTypeFlagBits, const void*, VkMemoryHostPointerPropertiesEXT* hp) {
     if (fault == Fault::Properties) return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -66,6 +74,7 @@ VkResult vkCreateBuffer(VkDevice, const VkBufferCreateInfo* ci, const VkAllocati
 }
 VkResult vkAllocateMemory(VkDevice, const VkMemoryAllocateInfo*, const VkAllocationCallbacks*, VkDeviceMemory* out) {
     allocations++; *out = handle<VkDeviceMemory>(0xbeef);
+    if (fence_up) fenced_allocations++;
     if (failing(Fault::Allocate, allocation_kind)) return VK_ERROR_OUT_OF_HOST_MEMORY;
     *out = handle<VkDeviceMemory>(next_id++); memories.insert(*out); return VK_SUCCESS;
 }
@@ -152,7 +161,10 @@ void run(const std::string& route, const std::string& test) {
     }
     const bool success = call(route, p);
     assert(owner_releases == destroyed_buffers);   // Every factory rollback preserves main's owner hook.
+    // (a host-pointer import's allocation is made behind the fence, a dma-buf's without one, and none is left standing)
+    assert(!fence_up && fences == fenced_allocations && (route != "dma" || fences == 0));
     if (test == "healthy" || (route == "pool" && test != "both-bind-fail")) {
+        assert(route == "dma" || fences == 1);
         assert(success && p.buffer && p.memory && p.address && address_queries == 1);
         assert(buffers.size() == 1 && memories.size() == 1 && import_holds.rows.empty());
         if (route == "pool") {

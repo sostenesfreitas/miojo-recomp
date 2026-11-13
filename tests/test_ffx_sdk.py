@@ -204,6 +204,7 @@ class BuilderTests(unittest.TestCase):
         self.assertTrue(line.strip().startswith("if (fsr && "), line)
         self.assertIn("fsr: FsrTick.IsChecked == true && fsrLicense", self.code)   # (Build: the tick, AMD's license accepted)
         self.assertIn("fsr ? Storage.FfxSdk : null", self.code)      # (AMD's runtime kept in the builder's folder)
+        self.assertIn("AMD's license not accepted yet: tick AMD FSR 4 again", self.code)   # (an old tick: said in the log)
 
 
 if __name__ == "__main__":

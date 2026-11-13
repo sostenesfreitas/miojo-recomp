@@ -7,7 +7,8 @@ through a seven-second wall pause, test native-frame boundaries/live offsets/slo
 
 Controllers counted only while the game's window was in front, so a game streamed from a screen of its own (Sunshine
 and Moonlight), or left running behind another window, ignored the pad. The Insert menu's "Controller in background"
-row, or HOS_INPUT_BACKGROUND=1, lets the pads through; the keyboard and mouse stay with the window in front.
+row, or HOS_INPUT_BACKGROUND=1, lets the pads through; the keyboard and mouse stay with the window in front. Behind
+another window as in front, the pads are the Insert menu's while it is open, and after it closed until they are let go.
 
 python -I -B tests/test_input_background.py [--cc gcc]
 """
@@ -18,6 +19,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 # (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
 ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
@@ -27,17 +30,8 @@ RUN_ALL_ARGS = ["--cc", "gcc"]
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ("foreground", "script-background", "headless", "noactivate", "live-background",
          "no-script-background", "exclusive-foreground", "exclusive-background", "pads-env", "pads-menu", "pads-off",
+         "pads-insert",
          "frame-hold", "live-frame", "reuse-frame", "wall", "zero", "empty")
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 def main():
@@ -52,7 +46,8 @@ def main():
     read = block(hid, "static void read_input(")
     behind = read[read.index("if (!game_in_front()"):]   # (with or without PR 545's scripted-background test)
     behind = behind[:behind.index("return;") + len("return;")]
-    if "pads_in_background(" not in behind or "pads_read(" not in behind:
+    merge = block(hid, "static int pads_merge(")   # (the pads with the Insert menu's hold, in front and behind alike)
+    if "pads_in_background(" not in behind or "pads_merge(" not in behind or "pads_read(" not in merge:
         raise SystemExit("behind another window the pads are never read")
     if "key(" in behind or "mouse" in behind:
         raise SystemExit("behind another window the keyboard or mouse would reach the game")
@@ -68,6 +63,8 @@ def main():
     constants += block(api, "enum { HOS_KEY_MOVE_UP") + ";\n"   # (the keys-only controls)
     constants += block(api, "enum { HOS_OPT_CHEAT_HEARTS") + ";\n"
     constants += block(api, "enum { HOS_BIND_PAD") + ";\n"   # (the live input's !bind)
+    constants += block(api, "enum { HOS_OPT_AUTO_RUN") + ";\n"   # (Auto run: off here, rx_option answers 0)
+    constants += (ROOT / "host/auto_run.h").read_text(encoding="utf-8") + "\n"
     for name in ("STATE_SIZE", "NPAD_NO1", "ATTR_CONNECTED"):
         matches = re.findall(r"^#define " + name + r"\s+[^\n]+", hid, re.M)
         assert len(matches) == 1, name
@@ -81,6 +78,7 @@ def main():
 volatile int hos_oot_live_action;
 int hos_oot_flight_shortcut_ready(void) { CHECK(!"unexpected cheat readiness query"); return 0; }
 void rx_option_set(int id, int value) { (void)id; (void)value; CHECK(!"unexpected cheat option change"); }
+int hos_oot_player_free(void) { return 1; }
 """
     # (the host's own presses and stick, for the game's menus' mouse (host/oot_menu.c): none here; the player's input
     # time it hides the mouse by: not looked at)
@@ -92,7 +90,8 @@ static void player_used(void) {}
 """
     actual = "\n".join((cheat_state, cheat_spies, host_spies, block(hid, "static int key("), block(hid, "static int kmap_down("),
         block(hid, "static int game_in_front("), hid[start:end], block(hid, "static void stick_max("),
-        block(hid, "static int pads_in_background("),
+        block(hid, "static int pads_in_background("), block(hid, "static int pads_merge("),
+        block(hid, "static int pads_behind("),
         # (the bound keys' helpers read_input calls: a mouse button counts only while the mouse is captured)
         block(hid, "static int mouse_vk_slot("), re.search(r"^static int mouse_armed\[5\];", hid, re.M).group(0),
         block(hid, "static void mouse_buttons_arm("), block(hid, "static int bound_down("),
@@ -124,7 +123,7 @@ static void player_used(void) {}
              "-I" + str(folder), str(ROOT / "tests/input_background_test.c"), "-o", str(exe)])
         for case in ((a.case,) if a.case else CASES):
             case_env = dict(env)
-            if case not in ("live-background", "no-script-background", "live-frame", "reuse-frame"):
+            if case not in ("live-background", "no-script-background", "live-frame", "reuse-frame", "pads-insert"):
                 case_env["HOS_INPUT_SCRIPT"] = "0:A+LUP/200"
             if case in ("frame-hold", "live-frame", "reuse-frame"):
                 case_env["HOS_INPUT_FRAME_CLOCK"] = "1"

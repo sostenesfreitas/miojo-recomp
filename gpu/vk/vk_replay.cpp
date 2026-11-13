@@ -120,7 +120,7 @@ VkSemaphore batch_tl = VK_NULL_HANDLE;
 uint64_t batch_next = 0, batch_flushed = 0;
 struct { std::vector<VkCommandBufferSubmitInfo> cbs; uint64_t signal = 0; bool any_signal = false; uint64_t rec = 0; uint64_t reflex = 0; } pend;   // (rec: the recordings' timeline value the held ones reach; reflex: the game frame of the first, vk_reflex.h)
 int64_t st_flushes, st_batched_cbs;
-enum { FR_OTHER, FR_POLL, FR_WAIT, FR_SLOT, FR_PRESENT, FR_CAP, FR_VALUE, FR_COUNT };
+enum { FR_OTHER, FR_POLL, FR_WAIT, FR_SLOT, FR_PRESENT, FR_CAP, FR_VALUE, FR_READBACK, FR_COUNT };
 int64_t st_reason[FR_COUNT];
 int flush_reason = FR_OTHER;
 std::chrono::steady_clock::time_point pend_since;
@@ -192,9 +192,36 @@ uint64_t completed() {
 /// batch waited for the next wait or present while the GPU sat idle, and with serial replay the game waits for it mid-frame
 /// (take_capture's late pages), so the GPU started cold just as it was waited for. RX 9070 XT, RADV, Kokiri Forest: 33-41
 /// fps -> 46-61, no flashes in 5230 frames; ~10 flushes a frame of ~3.7 command buffers each, so batching still groups the
-/// submits while the GPU is busy. RX_VK_BATCH_IDLE=0: held until a wait, a present or the cap, as before
+/// submits while the GPU is busy. RX_VK_BATCH_IDLE=0: held until a wait, a present or the cap, as before.
+/// (Not by default on the Steam Deck's APU (Van Gogh: 0x163f LCD, 0x1435 OLED), where each submit costs ~1 ms: Deck LCD,
+/// Kokiri Forest, main with default switches: queue submit 11.7 ms a frame with it, 2.0 without, replay 40.5 -> 31.4 ms; the
+/// fps comes with the readback send below. Other APUs (780M, 890M, 8060S) are unmeasured and keep it. RX_VK_BATCH_IDLE=1: on)
+/// (hookshot) While a CPU read of GPU results waits (invalidate, after #2125's catch-up), what is held goes out when the wait
+/// begins and then each time RX_VK_READBACK_SEND_CBS command buffers are held (default 8): the GPU works through the catch-up's
+/// work meanwhile instead of starting it only at the wait's own flush. Without the idle send (the Steam Deck's APU) that wait
+/// doubled: Deck LCD, Kokiri, main: 13.8 / 13.5 fps, no idle send 12.8 / 12.8, with this 14.6 / 14.3. RX_VK_READBACK_SEND=0: off
+std::atomic<int> readback_waiting{0};
+bool readback_send_on() {
+    static const bool on = [] {
+        const char* e = getenv("RX_VK_READBACK_SEND");
+        const bool v = !e || atoi(e) != 0;
+        logf("vk: held submits go out while a readback waits: %s (RX_VK_READBACK_SEND)", v ? "on" : "off");
+        return v;
+    }();
+    return on;
+}
+bool readback_send_now() {   // (dev.present_mu held)
+    static const size_t cbs = getenv("RX_VK_READBACK_SEND_CBS") ? (size_t)std::max(1, atoi(getenv("RX_VK_READBACK_SEND_CBS"))) : 8;
+    return readback_waiting.load(std::memory_order_relaxed) && pend.cbs.size() >= cbs;   // (by the work held: the same split on a slower CPU)
+}
 bool batch_gpu_idle() {
-    static const bool on = !getenv("RX_VK_BATCH_IDLE") || atoi(getenv("RX_VK_BATCH_IDLE")) != 0;
+    static const bool on = [] {
+        const char* e = getenv("RX_VK_BATCH_IDLE");
+        const bool deck = dev.props.vendorID == 0x1002 && (dev.props.deviceID == 0x163f || dev.props.deviceID == 0x1435);
+        const bool v = e ? atoi(e) != 0 : !deck;
+        logf("vk: idle send %s (RX_VK_BATCH_IDLE%s)", v ? "on" : "off", !e && deck ? ", off on the Steam Deck" : "");
+        return v;
+    }();
     uint64_t done = 0;
     return on && vkGetSemaphoreCounterValue(dev.device, batch_tl, &done) == VK_SUCCESS && done >= batch_flushed;
 }
@@ -462,6 +489,7 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
         static const size_t cap = getenv("RX_VK_BATCH_MAX") ? (size_t)std::max(1, atoi(getenv("RX_VK_BATCH_MAX"))) : 32;
         if (pend.cbs.size() >= cap) flush_reason = FR_CAP, queue_flush_locked();
         if (!pend.cbs.empty() && batch_gpu_idle()) flush_reason = FR_OTHER, queue_flush_locked();   // (#1993)
+        if (!pend.cbs.empty() && readback_send_now()) flush_reason = FR_READBACK, queue_flush_locked();
         return;
     }
     PROF(PROF_QSUBMIT);
@@ -511,6 +539,9 @@ T payload(const uint8_t* a, uint32_t bytes) {
 }
 
 int64_t st_barriers, st_ub_updates, st_ub_overlays, st_submits;
+/* (hookshot) what makes a draw rebuild its descriptors: which NVN binding moved the state's generation. A draw's
+   descriptor set is rebuilt when bind_gen moved, and 0.9 of the draws rebuilt theirs (3.2 ms a frame). */
+int64_t st_bg_prog, st_bg_bufs, st_bg_ubo, st_bg_ssbo, st_bg_tex, st_bg_samp, st_bg_img;
 std::map<int32_t, int64_t> st_barrier_flags;   // (the game's nvnCommandBufferBarrier bits: how many of each combination, the frame log)
 std::mutex st_barrier_flags_mu;   // (a parallel replay's threads count their barriers too)
 // ---- events in replay order: the values the stream's signals and the CPU's set, for the GPU's waits on them. The
@@ -1065,7 +1096,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             const auto b = payload<nvn_p_bind_program>(a, avail);
             // (the same program bound again: its descriptors already stand)
             const bool same = b.prog && s.has_prog ? std::memcmp(&s.prog, b.prog, sizeof s.prog) == 0 : !b.prog && !s.has_prog;
-            if (!same) s.bind_gen++;
+            if (!same) s.bind_gen++, st_bg_prog++;
             if (b.prog) s.prog = *b.prog;
             s.has_prog = b.prog != nullptr && b.prog->nstage > 0;
             break;
@@ -1143,7 +1174,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                 }
                 nvn_p_bind_buf& u = (b.ssbo ? s.ssbo : s.ubo)[b.stage][index];
                 if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, index, b.r[i].address, b.r[i].size)) {
-                    s.bind_gen++;
+                    s.bind_gen++, st_bg_bufs++;
                     if (b.ssbo) s.ssbo_gen[b.stage] = s.bind_gen;
                 }
                 u.stage = b.stage, u.index = index, u.addr = b.r[i].address, u.size = b.r[i].size;
@@ -1164,6 +1195,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
                 nvn_p_bind_buf& u = (h.op == NOP_BIND_UBO ? s.ubo : s.ssbo)[b.stage][b.index];
                 if (!buf_unchanged(u.stage, u.index, u.addr, u.size, b.stage, b.index, b.addr, b.size)) {
                     s.bind_gen++;
+                    (h.op == NOP_BIND_UBO ? st_bg_ubo : st_bg_ssbo)++;
                     if (h.op == NOP_BIND_SSBO) s.ssbo_gen[b.stage] = s.bind_gen;
                 }
                 u = b;
@@ -1187,6 +1219,7 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             while (n < b.n && b.first + n < lim) n++;
             if (!handles_unchanged(to + b.first, b.h, n)) {   // (the same handles: the draw keeps its descriptors)
                 s.bind_gen++;
+                (h.op == NOP_BIND_TEX ? st_bg_tex : h.op == NOP_BIND_SAMP ? st_bg_samp : st_bg_img)++;
                 s.tex_gen[b.stage] = s.bind_gen;
             }
             for (int k = 0; k < n; k++) to[b.first + k] = b.h[k];
@@ -1393,11 +1426,21 @@ void maybe_split(VkCommandBuffer& cmd) {
     static const int64_t every = getenv("RX_VK_CHUNK") ? atoll(getenv("RX_VK_CHUNK")) : 120;
     if (split_off || !rec_cur || every <= 0 || ++part_work < every || rec_parts + 1 >= kMaxParts || dump_on()) return;
     end_pass(cmd);
-    flush_ub_updates(cmd);
+    // (a part's end does not write the stream's uniform updates recorded so far into guest memory, nor start a new window
+    // of them: the submission's last part writes them all, as an unsplit submission does (finish_recording). Written at
+    // each part's end, the draws of the later parts that read those ranges from guest memory saw a state an unsplit
+    // submission never shows: on Intel, white blocks and haze at Kokiri, and a whole-screen white flash every 8 frames on
+    // the Arc 140V (issue 999). Measured on Intel only, so the default there; RX_VK_SPLIT_UBFLUSH=1: written at each part's
+    // end, as before, =0: at the last part's on any GPU)
+    static const bool part_flush = [] {
+        const char* e = getenv("RX_VK_SPLIT_UBFLUSH");
+        return e ? env_on("RX_VK_SPLIT_UBFLUSH") : dev.props.vendorID != 0x8086;
+    }();
+    if (part_flush) flush_ub_updates(cmd);
     memory_end_submission(cmd, rec_cur->part);
     full_barrier(cmd, "barrier (recording end)");
     submit_recording(*rec_cur, false);
-    ub_first_of_recording = ub_updates.size();
+    if (part_flush) ub_first_of_recording = ub_updates.size();
     Recording& r = begin_recording(rec_cur_value);
     memory_begin_submission();
     full_barrier(r.cmd, "barrier (recording start)");
@@ -2043,11 +2086,10 @@ void finish_recording(uint64_t value) {
 // RX_VK_REPLAY_PIN=0: off. (Only preferring the core, as the thread's ideal processor with every processor allowed, gained
 // nothing there: the pin is what helps)
 bool async_on();
-// (Windows only: on Linux a thread inherits the affinity of the one that makes it, and the back end's threads made on
-// first use inside a replay (the capture's copy helpers, the shader workers, the pool imports...) would all have stayed on
-// the reserved core. Windows gives a new thread the process's)
+// (On Linux pthread_create inherits the calling thread's affinity, so win32_posix.c's thread_self and thread_entry
+// apply process_affinity when a new thread registers via CreateThread or GetCurrentThread in SetThreadDescription,
+// keeping helper threads made on first use inside a replay off the reserved core, as Windows does)
 uint64_t replay_pin_mask() {
-#if defined(_WIN32)
     static const uint64_t m = [] {
         const char* e = getenv("RX_VK_REPLAY_PIN");
         const uint64_t r = !(e && atoi(e) == 0) && host->reserved_cpus ? host->reserved_cpus() : 0;
@@ -2055,9 +2097,6 @@ uint64_t replay_pin_mask() {
         return r;
     }();
     return m;
-#else
-    return 0;
-#endif
 }
 thread_local int replay_pin_depth = 0;
 thread_local DWORD_PTR replay_pin_prev = 0;
@@ -2546,6 +2585,11 @@ void invalidate(uint64_t gpu, uint64_t size) {
         bool ever = false;
         if (!off && (memory_writeback_value(host->gpu_guest(gpu), size, &ever), ever)) {
             memory_note_readback(host->gpu_guest(gpu), size);   // (PR 430: the CPU may write it back: memory_rb_refresh)
+            struct Waiting {   // (readback_send_on: what is held goes out now, and while this thread waits)
+                bool on;
+                explicit Waiting(bool w) : on(w) { if (on) readback_waiting++, queue_flush_for(FR_READBACK); }
+                ~Waiting() { if (on) readback_waiting--; }
+            } waiting(readback_send_on() && memory_writeback_value(host->gpu_guest(gpu), size, nullptr) > completed());
             static std::atomic<int64_t> calls{0}, waited{0}, ns{0};
             const auto w0 = std::chrono::steady_clock::now();
             bool w = false;
@@ -3119,6 +3163,15 @@ void log_frame_stats() {
             snprintf(libs, sizeof libs, "; %.2f library links tried (%.2f ms), %lld libraries the driver had and %lld cold in all; "
                      "%lld of the cold built by workers (%.0f ms)", (links - l_links) / 120.0, (link_ms - l_link_ms) / 120.0,
                      (long long)lib_hits, (long long)lib_cold, (long long)lib_built, lib_build_ms);
+        {
+            static int64_t p0, b0, u0, ss0, t0, sa0, i0;
+            logf("vk: a frame: %lld bind_gen moves: program %.1f, many-binds %.1f, ubo %.1f, ssbo %.1f, tex %.1f, samp %.1f, img %.1f",
+                 (long long)((st_bg_prog - p0) + (st_bg_bufs - b0) + (st_bg_ubo - u0) + (st_bg_ssbo - ss0) + (st_bg_tex - t0) +
+                             (st_bg_samp - sa0) + (st_bg_img - i0)),
+                 (st_bg_prog - p0) / 120.0, (st_bg_bufs - b0) / 120.0, (st_bg_ubo - u0) / 120.0, (st_bg_ssbo - ss0) / 120.0,
+                 (st_bg_tex - t0) / 120.0, (st_bg_samp - sa0) / 120.0, (st_bg_img - i0) / 120.0);
+            p0 = st_bg_prog, b0 = st_bg_bufs, u0 = st_bg_ubo, ss0 = st_bg_ssbo, t0 = st_bg_tex, sa0 = st_bg_samp, i0 = st_bg_img;
+        }
         logf("vk: a frame: %.0f draws kept their neighbour's descriptors (%.0f of them through other slots' registrations)",
              (draw_desc_reused() - l_reused) / 120.0, (draw_slotgen_saves() - l_saves) / 120.0);
         l_reused = draw_desc_reused(), l_saves = draw_slotgen_saves();
@@ -3152,13 +3205,23 @@ void log_frame_stats() {
         l_sync_b = sync_b, l_sync_c = sync_c, l_wb_b = wb_b;
         static int64_t l_d, l_sk, l_di, l_pass, l_sub, l_up, l_upb, l_bar, l_ubu, l_ubo, l_wait;
         logf("vk: %lld presents, %.1f fps; a frame: %.0f draws (%.0f skipped), %.0f dispatches, %.0f passes, %.0f "
-             "barriers, %.0f submits, %.1f uploads (%.1f MB), %.0f ub updates (%.0f overlays), GPU-bound wait %.1f ms; "
+             "barriers, %.0f submits, %.1f uploads (%.1f MB), %.0f ub updates (%.0f overlays), GPU-bound wait %.1f ms (recording slots only); "
              "%lld pipelines (%.0f ms), %lld programs (%lld failed), %zu textures (%llu MB)",
              (long long)presents, 120.0 / secs, (d - l_d) / 120.0, (sk - l_sk) / 120.0, (di - l_di) / 120.0,
              (passes - l_pass) / 120.0, (st_barriers - l_bar) / 120.0, (st_submits - l_sub) / 120.0,
              (up - l_up) / 120.0, (upb - l_upb) / 120.0 / 1048576.0, (st_ub_updates - l_ubu) / 120.0,
              (st_ub_overlays - l_ubo) / 120.0, (st_wait_ns - l_wait) / 120.0 / 1e6, (long long)pl, pms,
              (long long)tr, (long long)fl, texture_count(), (unsigned long long)(texture_bytes() >> 20));
+        {
+            const auto waits = gpu_wait_stats::counters.take();
+            const double scale = 1.0 / (120.0 * 1e6);
+            logf("vk: host time in GPU resource waits: %.2f ms a frame (fences %.2f, timelines %.2f, idle %.2f, queries %.2f; "
+                 "sum across threads, not frame time; excludes pacing and driver submit/present blocking)",
+                 (waits[gpu_wait_stats::kFence] + waits[gpu_wait_stats::kTimeline] + waits[gpu_wait_stats::kIdle] +
+                  waits[gpu_wait_stats::kQuery]) * scale,
+                 waits[gpu_wait_stats::kFence] * scale, waits[gpu_wait_stats::kTimeline] * scale,
+                 waits[gpu_wait_stats::kIdle] * scale, waits[gpu_wait_stats::kQuery] * scale);
+        }
         draw_skip_report(120.0);
         {   // (hookshot: the full barriers recorded and the ones left out as the second of two in a row, RX_VK_BARRIER_DEDUPE_OFF=1)
             static int64_t l_made, l_left;
@@ -3414,7 +3477,7 @@ std::shared_ptr<std::vector<uint8_t>> shot_pixels(uint64_t at_value, int64_t at_
     const uint8_t* const sm = (const uint8_t*)shot_maps[at_present & 1];
     return std::make_shared<std::vector<uint8_t>>(sm, sm + (size_t)kShotW * kShotH * 4);
 }
-void do_present(const nvn_tex* t, const int crop[4]) {
+void do_present(const nvn_tex* t, const int crop[4], float cover) {
     static PendingShot pending;
     // (hookshot) NVIDIA Reflex (vk_reflex.cpp): this frame's simulation ended, its submission starts; on the way out (after the
     // present) the driver's sleep until the next frame should begin. AMD Anti-Lag 2 (vk_antilag.cpp) waits there as well: the
@@ -3491,12 +3554,12 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         const bool fg_after = framegen_on() && tex && !fg_inline;
         interpolated = framegen_on() && tex && fg_inline &&
                        framegen_record(r.cmd, texture_view(tex, t, nullptr, VK_IMAGE_VIEW_TYPE_2D, ViewUse::Sample), sw,
-                                       sh, crop);
+                                       sh, crop, cover);
         texture_frame(completed());
         full_barrier(r.cmd);
         presents++;
         presents_now = presents;
-        wide_sides_tick();
+        wide_sides_tick(cover);
         if (presents == 1) hang_watch_start(), gpu_hang_watch_start();
         {   // (EvilBoyce, diagnostics) RX_VK_WATCH_CPU=<present>:<gpu address>[,...] (hex addresses): from that present on, the
             // CPU's writes to those 4 KB pages logged with the writer's stack (host page watch: 12 reports)
@@ -3582,7 +3645,7 @@ void do_present(const nvn_tex* t, const int crop[4]) {
             // (its slot is free again once the next submit's value is reached: that one comes after it)
             Recording& g = begin_recording(value + 1);
             interpolated = framegen_record(g.cmd, texture_view(tex, t, nullptr, VK_IMAGE_VIEW_TYPE_2D, ViewUse::Sample),
-                                           sw, sh, crop);
+                                           sw, sh, crop, cover);
             submit_recording(g, false);
         }
         // (frame generation at Off or Auto, where DLSS-G is not asked: its feature, if made, let go, vk_dlss.cpp)
@@ -4600,6 +4663,7 @@ struct Job {
     uint64_t queue = 0;         // (a submit's queue)
     int crop[4] = {0, 0, 0, 0};
     bool has_crop = false;
+    float cover = 0.0f;         // (a present's: ultrawide's loading cover as the game presented the frame, wide_cover_sample)
     nvn_prog prog;
     std::chrono::steady_clock::time_point queued;
 };
@@ -4667,7 +4731,7 @@ void replay_thread_main() {
         case JOB_PRESENT:   // (the frame's work whole before it is shown)
             drain(0);
             present_value = j.value;
-            do_present(j.has_tex ? &j.tex : nullptr, j.has_crop ? j.crop : nullptr);
+            do_present(j.has_tex ? &j.tex : nullptr, j.has_crop ? j.crop : nullptr, j.cover);
             break;
         case JOB_TEXTURE_RELEASED:   // (after the stopped work that may use it)
             drain(1);
@@ -4834,11 +4898,12 @@ void present(const nvn_tex* t, const int crop[4]) {
             drain(0);   // (the frame's work whole before it is shown)
             update_blocked();
             present_value = ++q_values;
-            return do_present(t, crop);
+            return do_present(t, crop, wide_cover_sample());
         }
-        return do_present(t, crop);
+        return do_present(t, crop, wide_cover_sample());
     }
     Job j{JOB_PRESENT};
+    j.cover = wide_cover_sample();
     if (t) j.tex = *t, j.has_tex = true;
     if (crop) std::memcpy(j.crop, crop, sizeof j.crop), j.has_crop = true;
     enqueue(std::move(j));
@@ -4966,6 +5031,11 @@ bool init_pools_make(const VkCommandPoolCreateInfo& pi) {
 bool replay_start() {
     menu_init();
     if (!memory_init() || !vma_init(instance_proc())) return false;
+    {   // (hookshot) the staging arenas on an empty device: see texture_staging_prewarm
+        extern void texture_staging_prewarm(int n);
+        static const int prewarm = getenv("RX_VK_STAGING_PREWARM") ? atoi(getenv("RX_VK_STAGING_PREWARM")) : 4;
+        if (prewarm > 0) texture_staging_prewarm(prewarm);
+    }
     VkSemaphoreTypeCreateInfo ti{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
     ti.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
     VkSemaphoreCreateInfo tsi{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -5055,6 +5125,7 @@ void fill_replay_table(MkwVkRenderer& t) {
         if (id == HOS_OPT_VOLUME) return opts.volume;
         if (id == HOS_OPT_MUTE_BACKGROUND) return opts.mute_background;
         if (id == HOS_OPT_DISABLE_CAMERA_CENTERING) return opts.disable_camera_centering;
+        if (id == HOS_OPT_AUTO_RUN) return opts.auto_run;   // (host/nn_hid.c and host/auto_run.h)
         if (id == HOS_OPT_TEXT_SIZE) return opts.text_size;
         if (id == HOS_OPT_CAMERA_SPEED) return opts.camera_speed;
         if (id == HOS_OPT_PROMPTS) return opts.prompts;

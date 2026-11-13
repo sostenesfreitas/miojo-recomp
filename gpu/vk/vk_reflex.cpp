@@ -308,7 +308,10 @@ void reflex_sleep() {
     }
     VkSemaphoreWaitInfo w{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO};
     w.semaphoreCount = 1, w.pSemaphores = &r.wake, w.pValues = &value;
-    vkWaitSemaphores(dev.device, &w, 100000000ull);   // (100 ms at most: a driver that never wakes it does not stop the game)
+    {
+        const gpu_wait_stats::Exclude pacing;   // (the driver schedules simulation; not completion of GPU resource work)
+        vkWaitSemaphores(dev.device, &w, 100000000ull);   // (100 ms at most: a driver that never wakes it does not stop the game)
+    }
     std::lock_guard lk(r.mu);
     if (!on() || generation != r.swapchain_generation || value != r.wake_value) return;
     mark(VK_LATENCY_MARKER_SIMULATION_START_NV);

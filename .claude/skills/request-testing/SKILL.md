@@ -29,6 +29,13 @@ python -I scripts/test_requests.py request --pr 2711 --summary "Keep 8 GB cards 
 - `--notes`: for the tester (shown by `show`, not on Discord), 1 to 4 lines they can follow without reading the
   whole PR: where in the game, what to compare, what counts as a pass, which log lines or numbers to copy. Before and
   after (main against the PR) when it is about speed.
+- `--commit <sha>`: choose another commit of this PR deliberately; otherwise the PR head is pinned. Use 7 to 40 hex
+  characters, preferably the full SHA. A non-head choice needs one extra GitHub comparison to resolve it and confirm
+  it is an ancestor of the PR head; request/update refuse an outside commit. Testers verify membership again from
+  the fetched PR before reviewing and building the pinned diff, including for requests posted during an outage.
+- GitHub uses `GITHUB_TOKEN` (or `GH_TOKEN`) when set. If it is unreachable or rate-limited, get the full SHA from
+  your PR checkout with `git rev-parse --verify "HEAD^{commit}"` and pass it as `request --commit <40-character-sha>`;
+  approval and head stay unknown until a lookup succeeds. Without that full SHA, retry when GitHub is available.
 - The rules of [CONTRIBUTING.md](../../../CONTRIBUTING.md) apply: no game files or anything made from them, no
   secrets or personal details.
 - The script refuses a second open request from you for the same PR and needs.
@@ -49,15 +56,26 @@ Tell the user the request ID (`T-XXXX`). If they want it followed up, check back
 ```
 python -I scripts/test_requests.py list --mine --all     (your requests, with who is testing and the results)
 python -I scripts/test_requests.py show T-XXXX --json
+python -I scripts/test_requests.py update T-XXXX --commit <new-sha>
 ```
 
 - Several people can test one request. `claims` lists who is testing it now (a claim clears by itself when its
-  tester stops renewing it); `results` has each tester's result (pass, fail or mixed) and `comment`, the link to their
-  comment on the PR. Read it:
+  tester stops renewing it); `results` has each tester's result (pass, fail or mixed), the `commit` they built when
+  recorded, and `comment`, the link to their comment on the PR. `current_results` contains only the results for the
+  card's current pin (all results on a legacy unpinned card). Use that view to decide who has already tested it; an
+  older entry in `results` must not stop a tester taking a card updated to a new commit. A moved PR head alone does
+  not update the card. Read each result:
   `gh api repos/NotRexed/Hookshot/issues/comments/<number after #issuecomment->` (a review:
   `gh api repos/NotRexed/Hookshot/pulls/<pr>/reviews/<number>`), or `gh pr view <pr> --comments`.
-- Report it to the user in a few lines: who tested, on what, the result, the numbers or the failure. If it failed,
-  continue with the failure on the PR (reproduce, fix, push), then close the request and ask again with a new one.
+- Report it to the user in a few lines: who tested, which commit, on what, the result, the numbers or the failure.
+  If it failed, continue with the failure on the PR (reproduce, fix, push), then `update T-XXXX --commit <new-sha>`
+  to request the new commit on the same card. Only the requester can update it. Earlier results stay in the record
+  but do not satisfy the new pin; current testers still finish the commit they were told at claim time.
+- `list` checks approval, PR state and heads on GitHub together (one call per PR, as before).
+  `show` checks one PR. A moved head blocks unattended claims; confirm the existing pin explicitly with the tester,
+  or use `update --commit <new-sha>` to request the new commit.
+- Testers must build the card's commit and name the actual build with `done --commit <built-sha>`; the default is the
+  commit recorded for their live claim, not a later head. Release and expiry clear that default; then name the SHA.
 
 ## 3. Close it
 
@@ -66,7 +84,8 @@ the PR is merged or closed: `python -I scripts/test_requests.py cancel T-XXXX`. 
 
 ## The messages
 
-Each message in the room is one line led by the ID and the action, so people can also type them in Element:
+Each message starts with the ID and action, so people can also type them in Element. Commit fields follow the original
+lines; an old client treats request fields as notes and ignores the extra claim/done lines:
 
 ```
 🧪 T-7KQ2 request: Keep 8 GB cards inside their memory budget
@@ -77,6 +96,11 @@ Needs: AMD RX 6000 or newer, Windows                (then the PR link, then the 
 🧪 T-7KQ2 done pass: https://github.com/NotRexed/Hookshot/pull/2711#issuecomment-123
 🧪 T-7KQ2 cancel
 ```
+
+New requests append `Commit: <sha>` and `Head: <sha>` after the PR link and any notes. New claims and results append
+the same fields, leaving their first line unchanged. `update` uses `🧪 T-7KQ2 update: <sha>` followed by `Head: <sha>`.
+The separate Discord relay needs support for these fields and updates; until then use `show` and the result comments
+for commit-aware status rather than relying on the card's colour.
 
 Errors: exit code 3 is a refusal with the reason (not yours, already done); `not signed in` or `no longer valid`:
 sign in again; `cannot reach`: the server is down, tell the user.

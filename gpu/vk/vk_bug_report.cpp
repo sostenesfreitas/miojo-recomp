@@ -42,8 +42,8 @@ namespace {
 // (a log is copied whole up to 10 MB, GitHub taking files up to 25 MB; a longer one keeps its first MB, where the start, the
 // device and the options are, and its last 9 MB, where the problem usually is: an hour of play logs about 10 MB)
 constexpr uint64_t kLogCap = 10ull << 20, kLogHead = 1ull << 20;
-constexpr const char* kIssues = "https://github.com/NotRexed/Hookshot/issues/new/choose";
-constexpr const char* kForm = "https://github.com/NotRexed/Hookshot/issues/new?template=1-game-problem.yml";
+constexpr const char* kIssues = "https://git.notrexed.dev/Hookshot/Hookshot/issues/new/choose";
+constexpr const char* kForm = "https://git.notrexed.dev/Hookshot/Hookshot/issues/new?template=1-game-problem.yml";
 // (the link's longest: a player who is not signed in is sent to GitHub's sign-in page with the whole address in it, encoded
 // once more, and that page failed (HTTP 400 or 500, or the address dropped) from links of 3500 characters of escaped text on,
 // signed in or not GitHub answers 414 from 8192; 2000 passes both, and every browser and chat program takes it)
@@ -107,8 +107,13 @@ bool make_dir(const std::string& path, std::string* why) {
     if (CreateDirectoryA(path.c_str(), nullptr)) return true;
     const DWORD e = GetLastError();   // (CreateDirectoryA sets this, not errno)
     if (e == ERROR_ALREADY_EXISTS) return true;
-    char text[256] = "";
-    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, e, 0, text, sizeof text, nullptr);
+    // (Windows' text as UTF-8 whatever the process's code page: FormatMessageA's follows it, UTF-8 in the game through its
+    // manifest (nx2/win_manifest.py) but the system's code page without it, as in a test's driver or before Windows 10 1903)
+    wchar_t wide[256];
+    const DWORD n = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, e, 0, wide,
+                                   sizeof wide / sizeof wide[0], nullptr);
+    char text[sizeof wide / sizeof wide[0] * 3 + 1];   // (a UTF-16 unit is at most three bytes of UTF-8)
+    text[n ? WideCharToMultiByte(CP_UTF8, 0, wide, (int)n, text, sizeof text - 1, nullptr, nullptr) : 0] = 0;
     *why = "Windows error " + std::to_string(e) + (text[0] ? ": " + trimmed(text) : std::string());
     return false;
 #else
@@ -549,8 +554,8 @@ std::string write(const Inputs& in) {
             (link_short ? std::string(" (the changes from the defaults in short: the switches' names did not fit in a link)") : "") +
             ":\n" + link + "\n";
     FILE* f = fopen((dir + "report.txt").c_str(), "wb");
-    const bool written = f && fwrite(text.data(), 1, text.size(), f) == text.size();
-    if (f) fclose(f);
+    bool written = f && fwrite(text.data(), 1, text.size(), f) == text.size();
+    if (f && fclose(f) != 0) written = false;   // (on a full disk the write only filled the stream's buffer: the close fails)
     if (!written) {
         std::lock_guard lk(report_mu);
         report_why = "report.txt could not be written in " + rel;

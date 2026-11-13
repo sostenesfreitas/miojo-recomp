@@ -89,6 +89,10 @@ int main(void) {
         for (int i = 0; i < 20000; i++) steps[i] = 0.5f;
         r = sound_clock(steps, 20000);
         CHECK(r > 0.999 && r < 1.001);
+        /* 30 fps: every job phase runs, with two 60ths per frame rather than half-speed sound timers. */
+        for (int i = 0; i < 20000; i++) steps[i] = 2.0f;
+        r = sound_clock(steps, 20000);
+        CHECK(r > 0.999 && r < 1.001 && runs(2.0f, 30, 1) == 30);
     }
     {   /* (a cap of 60 runs every phase: before any phase 0, and after a phase 0 that held the job at a cap above 60) */
         OotSoundGate g = OOT_SOUND_GATE_INIT;
@@ -111,6 +115,7 @@ int main(void) {
     CHECK(OURS(60.0f / 144.0f, 4.0f, 1) == 2 && OURS(60.0f / 90.0f, 4.0f, 1) == 3);
     CHECK(OURS(0.49f, 4.0f, 0) == 1 && OURS(0.06f, 4.0f, 0) == 0);   /* (a cap of 60: the game's count) */
     CHECK(OURS(1.6f, 4.0f, 1) == 6 && OURS(1.708f, 8.0f, 1) == 13);   /* (a slow frame: the game's count) */
+    CHECK(OURS(2.0f, 8.0f, 1) == 16);   /* (30 fps: the game's whole-step solver count) */
     CHECK(oot_solver_steps(3, bits(NAN), bits(4.0f), 1) == 3 && oot_solver_steps(0, bits(-1.0f), bits(4.0f), 1) == 0);
     CHECK(oot_solver_steps(1, bits(2.0f), bits(0.0f), 1) == 1);   /* (no steps a frame: the game's) */
     if (!fails) printf("PASS\n");

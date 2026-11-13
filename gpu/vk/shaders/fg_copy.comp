@@ -4,9 +4,25 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D src;
 layout(binding = 1, rgba8) uniform writeonly image2D dst;
-layout(push_constant) uniform P { ivec2 offset; ivec2 size; } pc;
+// (and ultrawide's loading cover, vk_framegen.cpp wide_sides: outside the middle 16:9, x0 to 1 - x0 of the width, darkened by
+// cover, 0 open to 1 closed, as fg_scale.comp does for a frame shown without frame generation: the pixel's light times
+// 1 - cover, through the picture's coding, sRGB or with pq the game's own HDR10 picture's SMPTE ST 2084)
+layout(push_constant) uniform P { ivec2 offset; ivec2 size; float x0; float cover; int pq; } pc;
+float to_light(float c) {
+    if (pc.pq == 0) return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+    const float p = pow(max(c, 0.0), 1.0 / 78.84375);
+    return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125);
+}
+float to_code(float l) {
+    if (pc.pq == 0) return l <= 0.0031308 ? l * 12.92 : 1.055 * pow(l, 1.0 / 2.4) - 0.055;
+    const float y = pow(max(l, 0.0), 0.1593017578125);
+    return pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), 78.84375);
+}
+vec3 dimmed(vec3 c, float k) { return vec3(to_code(to_light(c.r) * k), to_code(to_light(c.g) * k), to_code(to_light(c.b) * k)); }
 void main() {
     const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(g, pc.size))) return;
-    imageStore(dst, g, vec4(texelFetch(src, g + pc.offset, 0).rgb, 1.0));
+    const vec3 c = texelFetch(src, g + pc.offset, 0).rgb;
+    const float u = (float(g.x) + 0.5) / float(pc.size.x);
+    imageStore(dst, g, vec4(pc.cover > 0.0 && (u < pc.x0 || u > 1.0 - pc.x0) ? dimmed(c, 1.0 - pc.cover) : c, 1.0));
 }

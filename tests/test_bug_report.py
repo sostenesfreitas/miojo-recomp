@@ -19,8 +19,11 @@ Checked:
 - started from a terminal (no log file), the run before's log is the game folder's hookshot_log.txt, and without a frame
   the report says it has no picture; a picture that comes after the report went without it is removed again; a second
   report in the same second gets a folder of its own; a folder that cannot be made is reported with the system's reason;
+  a report.txt a full disk cuts off at its close is not shown as saved (where /dev/full is there);
 - the wiring: the Gameplay tab's row and its help, the press, the picture asked of shot_ask (its own image, copied from the
-  game's frame without the menu), the host's map line.
+  game's frame without the menu), the host's map line, Windows' reason for a folder that cannot be made asked for as wide
+  text and turned into UTF-8 (FormatMessageA's text follows the process's code page, which only the game's manifest makes
+  UTF-8).
 
 python -I -B tests/test_bug_report.py [--cxx g++]
 """
@@ -39,6 +42,7 @@ DRIVER = r'''#include "vk_bug_report.h"
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <thread>
 using namespace mkwvk::bug_report;
@@ -57,6 +61,12 @@ static bool ask(const char* path, uint64_t ticket) {   // (vk_replay.cpp's part:
 static std::string late_path;   // (the late picture: asked for, and written only once the report has gone without it)
 static uint64_t late_ticket;
 static bool ask_late(const char* path, uint64_t ticket) { late_path = path, late_ticket = ticket; return true; }
+static bool ask_full(const char* path, uint64_t) {   // (a full disk: report.txt, written next, goes to /dev/full)
+    std::string dir = path;
+    dir.resize(dir.find_last_of("/\\") + 1);
+    std::filesystem::create_symlink("/dev/full", dir + "report.txt");
+    return false;
+}
 static std::atomic<bool> held{true};   // (the menu's way: the report is still saving until the driver lets its picture ask go)
 static bool ask_held(const char*, uint64_t) {   // (no frame comes: the report goes without a picture)
     while (held.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -88,6 +98,7 @@ int main(int argc, char** argv) {
     in.picture_wait_ms = mode == "picture" ? 30000 : 300;   // (a picture ends the wait as soon as it is written)
     if (mode == "picture") in.ask_picture = ask;
     if (mode == "late") in.ask_picture = ask_late;
+    if (mode == "full") in.ask_picture = ask_full;
     if (mode == "start") {   // (the menu's way: on a thread of its own, its state read each frame)
         in.ask_picture = ask_held;
         CHECK(start(in));
@@ -147,11 +158,17 @@ def check(ok, why):
 
 
 def run(exe, mode, game, current, home, user, windows):
-    out = subprocess.run([str(exe), mode, game, current, home, user, "1" if windows else "0"], capture_output=True,
-                         text=True, encoding="utf-8", timeout=60)
+    out = subprocess.run([str(exe), mode, game, current, home, user, "1" if windows else "0"], capture_output=True, timeout=60)
+    # (what the driver says is what the menu would log and show: UTF-8, the system's own words in it too. Read as bytes, so
+    # that a line in another encoding is named here instead of failing in subprocess's reader thread)
+    try:
+        said, errors = out.stdout.decode("utf-8"), out.stderr.decode("utf-8", errors="replace")
+    except UnicodeDecodeError as e:
+        bad = out.stdout[:e.start].count(b"\n")
+        raise SystemExit("bug report: the driver (%s) said a line that is not UTF-8: %r" % (mode, out.stdout.splitlines()[bad]))
     if out.returncode:
-        raise SystemExit("bug report driver (%s) failed:\n%s%s" % (mode, out.stdout, out.stderr))
-    lines = out.stdout.splitlines()
+        raise SystemExit("bug report driver (%s) failed:\n%s%s" % (mode, said, errors))
+    lines = said.splitlines()
     return [ln[7:] for ln in lines if ln.startswith("FOLDER ")], lines
 
 
@@ -204,6 +221,13 @@ def wiring():
     report = (ROOT / "gpu" / "vk" / "vk_bug_report.cpp").read_text(encoding="utf-8")
     listed = re.search(r"prefixes\[\] = \{([^}]*)\}", report[report.index("std::string switches("):]).group(1)
     check(listed == allowed, "the report lists switches by %s, hookshot_env.txt takes %s" % (listed, allowed))
+    # (Windows' reason for a folder that cannot be made is in the system's language: asked for wide and turned into UTF-8,
+    # never the process's code page's bytes (FormatMessageA's). The game's manifest makes that code page UTF-8; step 7's
+    # driver is built without it, and sees the difference only on a Windows whose message is not ASCII)
+    made = report[report.index("bool make_dir("):]
+    made = re.sub(r"//[^\n]*", "", made[:made.index("\n}\n")])
+    check("FormatMessageW(" in made and "WideCharToMultiByte(CP_UTF8," in made and "FormatMessageA" not in made,
+          "make_dir's reason on Windows is not Windows' wide text turned into UTF-8")
     form = (ROOT / ".github" / "ISSUE_TEMPLATE" / "1-game-problem.yml").read_text(encoding="utf-8")
     for label in ("Hookshot version", "Where in the game", "Graphics card and driver version", "CPU, RAM and operating system",
                   "Changes from the defaults", "hookshot_log.txt", "Screenshots or video"):
@@ -288,7 +312,7 @@ def main():
         logs = section("hookshot_log.txt")
         check("hookshot v2.0.14" in logs and "CRASH: exception 0xc0000005" in logs, "the logs' section: " + logs)
         check("picture.png" in section("Screenshots or video"), "the picture is not named")
-        link = report[report.index("https://github.com/NotRexed/Hookshot/issues/new?template=1-game-problem.yml"):].split()[0]
+        link = report[report.index("https://git.notrexed.dev/Hookshot/Hookshot/issues/new?template=1-game-problem.yml"):].split()[0]
         for part in ("&version=v2.1.0-rc.3-39-gbdfe09c%20%28source%20763271ad%29", "&gpu=NVIDIA%20GeForce%20RTX%204090",
                      "&where=HyruleField_Child%20%28child%29", "&system=", "&settings=Upscaler", "HOS_HEADLESS", "RX_VK_MENU_SCRIPT"):
             check(part in link, "the link does not fill in " + part)
@@ -346,7 +370,7 @@ def main():
         # switches there are; report.txt lists them all
         folders, out = run(exe, "many", game, str(now_log), home, user, windows)
         report = (game_path / folders[0] / "report.txt").read_text(encoding="utf-8")
-        link = report[report.index("https://github.com/NotRexed/Hookshot/issues/new?template=1-game-problem.yml"):].split()[0]
+        link = report[report.index("https://git.notrexed.dev/Hookshot/Hookshot/issues/new?template=1-game-problem.yml"):].split()[0]
         check(len(link) <= 2000, "the link with 98 switches: %d characters" % len(link))
         settings = hw.section(report, "Changes from the defaults")
         listed = [ln for ln in settings.splitlines() if re.match(r"[A-Z_][A-Z0-9_]*=", ln)]
@@ -378,14 +402,20 @@ def main():
         check(hw.section(report, "Where in the game").startswith("LostWoods_Child (child)"), "the map after a NUL is lost")
 
         # 7. a report's folder that cannot be made (bug-reports is a file here): the system's reason, GetLastError's on Windows
+        # (in the system's language there: run() has read it as UTF-8)
         blocked = tmp / "blocked" / "Hookshot"
         blocked.mkdir(parents=True)
         (blocked / "bug-reports").write_text("a file where the folder would go", encoding="utf-8")
         folders, out = run(exe, "plain", str(blocked) + os.sep, str(now_log), home, user, windows)
         said = next((ln for ln in out if "menu: bug report not written:" in ln), "")
         check(folders == [""] and ("(Windows error " if windows else "(Not a directory)") in said, "no folder: %s" % out)
+        # 8. report.txt cut off by a full disk (its write succeeds into the stream's buffer, the close fails): not saved
+        if Path("/dev/full").exists():
+            folders, out = run(exe, "full", game, str(now_log), home, user, windows)
+            said = next((ln for ln in out if "menu: bug report not written:" in ln), "")
+            check(folders == [""] and "report.txt could not be written" in said, "a report on a full disk: %s" % out)
     print("bug report: ok (report.txt as the issue form, both logs redacted, the picture, the long log, the terminal start, "
-          "switch values, NUL bytes, the folder's reason)")
+          "switch values, NUL bytes, the folder's reason, a full disk)")
 
 
 if __name__ == "__main__":

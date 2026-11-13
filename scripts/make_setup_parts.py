@@ -71,7 +71,7 @@ def main():
         sys.exit("not a Hookshot Builder package folder: %s" % root)
     # (the parts live in one release of their own, named by their checksum: a part that did not change is not uploaded again, and a
     # release itself holds only HookshotBuilder.exe (the setup) and the list it reads)
-    base = (a.base or "https://github.com/NotRexed/Hookshot/releases/download/builder-parts").rstrip("/")
+    base = (a.base or "https://git.notrexed.dev/Hookshot/Hookshot/releases/download/builder-parts").rstrip("/")
     os.makedirs(a.out, exist_ok=True)
     with open(os.path.join(root, "tools", "version.txt"), "w", newline="\n") as f:
         f.write(a.tag + "\n")

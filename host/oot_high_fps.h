@@ -1,4 +1,4 @@
-/* (hookshot) Two places in the game that need whole 60 fps frames, under a Frame rate cap above 60, where the frame step is the
+/* (hookshot) Two places in the game that need whole 60 fps frames, under a Frame rate cap other than 60, where the frame step is the
    frame's own time (host/nn_vi.c, hos_frame_seconds_bits: 0.5 at 120 fps). nx2/oot_patches.py hooks them; host/oot_high_fps.c
    holds the state. At a cap of 60 (no frame time given: timed 0) both return what the game computed, so nothing changes.
 

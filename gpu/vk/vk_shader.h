@@ -158,6 +158,8 @@ void log_program_stages(const NvnState& s, const char* why);
 Shader::AttributeType attribute_type_of(uint32_t vattr);
 Shader::TextureType handle_texture_type(uint32_t handle);
 void shader_stats(int64_t* translated, int64_t* failed);
+/// The networks this card left out on purpose (not among the failed)
+int64_t shader_left_out();
 double shader_translate_ms();
 void program_released(const nvn_prog* p);
 /// (hookshot) A guest program as the game makes it (nvnProgramSetShaders), before any draw (vk_programs.cpp): its stages' code keys

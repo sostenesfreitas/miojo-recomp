@@ -6,7 +6,7 @@ body:
     attributes:
       value: |
         Thanks for testing. Before you start:
-        - **Check the [newest release](https://github.com/NotRexed/Hookshot/releases/latest) first.** Every release includes all the fixes before it, and yours may already be fixed.
+        - **Check the [newest release](https://git.notrexed.dev/Hookshot/Hookshot/releases/latest) first.** Every release includes all the fixes before it, and yours may already be fixed.
         - **Search the open issues.** If yours is there, add your details to it instead.
         - English, please.
         - **Never attach game files**: no hookshot.exe, image.bin, the `.bin` caches, romfs or exefs files, keys or saves.

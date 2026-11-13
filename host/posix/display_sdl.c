@@ -109,6 +109,7 @@ static void keys_update(void) {
         v[VK_MENU] = v[VK_LMENU] || v[VK_RMENU];
         const uint32_t b = hos_sdl_mouse_buttons();
         v[VK_LBUTTON] = (b & 1) != 0, v[VK_MBUTTON] = (b & 2) != 0, v[VK_RBUTTON] = (b & 4) != 0;
+        v[VK_XBUTTON1] = (b & 8) != 0, v[VK_XBUTTON2] = (b & 16) != 0;   /* (SDL's X1 and X2: Mouse 4 and 5) */
     }
     for (int i = 0; i < 256; i++) hos_posix_keys[i] = v[i];
 }

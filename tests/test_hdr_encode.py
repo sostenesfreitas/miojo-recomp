@@ -8,7 +8,8 @@ peak is not cut flat (no peak limit for it). And its push constants are the ones
 Also what the HDR paths around it need, from the sources: Native HDR is told by the format the game presents alone, its
 picture never blitted from its image, and at 100% contrast (exposure 1) the pass writes the game's PQ codes as they are.
 While the game presents PQ (present_native_pq), NVIDIA DLSS is made for HDR colour and given the scene as linear light,
-unclamped (dlss_prep.comp's kSquare and kColorMax), its picture taken back linear (dlss_out.comp's kSquare off).
+unclamped (dlss_prep.comp's kSquare and kColorMax), its picture taken back linear (dlss_out.comp's kSquare off). AMD FSR 4
+and AMD FSR 3.1 on the chain take it the same way.
 
     python -I -B tests/test_hdr_encode.py [--glslang glslangValidator]
 """
@@ -171,6 +172,23 @@ def check_paths():
         sys.exit("FAIL: the RX_VK_SHOT_FX shot scales Native HDR's picture as SDR")
     check_dlss()
     check_fsr4()
+    check_fsr3()
+
+
+def check_fsr3():
+    # (AMD FSR 3.1 on the chain the same way: while the game presents PQ it takes the chain's linear light (its passes are built
+    # for HDR colour and work out their own exposure), a change of that starts a new history, and the engine tells the chain)
+    fsr3 = (VK / "vk_fsr3.cpp").read_text(encoding="utf-8")
+    prepare = function(fsr3, "int chain_prepare(")
+    if "const bool hdr = hdr_allowed && present_native_pq.load(std::memory_order_relaxed);" not in prepare or \
+            'env_switch("RX_VK_FSR3_HDR")' not in prepare or "opts.hdr" in prepare or "c.hdr_changed = true" not in prepare:
+        sys.exit("FAIL: FSR 3.1 on the chain does not take HDR colour while the game presents PQ (or keeps its history when that changes)")
+    if "ai.reset = f.reset || c.hdr_changed;" not in function(fsr3, "bool chain_evaluate("):
+        sys.exit("FAIL: FSR 3.1 on the chain keeps its history across a change of colour encoding")
+    if ".hdr = chain_hdr," not in fsr3 or "bool chain_hdr() { return chain_state().hdr; }" not in fsr3:
+        sys.exit("FAIL: vk_fsr3.cpp's chain engine does not tell the chain it takes HDR colour")
+    if "-DFFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT=1" not in (ROOT / "scripts" / "fsr3_shaders.py").read_text(encoding="utf-8"):
+        sys.exit("FAIL: FSR 3.1's passes are not built for HDR colour")
 
 
 def check_fsr4():

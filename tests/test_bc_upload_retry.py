@@ -16,13 +16,13 @@ VK = ROOT / "gpu" / "vk"
 def main():
     tex = (VK / "vk_texture.cpp").read_text(encoding="utf-8")
     header = (VK / "vk_texture.h").read_text(encoding="utf-8")
-    if "uint64_t bc_retry_frame = 0;" not in header:
+    if "uint64_t retry_frame = 0;" not in header:
         raise SystemExit("a texture has no frame to try a failed BC3 upload again from")
-    failed = tex[tex.index("} else if (tex->bc) {"):]
-    failed = failed[:failed.index("} else {")]
-    if "tex->uploaded = true" in failed or "tex->bc_retry_frame = frame_no + 30;" not in failed:
+    failed = tex[tex.index("} else if (upload_never(*tex)) {"):]
+    failed = failed[failed.index("} else {"):failed.index("    return tex;\n}")]
+    if "tex->uploaded = true" in failed or "tex->retry_frame = frame_no + 30;" not in failed or "BC3 texture" not in failed:
         raise SystemExit("a BC3 texture whose upload failed is marked uploaded (drawn as noise, never made again)")
-    if "if (tex->bc && !tex->uploaded && tex->bc_retry_frame > frame_no) return tex;" not in tex:
+    if "if (tex->retry_frame > frame_no) return tex;" not in tex:
         raise SystemExit("a failed BC3 upload is tried again every submission (it stages the whole ASTC source)")
     upload = tex[tex.index("bool upload_astc_gpu(Texture& tex, uint64_t total, const Ranges* dirty) {"):]
     upload = upload[:upload.index("\n}\n")]

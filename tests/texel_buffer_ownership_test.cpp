@@ -73,7 +73,14 @@ Host* host = &host_value;
 int view_nvn_format(const nvn_tex*, const nvn_view* v) { return v ? v->format : 42; }
 struct Format { VkFormat format; };
 Format vk_format(int nf) {
-    return {nf == 42 ? VK_FORMAT_R32_UINT : nf == 43 ? VK_FORMAT_R32_SFLOAT : VK_FORMAT_UNDEFINED};
+    return {nf == 42 ? VK_FORMAT_R32_UINT : nf == 43 ? VK_FORMAT_R32_SFLOAT :
+            nf == 44 ? VK_FORMAT_R32G32B32_SFLOAT : VK_FORMAT_UNDEFINED};
+}
+VkFormatProperties format_props(VkFormat f) {   // (format 44: the device has no texel buffers of it)
+    VkFormatProperties fp{};
+    if (f != VK_FORMAT_R32G32B32_SFLOAT)
+        fp.bufferFeatures = VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT | VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT;
+    return fp;
 }
 int nvn_block_size(int, int* w, int* h) { *w = *h = 1; return 4; }
 void texture_gpu_wrote(uint64_t gpu, uint64_t size) { writes++; written_gpu = gpu; written_size = size; }
@@ -149,6 +156,9 @@ void run(const std::string& test) {
     } else if (test == "clamped-range") {
         dev.props.limits.maxTexelBufferElements = 8; auto v = get(tex); assert(v && live.at(v).range == 32);
         tex.d.width = 32; assert(get(tex) == v && creates == 1);
+    } else if (test == "unsupported") {
+        nvn_view v{44}; assert(!get(tex, &v)); assert(!get(tex, &v, true));
+        assert(creates == 0 && lookups == 0 && writes == 0);
     } else if (test == "invalid") {
         assert(!texel_buffer_view(nullptr, nullptr, false));
         tex.gpu = 0; assert(!get(tex)); tex.gpu = 0x1000;

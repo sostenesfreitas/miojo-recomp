@@ -37,6 +37,8 @@ struct Texture {
     std::vector<uint8_t> tail_bound;            // (per layer, or [0] with SINGLE_MIPTAIL: its mip tail has memory)
     std::vector<VkDeviceMemory> sparse_chunks;  // (the device memory blocks are taken from, 64 MB at a time)
     VkDeviceSize chunk_used = 0;
+    struct SparseFree { VkDeviceMemory memory; VkDeviceSize offset, size; };
+    std::vector<SparseFree> sparse_free;        // (taken for binds that failed: given out again before the chunks)
     VkSparseImageMemoryRequirements sparse_req{};
     uint32_t sparse_type = 0;
     VkDeviceSize sparse_align = 0;
@@ -45,6 +47,7 @@ struct Texture {
     bool astc = false;        // ASTC blocks decoded into RGBA8 (block_w x block_h)
     bool bc = false;          // (and kept as BC3 or BC7: big ones, re-encoded on the GPU after decoding; vk_texture.cpp)
     bool bc_resized = false;  // (hookshot-amd: its BC image is a resized copy, uneven block levels on AMD; vk_texture.cpp)
+    uint8_t bc1 = 0;          // (hookshot: of a BC3 image, 0 not decided yet, 1 kept BC3 (alpha seen), 2 BC1: every block opaque)
     int block_w = 1, block_h = 1, bpb = 0;   // the storage's blocks
     // the game's texture
     uint64_t gpu = 0, guest = 0, guest_size = 0;   // storage (GPU address, guest address, bytes)
@@ -54,7 +57,7 @@ struct Texture {
     // contents
     bool uploaded = false;    // from guest memory, as of upload_gen
     uint32_t upload_gen = 0;
-    uint64_t bc_retry_frame = 0;   // (hookshot) a BC3 image whose upload failed: tried again from this frame (vk_texture.cpp)
+    uint64_t retry_frame = 0;   // (hookshot) an image whose upload failed: tried again from this frame (vk_texture.cpp)
     uint64_t map_sig = 0;     // (a texture in a virtual pool: its pages' mapping when last uploaded)
     std::vector<uint64_t> page_map;   // (and each 64 KB page's guest address then: what a remap changed)
     struct Run { uint64_t off, guest, n; };   // (and its storage as runs of contiguous guest memory)
@@ -211,6 +214,8 @@ uint64_t texture_bytes();
 /// A full memory barrier (all commands, all accesses): what separates dependent work for now
 /// (why: its label in RX_VK_PASS_TIMING's barrier lines)
 void full_barrier(VkCommandBuffer cmd, const char* why = "barrier (other)");
+/// (hookshot) RX_VK_GAME_ORDER: the game's own barriers order back-to-back passes and dispatches (on NVIDIA by default; vk_texture.cpp)
+bool game_order();
 /// Full barriers recorded and left out (RX_VK_BARRIER_DEDUPE_OFF=1: none), since the start
 void barrier_stats(int64_t* made, int64_t* left_out);
 /// (hookshot) Set around a draw's sampled-texture lookups (vk_draw.cpp): a new ASTC texture there may wait for a later frame

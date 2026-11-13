@@ -17,7 +17,44 @@ const float kSteps = 255.0;
 // (side 1) or black (side 2), with a short soft edge; vk_framegen.cpp wide_sides. Side 3: this dispatch makes the picture at
 // 1/8 for side 1's blur instead, into dst; side 1 then reads it as small)
 layout(binding = 2) uniform sampler2D small;
-layout(push_constant) uniform P { int mode; float sharp; float x0; float x1; int side; } pc;
+layout(push_constant) uniform P { int mode; float sharp; float x0; float x1; int side; float cover; } pc;
+// (and the loading cover between two areas, which the game draws in that middle too: pc.cover, 0 open to 1 closed, closes the
+// sides by as much. The game blends its cover over the picture's light, before the picture is coded for the screen (measured:
+// under a half-open cover a pixel's light is the same fraction of its light without it at every brightness, its code is
+// not), so the sides' light is scaled the same way: the code to light, times 1 - cover, back to the code)
+#ifdef FG_SCALE_PQ
+// (SMPTE ST 2084, light as a fraction of its 10,000 nits)
+float to_light(float c) {
+    const float p = pow(max(c, 0.0), 1.0 / 78.84375);
+    return pow(max(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125);
+}
+float to_code(float l) {
+    const float y = pow(max(l, 0.0), 0.1593017578125);
+    return pow((0.8359375 + 18.8515625 * y) / (1.0 + 18.6875 * y), 78.84375);
+}
+#else
+// (sRGB)
+float to_light(float c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
+float to_code(float l) { return l <= 0.0031308 ? l * 12.92 : 1.055 * pow(l, 1.0 / 2.4) - 0.055; }
+#endif
+vec3 dimmed(vec3 c, float k) { return vec3(to_code(to_light(c.r) * k), to_code(to_light(c.g) * k), to_code(to_light(c.b) * k)); }
+// (a pixel of the picture outside the middle is darkened as it is read, before the filter and the sharpen, so the seam stays
+// where the game's cover ends at any window size and no side pixel's light is filtered into the middle)
+vec3 pixel(ivec2 t, ivec2 size) {
+    t = clamp(t, ivec2(0), size - 1);
+    const vec3 c = texelFetch(src, t, 0).rgb;
+    const float u = (float(t.x) + 0.5) / float(size.x);
+    return pc.cover > 0.0 && (u < pc.x0 || u > pc.x1) ? dimmed(c, 1.0 - pc.cover) : c;
+}
+// the picture at uv through the linear filter: the sampler's, or while the cover shows the same four pixels, each darkened first
+vec3 bilinear(vec2 uv) {
+    if (pc.cover <= 0.0) return textureLod(src, uv, 0.0).rgb;
+    const ivec2 size = textureSize(src, 0);
+    const vec2 p = uv * vec2(size) - 0.5;
+    const ivec2 b = ivec2(floor(p));
+    const vec2 f = p - vec2(b);
+    return mix(mix(pixel(b, size), pixel(b + ivec2(1, 0), size), f.x), mix(pixel(b + ivec2(0, 1), size), pixel(b + ivec2(1, 1), size), f.x), f.y);
+}
 const float PI = 3.14159265;
 float lanczos2(float x) {
     x = abs(x);
@@ -33,7 +70,7 @@ float catmull(float x) {
     return 0.0;
 }
 vec3 filtered(vec2 uv) {
-    if (pc.mode == 0) return textureLod(src, uv, 0.0).rgb;
+    if (pc.mode == 0) return bilinear(uv);
     const vec2 size = vec2(textureSize(src, 0));
     const vec2 p = uv * size - 0.5;
     const ivec2 b = ivec2(floor(p));
@@ -44,7 +81,7 @@ vec3 filtered(vec2 uv) {
         for (int x = -1; x <= 2; x++) {
             const vec2 d = vec2(x, y) - f;
             const float w = pc.mode == 2 ? lanczos2(d.x) * lanczos2(d.y) : catmull(d.x) * catmull(d.y);
-            sum += w * texelFetch(src, clamp(b + ivec2(x, y), ivec2(0), ivec2(size) - 1), 0).rgb;
+            sum += w * pixel(b + ivec2(x, y), ivec2(size));
             weight += w;
         }
     return sum / weight;
@@ -80,7 +117,8 @@ vec3 side_fill(vec2 uv) {
             sum += w * textureLod(small, clamp(uv + vec2(i, y) * step, vec2(0.0), vec2(1.0)), 0.0).rgb;
             weight += w;
         }
-    return sum / weight * 0.75;
+    const vec3 fill = sum / weight * 0.75;
+    return pc.cover > 0.0 ? dimmed(fill, 1.0 - pc.cover) : fill;   // (under the loading cover, as pixel())
 }
 // (and less than one of the destination's steps of noise over it, kSteps: the dim, smooth sides showed 8-bit steps as contour lines)
 float dither(ivec2 g) { return (fract(52.9829189 * fract(0.06711056 * float(g.x) + 0.00583715 * float(g.y))) - 0.5) / kSteps; }
@@ -113,8 +151,8 @@ void main() {
         // pixel away, a fraction of a picture pixel when the window is larger (0.53 for 2048 x 1152 on a 3840 x 2160
         // screen): what the slider did then hung on the window's size, not on the picture.
         const vec2 e = max(1.0 / vec2(textureSize(src, 0)), 1.0 / vec2(d));
-        const vec3 n = textureLod(src, uv + vec2(0.0, -e.y), 0.0).rgb, s = textureLod(src, uv + vec2(0.0, e.y), 0.0).rgb;
-        const vec3 w = textureLod(src, uv + vec2(-e.x, 0.0), 0.0).rgb, r = textureLod(src, uv + vec2(e.x, 0.0), 0.0).rgb;
+        const vec3 n = bilinear(uv + vec2(0.0, -e.y)), s = bilinear(uv + vec2(0.0, e.y));
+        const vec3 w = bilinear(uv + vec2(-e.x, 0.0)), r = bilinear(uv + vec2(e.x, 0.0));
         c = sharpen(c, n, s, w, r, pc.sharp);
     }
     if (outside > 0.0) c = mix(c, pc.side == 2 ? vec3(0.0) : side_fill(uv) + dither(g), outside);

@@ -264,7 +264,8 @@ Code parse_code(const uint8_t* ctl, const std::vector<uint8_t>& area) {
         }
     }
     Shader::Ampere::native_matrix_multiply = dev.native_mma && !graphics && native_key;
-    {   // (super build) RX_VK_LOWER_SKIP=<key prefix,...>: those programs left unlowered, as if they did not lower (a bisection)
+    {   // RX_VK_LOWER_SKIP=<key prefix,...>: those programs left unlowered, as if they did not lower (a bisection). It is in
+        // translator_stamp, so a cache made with it set is kept apart from one made without
         static const std::string skip = getenv("RX_VK_LOWER_SKIP") ? getenv("RX_VK_LOWER_SKIP") : "";
         if (!skip.empty()) {
             char hex[24];
@@ -577,6 +578,9 @@ Shader::Profile make_profile() {
     p.support_demote_to_helper_invocation = true;
     p.support_int64_atomics = true;
     p.support_float32_atomic_add = dev.float_atomic_add;   // (one OpAtomicFAddEXT for a float add, not a compare-exchange loop: vk_main.cpp)
+    // (8/16-bit global stores written as bytes/halves through narrow views, RX_VK_NATIVE_NARROW=0: the compare-exchange loop on the
+    // word as before; an RX_VK_NATIVE* switch, so the program cache stamp follows it)
+    p.support_native_narrow_global_store = !(getenv("RX_VK_NATIVE_NARROW") && atoi(getenv("RX_VK_NATIVE_NARROW")) == 0);
     p.support_derivative_control = true;
     p.support_native_ndc = false;   // (the vertex stage converts NVN's -1..1 depth: RuntimeInfo::convert_depth_mode)
     p.support_scaled_attributes = false;   // (*_UI2F / *_I2F read as integers, converted in the shader: R32 has no scaled format)
@@ -592,8 +596,10 @@ Shader::Profile make_profile() {
     // (the lanes the broadcast fallbacks walk: all of the host's when a warp may be larger than the guest's)
     p.max_subgroup_size = p.warp_size_potentially_larger_than_guest ? dev.subgroup_max : 32;
     // (Lichii #273) AMD's Windows compiler gets fragment-stage subgroup shuffles wrong (a basket in Link's house drew as a white
-    // blob): broadcasts and selects there instead
-    p.has_broken_spirv_fragment_shuffle = dev.driver_id == VK_DRIVER_ID_AMD_PROPRIETARY;
+    // blob): broadcasts and selects there instead. RADV too (seen so far on RDNA1, other RADV GPUs untested): objects flickered
+    // between right, speckled and glowing white while moving (the ladder of Link's house) until the fallback was on
+    p.has_broken_spirv_fragment_shuffle =
+        dev.driver_id == VK_DRIVER_ID_AMD_PROPRIETARY || dev.driver_id == VK_DRIVER_ID_MESA_RADV;
     // (RX_VK_FRAG_SHUFFLE_FALLBACK=0 or 1, a test: the fragment stages' shuffles native or through broadcasts, whatever the
     // driver; in the cache's stamp)
     if (const char* e = getenv("RX_VK_FRAG_SHUFFLE_FALLBACK")) p.has_broken_spirv_fragment_shuffle = e[0] == '1';
@@ -964,6 +970,11 @@ const std::vector<Code>& codes_of(const NvnState& s) {
 }
 
 std::atomic<int64_t> st_translated, st_failed, st_translate_ns;
+std::atomic<int64_t> st_left_out;   // (the networks a card leaves out on purpose: not failures)
+/// A network this card leaves out on purpose (translate_into): upscale_stub draws in its place, so it is not a failure
+struct LeftOut : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 
 } // namespace
 
@@ -1215,7 +1226,7 @@ uint64_t translator_stamp() {
     // the programs already cached. tests/test_program_stamp_knobs.py checks the translator's switches against this list)
     for (char** e = _environ; e && *e; e++)
         for (const char* pre : {"RX_VK_MMA", "RX_VK_NATIVE", "RX_VK_NAN", "RX_VK_TASK_CAP", "RX_VK_NETWORK", "RX_VK_GP_", "RX_VK_FOLLOW", "RX_VK_NO_FOLLOW", "RX_VK_NO_F16", "RX_VK_SHARED", "RX_VK_MESH", "RX_VK_NO_INVARIANT", "RX_VK_MARKERS",
-                                "RX_VK_NO_CBUF_LOAD_RULE", "RX_VK_PTR_SPLIT_FALLBACK", "RX_VK_ALL_GLOBAL_PROGS", "RX_VK_NO_EXTREGS", "RX_VK_NO_DRAW_PARAMS", "RX_VK_MISS_LOG", "RX_VK_BLOCK_PROBE", "EDEN_"})
+                                "RX_VK_NO_CBUF_LOAD_RULE", "RX_VK_PTR_SPLIT_FALLBACK", "RX_VK_ALL_GLOBAL_PROGS", "RX_VK_NO_EXTREGS", "RX_VK_NO_DRAW_PARAMS", "RX_VK_MISS_LOG", "RX_VK_BLOCK_PROBE", "RX_VK_LOWER_SKIP", "EDEN_"})
             if (!strncmp(*e, pre, strlen(pre))) add(*e, strlen(*e));
     return h;
 }
@@ -1289,7 +1300,7 @@ void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* 
                     at = e == std::string::npos ? keep.size() : e + 1;
                 }
                 if ((!kept_one && (Shader::Backend::SPIRV::mma_software || dev.props.vendorID != 0x10DE)) || env_on("RX_VK_NO_F16") || !dev.vk12.shaderFloat16)
-                    throw std::runtime_error("a network left out on this card");
+                    throw LeftOut("a network left out on this card");
             }
             const std::vector<uint32_t> spirv = Shader::Backend::SPIRV::EmitSPIRV(profile_pinned(), rt, t->program, bindings);
             // (EvilOOT) RX_VK_DUMP_SPV=<folder>: the SPIR-V of the programs RX_VK_MISS_LOG_PROG names (all: unset), for spirv-val
@@ -1405,6 +1416,17 @@ void translate_into(Program& p, const NvnState& s, const Code* vsc, const Code* 
         ptr_diag_log(p.key, csc ? "compute" : fsc ? "graphics" : "vertex");
         if (seed_capture) *seed_capture = std::move(kept);
         else program_cache_save(p, kept);
+    } catch (const LeftOut& e) {   // (counted and said apart from the failures: they would use up the 30 lines below)
+        p.failed = true;
+        if (!forced || forced->want.empty()) {   // (not an answer seed_compute tries)
+            st_left_out++;
+            static std::atomic<bool> said;
+            if (!said.exchange(true))
+                logf("vk: the game's networks this card does not run are left out (the first: program %016llx), not an error: a "
+                     "linear upscale takes their place", (unsigned long long)p.key);
+            else if (getenv("RX_VK_IR"))
+                logf("vk: program %016llx: %s", (unsigned long long)p.key, e.what());
+        }
     } catch (const std::exception& e) {
         p.failed = true;
         const bool trial = forced && !forced->want.empty();   // (an answer seed_compute tries: it may well not translate)
@@ -1789,11 +1811,13 @@ uint64_t compute_code_key(const NvnState& s) {
 bool prog_same(int kind, uint64_t serial, uint64_t stages, uint64_t bind, uint64_t reg, uint64_t ub, int nvattr,
                const uint32_t* vattr, const uint8_t* ct, int ckind, uint64_t cserial, uint64_t cstages, uint64_t cbind,
                uint64_t creg, uint64_t cub, int cnvattr, const uint32_t* cvattr, const uint8_t* cct) {
-    if (kind != ckind || serial != cserial || stages != cstages || bind != cbind || reg != creg || ub != cub ||
-        nvattr != cnvattr)
+    if (kind != ckind || serial != cserial || stages != cstages || bind != cbind || reg != creg || ub != cub)
         return false;
-    for (int i = 0; i < 16; i++)
-        if (vattr[i] != cvattr[i]) return false;
+    if (kind != 2 /*Mesh*/) {
+        if (nvattr != cnvattr) return false;
+        for (int i = 0; i < 16; i++)
+            if (vattr[i] != cvattr[i]) return false;
+    }
     for (int i = 0; i < 8; i++)
         if (ct[i] != cct[i]) return false;
     return true;
@@ -1839,7 +1863,6 @@ thread_local ProgFast prog_fast[2];
 
 const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t color_types[8]) {
     if (!s.has_prog) return nullptr;
-    if (kind == ProgramKind::Mesh) return mesh_program_for(s, color_types);
     {   // (the HDR tone mapper changed: the picks before it name the other variant of the scene mapping programs)
         static thread_local int tonemap_seen = -1;
         const int tonemap_now = scene_tonemap_on() ? 1 : 0;
@@ -1850,6 +1873,7 @@ const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t co
         }
     }
     const bool compute = kind == ProgramKind::Compute;
+    const bool mesh = kind == ProgramKind::Mesh;
     static int64_t st_hit, st_none, st_differ, st_calls, st_by_tex;   // (logged now and then: how the cache does)
     if (++st_calls % 200000 == 0)
         logf("vk: program picks: %lld kept (%lld by the last picks' textures, a uniform buffer bound since), %lld new, %lld with other textures (of %lld)",
@@ -1876,7 +1900,10 @@ const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t co
             return st_hit++, f.p;
         }
     }
-    const uint64_t key = (compute ? 0x5EED : pick_inputs(s, color_types)) * 1099511628211ull ^ s.prog.serial;
+    uint64_t ct_bits = 0;
+    if (!compute) std::memcpy(&ct_bits, color_types, 8);
+    const uint64_t in_hash = compute ? 0x5EEDull : mesh ? (0x4E58ull * 1099511628211ull ^ ct_bits) : pick_inputs(s, color_types);
+    const uint64_t key = (in_hash * 1099511628211ull ^ stages) * 1099511628211ull ^ ((uint64_t)kind << 56 | s.prog.serial);
     Pick& pk = picks[key];
     auto keep = [&](const Program* p) {
         if (!p || !p->ready.load(std::memory_order_acquire) || p->failed) return p;
@@ -1903,7 +1930,7 @@ const Program* program_for(const NvnState& s, ProgramKind kind, const uint8_t co
     } else {
         st_none++;
     }
-    const Program* picked = program_pick(s, kind, color_types);
+    const Program* picked = mesh ? mesh_program_for(s, color_types) : program_pick(s, kind, color_types);
     if (picked && picked->ready.load(std::memory_order_acquire) && !picked->failed) {
         pk.p = picked;
         answer_handles(s, *picked, pk.handles);
@@ -2440,6 +2467,9 @@ void shader_stats(int64_t* translated, int64_t* failed) {
     static int64_t hits_logged;
     if (st_cache_hits.load() >= hits_logged + 500) logf("vk: %lld programs from the program cache", (long long)(hits_logged = st_cache_hits.load()));
     *translated = st_translated, *failed = st_failed;
+}
+int64_t shader_left_out() {
+    return st_left_out;
 }
 double shader_translate_ms() {
     return st_translate_ns.load() / 1e6;

@@ -15,6 +15,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import json
 import sys
 import threading
 import time
@@ -498,7 +499,7 @@ class Builder(tk.Tk):
         self.title("Hookshot Builder")
         self.apply_scale()
         self.apply_theme()
-        self.minsize(self.px(760), self.px(520))
+        self.minsize(self.px(760), min(self.px(520), self.winfo_screenheight() * 2 // 3))   # (scaled up, no taller than the screen)
         move_old_ngx_sdk()   # (before the settings are read: it may record the license in them)
         self.cfg = load_config()
         self.proc = None
@@ -521,6 +522,7 @@ class Builder(tk.Tk):
         self.status = tk.StringVar()
         self.kind = tk.StringVar(value=self.cfg.get("kind", "nup"))
         self.nup = tk.StringVar(value=self.cfg.get("nup", ""))
+        self.save_choice = tk.StringVar(value="")   # (Bring in a save: "" a new game, else "<program>|<profile>")
         self.romfs = tk.StringVar(value=self.cfg.get("romfs", ""))
         self.exefs = tk.StringVar(value=self.cfg.get("exefs", ""))
         self.out = tk.StringVar(value=self.cfg.get("out", os.path.expanduser("~/Games/Hookshot")))
@@ -701,13 +703,14 @@ class Builder(tk.Tk):
                 ("Hs%s.pbar" % style, {"side": "left", "sticky": "ns"})]})])
             s.configure(style + ".Horizontal.TProgressbar", thickness=h, background=GLASS)
 
-        # the log's scroll bar: a thumb on the log, no arrows
-        s.layout("Log.Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
-            ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nsew"})]})])
-        s.configure("Log.Vertical.TScrollbar", troughcolor=LOG, background=RAISED_HOVER, bordercolor=LOG, lightcolor=RAISED_HOVER,
-                    darkcolor=RAISED_HOVER, gripcount=0, arrowsize=px(10))
-        s.map("Log.Vertical.TScrollbar", background=[("active", LINE_STRONG)], lightcolor=[("active", LINE_STRONG)],
-              darkcolor=[("active", LINE_STRONG)])
+        # the scroll bars: a thumb, no arrows, on the log and on a page that scrolls
+        for name, trough in (("Log", LOG), ("Page", PAGE)):
+            s.layout(name + ".Vertical.TScrollbar", [("Vertical.Scrollbar.trough", {"sticky": "ns", "children": [
+                ("Vertical.Scrollbar.thumb", {"expand": "1", "sticky": "nsew"})]})])
+            s.configure(name + ".Vertical.TScrollbar", troughcolor=trough, background=RAISED_HOVER, bordercolor=trough,
+                        lightcolor=RAISED_HOVER, darkcolor=RAISED_HOVER, gripcount=0, arrowsize=px(10))
+            s.map(name + ".Vertical.TScrollbar", background=[("active", LINE_STRONG)], lightcolor=[("active", LINE_STRONG)],
+                  darkcolor=[("active", LINE_STRONG)])
 
         # Play's triangle, and the hookshot of the window's head
         self.photo("play", px(11) + px(10), px(14), GO,
@@ -844,8 +847,12 @@ class Builder(tk.Tk):
         page = self.page = ttk.Frame(self)
         page.pack(fill="both", expand=True)
         self.header(page, step=0)
-        f = ttk.Frame(page, padding=(px(48), px(6), px(48), px(28)))
-        f.pack(fill="both", expand=True)
+        # (the page scrolls and the row with Build stays in view, as on Windows since #750: on a short screen, the Steam
+        # Deck's 800 px or a scaled one, the rows above pushed the button out of the window)
+        bottom = ttk.Frame(page, padding=(px(48), 0, px(48), px(28)))
+        bottom.pack(side="bottom", fill="x")
+        bottom.columnconfigure(0, weight=1)
+        f, scrolls = self.scrolled(page, padding=(px(48), px(6), px(48), px(18)))
         f.columnconfigure(0, weight=1, minsize=px(580))   # (every page px(800) wide: the window keeps its width, as on Windows)
         f.columnconfigure(1, minsize=px(20))
         f.columnconfigure(2, minsize=px(200))
@@ -875,8 +882,16 @@ class Builder(tk.Tk):
         else:
             self.path_row(paths, 0, "romfs", self.romfs, lambda: self.pick_dir(self.romfs))
             self.path_row(paths, 1, "exefs", self.exefs, lambda: self.pick_dir(self.exefs))
-        ttk.Label(f, textvariable=self.check_text, style="Small.TLabel", wraplength=px(800)).grid(
-            row=6, column=0, columnspan=3, sticky="w", pady=(px(6), 0))
+        under = ttk.Frame(f)
+        under.grid(row=6, column=0, columnspan=3, sticky="we")
+        under.columnconfigure(0, weight=1)
+        ttk.Label(under, textvariable=self.check_text, style="Small.TLabel", wraplength=px(800)).grid(
+            row=0, column=0, sticky="w", pady=(px(6), 0))
+        if not hasattr(self, "found_saves"):
+            self.find_saves()
+        if self.found_saves:
+            self.save_rows(under).grid(row=1, column=0, sticky="we")
+        self.form_page = self.page
 
         self.section(f, "Install the game to", 7, top=18)
         self.section(f, "Game language", 7, column=2, top=18)
@@ -907,11 +922,10 @@ class Builder(tk.Tk):
         ttk.Label(options, text="For NVIDIA RTX graphics cards. NVIDIA's files stay on this PC: never share a game folder built with them.",
                   style="Small.TLabel", wraplength=px(540)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
 
-        f.rowconfigure(10, weight=1, minsize=px(18))
-        ttk.Label(f, textvariable=self.status, style="Status.TLabel", wraplength=px(800)).grid(
-            row=11, column=0, columnspan=3, sticky="w", pady=(0, px(12)))
-        foot = ttk.Frame(f)
-        foot.grid(row=12, column=0, columnspan=3, sticky="we")
+        ttk.Label(bottom, textvariable=self.status, style="Status.TLabel", wraplength=px(800)).grid(
+            row=0, column=0, sticky="w", pady=(0, px(12)))
+        foot = ttk.Frame(bottom)
+        foot.grid(row=1, column=0, sticky="we")
         foot.columnconfigure(1, weight=1)
         self.space_bar = ttk.Progressbar(foot, maximum=1.0, length=px(160), style="Go.Horizontal.TProgressbar")
         self.space_bar.grid(row=0, column=0)
@@ -923,6 +937,137 @@ class Builder(tk.Tk):
         self.out.trace_add("write", lambda *a: self.update_space())
         self.update_space()
         self.apply_mode()
+        scrolls()
+
+    def scrolled(self, parent, padding):
+        """a page's body that scrolls when the window is shorter than it: by the wheel or trackpad, the scroll bar (shown only
+        then), or dragging the page by touch. It asks for its height, but no more than the screen has room for. Returns the
+        body and what to call once it is filled"""
+        px = self.px
+        canvas = tk.Canvas(parent, background=PAGE, highlightthickness=0, borderwidth=0, yscrollincrement=px(16))
+        canvas.pack(fill="both", expand=True)
+        body = ttk.Frame(canvas, padding=padding)
+        item = canvas.create_window(0, 0, window=body, anchor="nw")
+        bar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview, style="Page.Vertical.TScrollbar")
+
+        def moved(first, last):
+            bar.set(first, last)
+            if float(first) <= 0 and float(last) >= 1:
+                bar.place_forget()
+            else:   # (over the page's right margin: the body keeps its width)
+                bar.place(in_=canvas, relx=1, x=-px(8), rely=0, relheight=1, anchor="ne")
+
+        def fit(event=None):
+            room = self.winfo_screenheight() - (parent.winfo_reqheight() - canvas.winfo_reqheight()) - px(80)
+            canvas.configure(width=body.winfo_reqwidth(), height=max(px(120), min(body.winfo_reqheight(), room)),
+                             scrollregion=(0, 0, body.winfo_reqwidth(), body.winfo_reqheight()))
+
+        def wheel(event):
+            w = event.widget
+            if isinstance(w, str) or not (str(w) + ".").startswith(str(canvas) + ".") or w.winfo_class() == "TCombobox":
+                return
+            canvas.yview_scroll(-3 if event.num == 4 or (event.num != 5 and event.delta > 0) else 3, "units")
+
+        def drag(w):
+            w.bind("<ButtonPress-1>", lambda e: canvas.scan_mark(0, e.y_root), add="+")
+            w.bind("<B1-Motion>", lambda e: canvas.scan_dragto(0, e.y_root, gain=1), add="+")
+
+        def done():
+            drag(canvas)
+            todo = [body]
+            while todo:
+                w = todo.pop()
+                if w.winfo_class() in ("TFrame", "TLabel"):
+                    drag(w)
+                todo += w.winfo_children()
+            self.update_idletasks()
+            fit()
+
+        canvas.configure(yscrollcommand=moved)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(item, width=e.width))
+        body.bind("<Configure>", fit)
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_all(sequence, wheel)
+        canvas.bind("<Destroy>", lambda e: [self.unbind_all(s) for s in ("<MouseWheel>", "<Button-4>", "<Button-5>")])
+        return body, done
+
+    def saves_tool(self, *args):
+        """scripts/oot_saves.py with these arguments and --json: its answer, or {"error": why}"""
+        try:
+            out = subprocess.run([sys.executable, "-I", os.path.join(ROOT, "scripts", "oot_saves.py")] + list(args) + ["--json"],
+                                 capture_output=True, text=True, timeout=120).stdout.strip().splitlines()
+            return json.loads(out[-1]) if out and out[-1].startswith("{") else {"error": "the save tool gave no answer"}
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            return {"error": str(e)}
+
+    def find_saves(self):
+        """The saves on this PC a build can start from (an emulator's or another port's), found once in the background;
+        the form is drawn again when they are known"""
+        def look():
+            doc = self.saves_tool("list")
+            found = []
+            for source in doc.get("sources", []):
+                programs = [n for n in source["display"].split(" / ") if n != "NX2navi"]
+                # (emulators that share one save folder, Eden's forks: one row, its programs said under it; one port unnamed)
+                shown = ("another PC port" if source["name"] == "nx2navi" else "your emulator's save" if len(programs) > 1
+                         else programs[0])
+                who = "%s and %s keep their saves here · " % (", ".join(programs[:-1]), programs[-1]) if len(programs) > 1 else ""
+                for save in source["saves"]:
+                    slots = ["%s, saved %s" % (x["slot"].replace("slot_", "Slot "), x["saved"].replace("T", " ")[:16]) if x["saved"]
+                             else x["slot"].replace("slot_", "Slot ") for x in save["slots"]]
+                    found.append({"name": source["name"], "shown": shown, "profile": save["profile"], "path": save["path"],
+                                  "about": who + " · ".join(slots), "waiting": bool(save.get("pending"))})
+            self.found_saves = found
+
+        def wait():   # (Tk is the main thread's alone: the form is drawn again from here, not from the thread)
+            if worker.is_alive():
+                self.after(150, wait)
+            elif self.found_saves and self.on_form():
+                self.show_form()
+        self.found_saves = []
+        worker = threading.Thread(target=look, daemon=True)
+        worker.start()
+        self.after(150, wait)
+
+    def on_form(self):
+        """the form is the page shown (a redraw then cannot take the place of a build or the launcher)"""
+        return self.page is not None and self.page is getattr(self, "form_page", None) and bool(self.page.winfo_exists())
+
+    def save_rows(self, parent):
+        """Bring in a save: Start a new game, then each save found; one of them is copied into the game folder after the build"""
+        px = self.px
+        box = ttk.Frame(parent)
+        self.section(box, "Bring in a save", 0, top=18)
+        card = ttk.Frame(box, style="Card.TFrame", padding=px(5))
+        card.grid(row=1, column=0, sticky="we")
+        box.columnconfigure(0, weight=1)
+        card.columnconfigure(0, weight=1)
+        ttk.Radiobutton(card, text="Start a new game", value="", variable=self.save_choice, style="Row.TRadiobutton",
+                        cursor="hand2").grid(row=0, column=0, sticky="we")
+        for i, save in enumerate(self.found_saves):
+            tk.Frame(card, height=max(1, px(1)), background=GLASS_LINE).grid(row=2 * i + 1, column=0, sticky="we", padx=px(12))
+            text = "Continue from %s\n%s" % (save["shown"], save["about"])
+            if save["waiting"]:
+                text += "\nStart that game and quit it from its menu once first: it still has a save waiting."
+            b = ttk.Radiobutton(card, text=text, value="%s|%s" % (save["name"], save["profile"]), variable=self.save_choice,
+                                style="Row.TRadiobutton", cursor="hand2")
+            b.grid(row=2 * i + 2, column=0, sticky="we")
+            if save["waiting"]:
+                b.state(["disabled"])
+        return box
+
+    def bring_in_save(self):
+        """After a build: the chosen save copied into Hookshot's save folder (its own save backed up first). What to say"""
+        choice = self.save_choice.get()
+        if not choice:
+            return ""
+        name, profile = choice.split("|", 1)
+        shown = next((x["shown"] for x in self.found_saves if x["name"] == name and x["profile"] == profile), name)
+        doc = self.saves_tool("import", name, "--profile", profile)
+        if "error" in doc:
+            return "your save from %s was not brought in: %s" % (shown, doc["error"])
+        self.save_choice.set("")   # (once: a later update keeps the game's own save)
+        return "your save from %s is in the game (%d slot(s))" % (shown, len(doc["slots"]))
 
     def share_row(self, parent, folder, wrap=None):
         """Save my pipeline list (share_pipeline_list), and under it what it did"""
@@ -1422,7 +1567,8 @@ class Builder(tk.Tk):
         elif line.startswith("@@error "):
             self.error = line[8:]
         elif line.startswith(make_game.NOT_PREPARED):
-            self.shaders_later = True
+            # (left to the first start; or, the GPU driver having stopped responding, each shader to when it is first drawn)
+            self.shaders_later = "first start" if line.endswith(make_game.FIRST_START) else "first drawn"
         if hasattr(self, "log"):
             self.add_log(line + "\n")
             self.log.see("end")
@@ -1441,8 +1587,13 @@ class Builder(tk.Tk):
                 text += ", compiled in %d:%02d" % (int(compiled) // 60, int(compiled) % 60)
                 if previous > 0:
                     text += " · last time %d:%02d" % (int(previous) // 3600, int(previous) // 60 % 60)
-            if self.shaders_later:
+            if self.shaders_later == "first start":
                 text += " · the shaders are prepared at its first start"
+            elif self.shaders_later:
+                text += " · the shaders were not prepared: each is built when the game first draws it"
+            said = self.bring_in_save()
+            if said:
+                text += " · " + said
             self.stage_text.set(text)
             self.bar.configure(value=1.0)
             try:

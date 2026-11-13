@@ -21,6 +21,8 @@ RUN_ALL_ARGS = ["--cc", "gcc"]
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nx2"))
 import oot_patches  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # (tests/srccut.py: python -I leaves this folder off the path)
+from srccut import block   # noqa: E402
 
 # (two of the four in one file, with a return in a branch and a function after them that is none of them, nor is the one whose
 # name only starts like one; the level-2 pair in another file, as chunks.py may cut them)
@@ -57,16 +59,6 @@ void f_82ea2220(Ctx *__restrict A64_NOESC c) {
     return;
 }
 '''
-
-
-def block(text, marker):
-    start = text.index(marker)
-    end = text.index("{", start) + 1
-    depth = 1
-    while depth:
-        depth += (text[end] == "{") - (text[end] == "}")
-        end += 1
-    return text[start:end]
 
 
 def check(cond, what):

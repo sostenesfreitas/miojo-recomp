@@ -100,6 +100,8 @@ class NupCacheTests(unittest.TestCase):
                         path.parent.mkdir(parents=True, exist_ok=True)
                         path.write_bytes(data)
                 return
+            if "nx2/unpack.py" in cmd:   # (an extracted dump's modules: the authored ones are not compressed)
+                return
             if "nx2/lift.py" in cmd:
                 raise Prepared
             self.fail("Unexpected build subprocess: %r" % cmd)
@@ -337,6 +339,40 @@ class NupCacheTests(unittest.TestCase):
         self.assertIn("The package did not contain a romfs folder.", self.output)
         self.assertEqual(self.cache(), before)
         self.assertFalse((self.out / ".game").exists())
+
+    def extracted_dump(self, supported, payload):
+        dump = self.root / "dump"
+        (dump / "exefs").mkdir(parents=True)
+        (dump / "exefs" / "main").write_bytes(module_bytes(supported=supported, payload=payload))
+        (dump / "romfs").mkdir()
+        (dump / "romfs" / "dump-only.txt").write_bytes(b"authored dump asset")
+        return dump / "romfs", dump / "exefs"
+
+    def test_refused_extracted_dump_leaves_the_nup_cache(self):
+        before = self.cache()
+        with self.assertRaises(SystemExit) as result:
+            self.run_to_lift(None, folders=self.extracted_dump(False, b"other version module"))
+        self.assertEqual(result.exception.code, 1)
+        self.assertIn("This is build 01234567. Hookshot supports build %s." % make_game.BUILD_ID, self.output)
+        self.assertEqual(self.cache(), before)
+        # (the .nup read before is still what the folder holds: reused, and its supported code reaches the lift)
+        with self.assertRaises(Prepared):
+            self.run_to_lift(self.old_nup)
+        self.assertEqual(self.extractions, [])
+        self.assertIn("reading it again is skipped", self.output)
+        self.assertEqual((self.work / "exefs" / "main").read_bytes(), before[".hookshot_exefs/main"])
+
+    def test_accepted_extracted_dump_drops_the_nup_stamp(self):
+        romfs, exefs = self.extracted_dump(True, b"authored dump module")
+        with self.assertRaises(Prepared):
+            self.run_to_lift(None, folders=(romfs, exefs))
+        self.assertEqual((self.out / ".hookshot_exefs" / "main").read_bytes(), (exefs / "main").read_bytes())
+        self.assertFalse(self.marker.exists())
+        # (the old .nup chosen again: the folder holds the dump's code now, so the .nup is read again)
+        with self.assertRaises(Prepared):
+            self.run_to_lift(self.old_nup)
+        self.assertEqual(self.extractions, [self.old_nup])
+        self.assertEqual((self.out / ".hookshot_exefs" / "main").read_bytes(), module_bytes())
 
     def test_reparse_cache_is_rejected_before_extraction_or_replacement(self):
         before = self.cache()

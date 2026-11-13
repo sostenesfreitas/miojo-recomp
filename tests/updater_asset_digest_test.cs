@@ -120,7 +120,8 @@ namespace DigestFixture
         public static string Hash(byte[] bytes) => "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
         public void Release(byte[] served, object? digest, bool zip = false, bool list = true,
-                            bool primaryFails = false, bool length = true, bool unusedBadZip = false, bool omitDigest = false)
+                            bool primaryFails = false, bool length = true, bool unusedBadZip = false, bool omitDigest = false,
+                            string? sumText = null)
         {
             var assets = new List<Dictionary<string, object?>>();
             Dictionary<string, object?> Asset(string name, object? hash) => new()
@@ -132,20 +133,28 @@ namespace DigestFixture
             if (omitDigest) assets[0].Remove("digest");
             if (list) assets.Add(new() { ["name"] = "hookshot-setup.txt" });
             if (unusedBadZip) assets.Add(Asset("HookshotBuilder.zip", null));
+            if (sumText != null)   // (git.notrexed.dev: the digest as <asset>.sha256 beside the file)
+                assets.Add(new() { ["name"] = (zip ? "HookshotBuilder.zip" : "HookshotBuilder.exe") + ".sha256",
+                                   ["browser_download_url"] = "https://fixture.invalid/sum" });
             var json = JsonSerializer.SerializeToUtf8Bytes(new { tag_name = "v9.9.9", assets });
             Handler.Respond = request =>
             {
-                if (request.RequestUri!.Host == "api.github.com")
+                if (Api(request))
                 {
                     MetadataRequests++;
                     return new(HttpStatusCode.OK) { Content = new ByteArrayContent(json) };
                 }
-                if (primaryFails && request.RequestUri.AbsolutePath == "/browser")
+                if (sumText != null && request.RequestUri!.AbsolutePath == "/sum")
+                    return new(HttpStatusCode.OK) { Content = new ByteArrayContent(Encoding.UTF8.GetBytes(sumText)) };
+                if (primaryFails && request.RequestUri!.AbsolutePath == "/browser")
                     return new(HttpStatusCode.ServiceUnavailable);
                 HttpContent content = length ? new ByteArrayContent(served) : new StreamContent(new Bytes(served));
                 return new(HttpStatusCode.OK) { Content = content };
             };
         }
+
+        public static bool Api(HttpRequestMessage r) =>
+            r.RequestUri!.Host == "git.notrexed.dev" && r.RequestUri.AbsolutePath.StartsWith("/api/v1/", StringComparison.Ordinal);
 
         public Task SetupRun() => Updater.RunLatestSetup(Window, Array.Empty<string>());
         public async Task<string> FolderRun()
@@ -280,6 +289,18 @@ namespace DigestFixture
                 await s.SetupRun(); Check(s.Starts.Count == 1, "Valid setup not handed off.");
                 Check(File.ReadAllBytes(s.Setup).SequenceEqual(s.Good), "Valid payload changed."); s.NoPartial();
             });
+            await Case("sha256-file-digest", async s =>
+            {
+                s.Release(s.Good, null, omitDigest: true, sumText: State.Hash(s.Good)[7..] + "  HookshotBuilder.exe" + (char)10);
+                await s.SetupRun(); Check(s.Starts.Count == 1, "Setup with its .sha256 beside it not handed off.");
+                Check(File.ReadAllBytes(s.Setup).SequenceEqual(s.Good), "Valid payload changed."); s.NoPartial();
+            });
+            await Case("sha256-file-mismatch", async s =>
+            {
+                s.Release(s.Good, null, omitDigest: true, sumText: new string('0', 64) + "  HookshotBuilder.exe" + (char)10);
+                Check(await Rejects<InvalidDataException>(s.SetupRun), "A .sha256 that does not match was accepted.");
+                s.NoUse(); s.NoPartial();
+            });
             await Case("valid-folder-setup-unused-bad-zip", async s =>
             {
                 s.Release(s.Good, State.Hash(s.Good), unusedBadZip: true);
@@ -313,7 +334,7 @@ namespace DigestFixture
             {
                 s.Release(s.Good, State.Hash(s.Good));
                 var normal = s.Handler.Respond;
-                s.Handler.Respond = r => r.RequestUri!.Host == "api.github.com" ? normal(r) : new(HttpStatusCode.Forbidden);
+                s.Handler.Respond = r => State.Api(r) ? normal(r) : new(HttpStatusCode.Forbidden);
                 Check(await Rejects<HttpRequestException>(s.SetupRun), "HTTP403 accepted.");
                 Check(s.Handler.Requests.Count == 2, "Authorization failure retried/fell back."); s.NoUse();
             });

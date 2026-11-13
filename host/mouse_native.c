@@ -139,6 +139,11 @@ void hos_mouse_camera(uint64_t cam) {
         target_ok = 0;
         return;
     }
+    int32_t dx, dy;
+    if (!hos_mouse_take(&dx, &dy)) {   /* (the mouse released: the view is the game's, and the next captured frame starts from it) */
+        target_ok = 0;
+        return;
+    }
     if (InterlockedExchange64(&last_camera, (LONG64)cam) != (LONG64)cam && cameras_seen++ < 8)
         hos_log("mouse native: the player camera at %#llx turns with the mouse", (unsigned long long)cam);
     /* (a new camera, or one the game's own stick turned: its angles now are where the mouse starts from) */
@@ -148,8 +153,7 @@ void hos_mouse_camera(uint64_t cam) {
         target_pitch = getf(cam + PITCH_AT);
         target_ok = 1;
     }
-    int32_t dx, dy;
-    if (hos_mouse_take(&dx, &dy) && (dx || dy)) {
+    if (dx || dy) {
         const double k = DEG_PER_COUNT * hos_mouse_sens;
         target_yaw -= (float)(dx * k);
         target_pitch += (float)((invert_y() ? -dy : dy) * k);

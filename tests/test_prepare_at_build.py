@@ -63,6 +63,19 @@ class PrepareShadersTests(unittest.TestCase):
         self.assertEqual(code, 5)
         self.assertIn("exit status 5", not_prepared(lines)[0])
 
+    def test_a_stalled_driver_is_not_promised_for_the_first_start(self):
+        # (exit 4: the watchdog left hookshot_prepare_skipped, and the game's starts skip the preparation while it is there)
+        code, lines = prepared(stub("import sys; print('@@stage shaders Preparing shaders'); sys.exit(4)"))
+        self.assertEqual(code, 4)
+        line = not_prepared(lines)
+        self.assertEqual(len(line), 1)
+        self.assertIn("(the GPU driver stopped responding)", line[0])
+        self.assertNotIn("first start", line[0])
+        self.assertIn("first draws it", line[0])
+        self.assertIn("the next build or update tries the preparation again", line[0])
+        for stand_in, code in (("import sys; sys.exit(3)", 3), ("import sys; sys.exit(5)", 5)):
+            self.assertTrue(not_prepared(prepared(stub(stand_in))[1])[0].endswith(make_game.FIRST_START), code)
+
     def test_a_silent_hang_is_stopped_and_not_a_failed_build(self):
         # (prints its stage, then nothing: as a driver deadlock or a crash dialog left open. silence is 15 minutes in a build)
         started = time.monotonic()
@@ -189,6 +202,32 @@ class LinuxBuilderTests(unittest.TestCase):
         w, _ = self.window()
         on_line(w, "the shaders were not prepared now (no usable Vulkan here): the game prepares them at its first start")
         self.assertTrue(w.shaders_later)
+
+    def test_a_stalled_driver_is_not_promised_for_the_first_start(self):
+        on_line = builder_method("on_line")
+        for line, first in (("the shaders were not prepared now (no usable Vulkan here): " + make_game.FIRST_START, True),
+                            ("the shaders were not prepared now (the GPU driver stopped responding): the game builds each "
+                             "shader when it first draws it, and the next build or update tries the preparation again", False)):
+            w, text = self.window()
+            on_line(w, line)
+            self.assertEqual(w.shaders_later == "first start", first)
+
+
+class PyBuilderTests(unittest.TestCase):
+    def test_a_stalled_driver_is_not_promised_for_the_first_start(self):
+        # (builder/py's window: the shaders row's line, from its own copy of the not-prepared line's pattern)
+        tree = ast.parse((ROOT / "builder" / "py" / "hookshot_builder" / "window.py").read_text(encoding="utf-8"))
+        nodes = [n for n in tree.body if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") in ("NOT_PREPARED", "FIRST_START")
+                 or isinstance(n, ast.FunctionDef) and n.name == "shaders_note"]
+        namespace = {"re": re}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "window.py", "exec"), namespace)
+        note = lambda line: namespace["shaders_note"](namespace["NOT_PREPARED"].match(line))
+        self.assertEqual(note("the shaders were not prepared now (no usable Vulkan here): " + make_game.FIRST_START),
+                         "Left to the game's first start: no usable Vulkan here")
+        stalled = note("the shaders were not prepared now (the GPU driver stopped responding): the game builds each shader when it "
+                       "first draws it, and the next build or update tries the preparation again")
+        self.assertNotIn("first start", stalled)
+        self.assertIn("the GPU driver stopped responding", stalled)
 
 
 if __name__ == "__main__":
