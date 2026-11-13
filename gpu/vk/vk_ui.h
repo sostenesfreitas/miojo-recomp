@@ -24,13 +24,14 @@ inline ImU32 alpha(ImU32 c, float k) {
 }
 
 // ---- the palette ----
-constexpr ImU32 kInk = rgba(240, 232, 214), kInkBright = rgba(255, 250, 240), kSoft = rgba(214, 204, 184), kDim = rgba(168, 156, 136),
-                kGold = rgba(222, 152, 40), kGoldHi = rgba(238, 168, 52), kGoldInk = rgba(36, 24, 8), kAccent = rgba(214, 170, 96),
-                kEdge = rgba(122, 98, 64, 150), kCellDark = rgba(30, 25, 19, 246), kCellName = rgba(60, 47, 32, 240),
-                kCellNameSel = rgba(92, 70, 42, 248), kBronze = rgba(84, 64, 38), kColumn = rgba(34, 26, 17, 228),
-                kBannerTop = rgba(184, 146, 96, 246), kBanner = rgba(176, 138, 88, 246), kBannerInk = rgba(46, 30, 12),
-                kBannerEdge = rgba(70, 48, 24), kTabInset = rgba(84, 56, 30, 250), kBox = rgba(36, 28, 19, 248),
-                kBoxEdge = rgba(122, 98, 64, 220), kBar = rgba(22, 17, 11, 232), kListen = rgba(150, 120, 40);
+// (miojo) navy surfaces and Triforce gold, in place of upstream's browns and tan banner
+constexpr ImU32 kInk = rgba(244, 238, 222), kInkBright = rgba(255, 250, 240), kSoft = rgba(206, 202, 190), kDim = rgba(142, 144, 160),
+                kGold = rgba(226, 186, 72), kGoldHi = rgba(255, 226, 120), kGoldInk = rgba(24, 20, 6), kAccent = rgba(226, 186, 72),
+                kEdge = rgba(72, 78, 112, 150), kCellDark = rgba(16, 19, 34, 246), kCellName = rgba(30, 34, 56, 240),
+                kCellNameSel = rgba(64, 54, 24, 248), kBronze = rgba(52, 56, 84), kColumn = rgba(12, 14, 26, 228),
+                kBannerTop = rgba(24, 28, 48, 246), kBanner = rgba(18, 21, 38, 246), kBannerInk = rgba(150, 150, 168),
+                kBannerEdge = rgba(150, 118, 36), kTabInset = rgba(58, 49, 22, 250), kBox = rgba(18, 21, 38, 248),
+                kBoxEdge = rgba(72, 78, 112, 220), kBar = rgba(10, 12, 22, 232), kListen = rgba(196, 96, 48);
 constexpr int kDimAlpha = 185;   // (the game behind the menu)
 
 /// The unit: pixels per point. By the window's height and the Menu size (1 Small, 2 Medium, 3 Large; anything else, as the
@@ -289,7 +290,7 @@ inline void banner(Ctx& c, float hh) {
     const float s = c.s;
     c.d->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(c.w, hh), kBannerTop, kBannerTop, kBanner, kBanner);
     c.d->AddRectFilled(ImVec2(0, hh - 3 * s), ImVec2(c.w, hh), kBannerEdge);
-    c.d->AddLine(ImVec2(0, hh - 4 * s), ImVec2(c.w, hh - 4 * s), rgba(226, 192, 138, 140), std::max(1.0f, s));
+    c.d->AddLine(ImVec2(0, hh - 4 * s), ImVec2(c.w, hh - 4 * s), rgba(255, 226, 120, 140), std::max(1.0f, s));
 }
 /// A box (the help, the restart question): opaque, a fine edge, a soft shadow
 inline void box(Ctx& c, ImVec2 a, ImVec2 b) {

@@ -1401,6 +1401,13 @@ Row rows[] = {
      "Enter opens the inventory editor: unlock or relock equipment, items, upgrades and quest items, and change amounts.", nullptr, false, true, 10},
     {TAB_DEBUG, "Movement speed", nullptr, 0, 0, 0, nullptr,
      "How fast Link walks, runs and swims, as a multiple of his own speed. Choose with Left or Right.", nullptr, false, true, 11},
+    // (miojo) three more On / Off tools
+    {TAB_DEBUG, "Infinite ammo", nullptr, 0, 0, 0, nullptr,
+     "Keeps Deku Sticks, Nuts and Seeds, Bombs, Bombchus and Arrows at the most Link has held since this was turned on. Ctrl+3 switches it too.", nullptr, false, true, 12},
+    {TAB_DEBUG, "Lock time", nullptr, 0, 0, 0, nullptr,
+     "Holds the world clock at the hour chosen in Set time. Ctrl+5 switches it too.", nullptr, false, true, 13},
+    {TAB_DEBUG, "Moon jump", nullptr, 0, 0, 0, nullptr,
+     "Hold Jump to rise. Ctrl+4 switches it too (Ctrl+1 heart protection).", nullptr, false, true, 14},
     {TAB_DEBUG, "Developer", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true},
     // (hookshot, first under the heading: debug_rows lists only those) the zip for the "Submit your pipelines" issue: share_pipeline_list, pipeline_share.h
     {TAB_DEBUG, "Save my pipeline list", nullptr, 0, 0, 0, nullptr,
@@ -1574,7 +1581,9 @@ void choose_inventory_filter(int filter) {
     inventory_amount = false;
     inventory_reveal();
 }
-constexpr int kCheatRows = 12;   // (the debug tools' rows: Row::cheat 0 to 11)
+constexpr int kCheatRows = 15;   // (the debug tools' rows: Row::cheat 0 to 14)
+/// The tools that are an On / Off (halves; Left Off, Right On, confirm flips)
+bool cheat_toggles(int i) { return i == 0 || i == 1 || i == 7 || (i >= 12 && i <= 14); }
 /// A debug tool's value as its row shows it ("" an action: confirm does it)
 std::string cheat_value(int i) {
     char t[16];
@@ -1586,6 +1595,9 @@ std::string cheat_value(int i) {
     case 6: return snprintf(t, sizeof t, "%+d", pouch_delta), t;
     case 7: return tx_onoff(free_camera.load());
     case 11: return link_speed_names[std::clamp(link_speed.load(), 0, kLinkSpeeds - 1)];
+    case 12: return tx_onoff(infinite_ammo.load() == 1);
+    case 13: return tx_onoff(time_lock.load() == 1);
+    case 14: return tx_onoff(moon_jump.load() == 1);
     default: return "";
     }
 }
@@ -1597,12 +1609,12 @@ bool age_shown(int i) { return i == 9 && link_age.load(std::memory_order_relaxed
 /// What confirm does on a tool's row, for its prompt (nullptr: nothing)
 const char* cheat_confirm(int i) {
     static const char* const says[kCheatRows] = {"Toggle", "Toggle", "Apply", "Apply", "Set", nullptr, "Apply", "Toggle", "Open list",
-                                                 "Switch", "Open", nullptr};
+                                                 "Switch", "Open", nullptr, "Toggle", "Toggle", "Toggle"};
     return i >= 0 && i < kCheatRows ? says[i] : nullptr;
 }
 /// The button label on an action tool's row ("": not a button action)
 const char* cheat_button_text(int i) {
-    static const char* const buttons[kCheatRows] = {"", "", "Mark", "Return", "", "", "", "", "Choose map", "Switch", "Edit items", ""};
+    static const char* const buttons[kCheatRows] = {"", "", "Mark", "Return", "", "", "", "", "Choose map", "Switch", "Edit items", "", "", "", ""};
     return i >= 0 && i < kCheatRows ? buttons[i] : "";
 }
 constexpr int kRows = sizeof rows / sizeof rows[0];
@@ -2803,8 +2815,8 @@ std::string restart_line(ui::Ctx& c, float px, float width) {
 /// (hookshot) The Debug tab's order: the tools' rows by their group (Row::cheat), Up and Down walking them so; Inventory item
 /// and Change quantity are not shown (the Inventory page edits every amount)
 struct DebugGroup { const char* title; int from, to; };   // (debug_tools_order[from, to))
-constexpr int debug_tools_order[] = {0, 1, 11, 9, 10, 8, 2, 3, 7, 4};
-constexpr DebugGroup debug_groups[] = {{"Player", 0, 5}, {"Travel", 5, 8}, {"Camera & world", 8, 10}};
+constexpr int debug_tools_order[] = {0, 1, 11, 9, 10, 12, 14, 8, 2, 3, 7, 4, 13};
+constexpr DebugGroup debug_groups[] = {{"Player", 0, 7}, {"Travel", 7, 10}, {"Camera & world", 10, 13}};
 constexpr int kDebugGroups = sizeof debug_groups / sizeof debug_groups[0];
 constexpr int kDebugTools = sizeof debug_tools_order / sizeof debug_tools_order[0];
 /// The Debug tab's rows as shown (its row numbers, tab_row_to_global's): the switch, the tools in debug_tools_order while they
@@ -2856,7 +2868,7 @@ void draw_debug_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, 
             for (int v = r.lo; v <= r.hi; v += r.step) w = std::max(w, ui::size_of(c.f.strong, px, r.text(v)).x);
             return w + (tight ? 56 : 68) * s;
         }
-        if (r.cheat == 0 || r.cheat == 1 || r.cheat == 7 || r.value) return halves_w + pad;
+        if (cheat_toggles(r.cheat) || r.value) return halves_w + pad;
         if (is_share_row(r)) return ui::size_of(c.f.strong, px, "Not saved").x + (tight ? 56 : 60) * s;   // (Save, Saved, Not saved)
         const std::string v = r.cheat == 11 ? "1.25x" : cheat_value(r.cheat);   // (Movement speed: its widest, the cell kept still)
         const char* const says = cheat_button_text(r.cheat);
@@ -2930,7 +2942,7 @@ void draw_debug_rows(ui::Ctx& c, float cx0, float cx1, float top, float bottom, 
                         row_fixed(r.value));
         } else if (is_share_row(r)) {   // (Save my pipeline list: what the last press did)
             choice_cell(c, va, vb, share_value.empty() ? "Save" : share_value, selected, false, false);
-        } else if (r.cheat == 0 || r.cheat == 1 || r.cheat == 7) {
+        } else if (cheat_toggles(r.cheat)) {
             halves_cell(c, va, vb, "Off", "On", cheat_value(r.cheat) == "On", selected, false);
         } else if (age_shown(r.cheat)) {   // (Link's age now: the other half switches)
             halves_cell(c, va, vb, "Kid", "Adult", link_age.load(std::memory_order_relaxed) == 1, selected, false);
@@ -3010,9 +3022,9 @@ const char* bug_report_hint() {
     return text.c_str();
 }
 
-const char* const tab_titles[TAB_COUNT] = {"Graphics", "Audio", "Gameplay", "Controls", "Debug"};
+const char* const tab_titles[TAB_COUNT] = {"Graphics", "Audio", "Gameplay", "Controls", "Cheats"};
 inline const char* tab_title(int t) { return t >= 0 && t < TAB_COUNT ? tab_titles[t] : "Settings"; }
-inline bool cheat_is_toggle(int c) { return c == 0 || c == 1 || c == 7; }
+inline bool cheat_is_toggle(int c) { return cheat_toggles(c); }   // ((miojo) the three more tools too)
 
 /// Draws a row's value cell (slider, toggle, choice, or subpage arrow), shared between the full menu and tuning bar
 void row_value_cell(ui::Ctx& c, const Row& r, ImVec2 va, ImVec2 vb, bool selected, float* t0, float* t1) {
@@ -3074,8 +3086,8 @@ void draw_options(ui::Ctx& c) {
         if (shown || i == hover_tab) {
             c.d->AddRectFilled(ImVec2(x, 0), ImVec2(x + tw[i], hh - 3 * s), shown ? ui::kTabInset : ui::alpha(ui::kTabInset, 0.35f));
             if (shown) {
-                c.d->AddLine(ImVec2(x + 1, 0), ImVec2(x + 1, hh - 3 * s), ui::rgba(52, 34, 16), std::max(1.0f, s));
-                c.d->AddLine(ImVec2(x + tw[i] - 1, 0), ImVec2(x + tw[i] - 1, hh - 3 * s), ui::rgba(52, 34, 16), std::max(1.0f, s));
+                c.d->AddLine(ImVec2(x + 1, 0), ImVec2(x + 1, hh - 3 * s), ui::rgba(52, 56, 84), std::max(1.0f, s));
+                c.d->AddLine(ImVec2(x + tw[i] - 1, 0), ImVec2(x + tw[i] - 1, hh - 3 * s), ui::rgba(52, 56, 84), std::max(1.0f, s));
             }
         }
         ui::text_mid(c, c.f.heading, 23 * s, x + 28 * s, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
@@ -3084,15 +3096,20 @@ void draw_options(ui::Ctx& c) {
     }
     {   // (which build, at the banner's left, so a report can say it without opening the log; the release alone when the whole
         // line would run into the tabs)
-        std::string ver = std::string("Hookshot ") + HOOKSHOT_VERSION;
-        const float room = (c.w - total) * 0.5f - 60 * s - c.safe, px = 15 * s;
+        std::string ver = std::string("Miojo ") + HOOKSHOT_VERSION;
+        const float room = (c.w - total) * 0.5f - 90 * s - c.safe, px = 15 * s;
         const auto width = [&](float p) { return ui::size_of(c.f.body, p, ver.c_str()).x; };
         if (width(px) > room && ver.find(" (") != std::string::npos) ver.resize(ver.find(" ("));
         // (still too long, as a source build's "v2.0.11-821-g7b81752-dirty" since the Audio tab: at Small and Medium smaller
         // until it fits, on half-point steps, 10 points at the least; at Large, the size for a TV across the room, at its size
         // or not at all, as before)
         const float fit = ui::fit_px(px, opts.menu_size == 3 ? px : kVersionMinPt * s, 0.5f * s, room, width);
-        if (fit > 0) ui::text_mid(c, c.f.body, fit, c.safe, ty, ui::kBannerInk, ver.c_str());
+        {   // (miojo) a Triforce before it: three gold triangles
+            const float tw = 24 * s, th = 21 * s, tx = c.safe, t0 = ty - th * 0.5f;
+            const auto tri = [&](float x, float y) { c.d->AddTriangleFilled(ImVec2(x + tw / 4, y), ImVec2(x, y + th / 2), ImVec2(x + tw / 2, y + th / 2), ui::kGold); };
+            tri(tx + tw / 4, t0), tri(tx, t0 + th / 2), tri(tx + tw / 2, t0 + th / 2);
+        }
+        if (fit > 0) ui::text_mid(c, c.f.body, fit, c.safe + 30 * s, ty, ui::kBannerInk, ver.c_str());
     }
     // the rows, in the column; the help beside it
     float cx0, cx1, hx0, hx1;
@@ -3114,7 +3131,7 @@ void draw_options(ui::Ctx& c) {
     ui::Prompt prompt_list[7] = {{ui::kUpDown, "Choose"}};
     int prompts_n = 1;
     const char* compact_key_name = opts.compact_menu_key == 1 ? "RCtrl" : "RShift";
-    if (selr.value || (selr.cheat >= 0 && (selr.cheat <= 1 || selr.cheat == 7 || cheat_chooses(selr.cheat) || age_shown(selr.cheat)))) {
+    if (selr.value || (selr.cheat >= 0 && (cheat_toggles(selr.cheat) || cheat_chooses(selr.cheat) || age_shown(selr.cheat)))) {
         prompt_list[prompts_n++] = {ui::kLeftRight, "Change"};
         if (selr.cheat >= 0) if (const char* says = cheat_confirm(selr.cheat)) prompt_list[prompts_n++] = {ui::kConfirm, says};
         prompt_list[prompts_n++] = {ui::kCompact, "Compact", compact_key_name};
@@ -3613,8 +3630,8 @@ void draw_ask(ui::Ctx& c) {
     const float s = c.s, W = 560 * s, H = 232 * s;
     const ImVec2 p((c.w - W) * 0.5f, (c.h - H) * 0.5f), q = p + ImVec2(W, H);
     ui::shadow(c, p, q, 30 * s, 1.0f, 8 * s);
-    c.d->AddRectFilled(p, q, ui::rgba(36, 28, 19, 250));
-    c.d->AddRect(p, q, ui::rgba(122, 98, 64, 230), 0, 2 * s);
+    c.d->AddRectFilled(p, q, ui::rgba(18, 21, 38, 250));
+    c.d->AddRect(p, q, ui::rgba(72, 78, 112, 230), 0, 2 * s);
     const float hb = 50 * s;   // (a tan title strip, as the banner, its title in dark ink)
     c.d->AddRectFilledMultiColor(p, ImVec2(q.x, p.y + hb), ui::kBannerTop, ui::kBannerTop, ui::kBanner, ui::kBanner);
     c.d->AddRectFilled(ImVec2(p.x, p.y + hb - 3 * s), ImVec2(q.x, p.y + hb), ui::kBannerEdge);
@@ -3686,7 +3703,7 @@ float menu_ox = 0;   // (the menu's column's left edge in the window: more than 
 /// middle (a window of 16:9 or narrower: the whole of it). The pages draw from 0 as on 16:9; their vertices and clip
 /// rectangles are moved over after, and menu_tick moves the mouse back by menu_ox before it tests the hits
 void draw_menu(ui::Ctx& c) {
-    if (!(tune_mode && page == 0)) c.d->AddRectFilled(ImVec2(0, 0), ImVec2(c.w, c.h), ui::rgba(8, 5, 2, ui::kDimAlpha));   // (the game behind, dimmed)
+    if (!(tune_mode && page == 0)) c.d->AddRectFilled(ImVec2(0, 0), ImVec2(c.w, c.h), ui::rgba(4, 5, 10, ui::kDimAlpha));   // (the game behind, dimmed)
     ui::Ctx k = c;
     k.w = std::min(c.w, std::floor(c.h * 16.0f / 9.0f + 0.5f));
     menu_ox = std::floor((c.w - k.w) * 0.5f);
@@ -3968,14 +3985,14 @@ void draw_startup(ui::Ctx& c) {
         v = startup;
     }
     const float s = c.s, w = c.w, h = c.h, cx = w * 0.5f, k = s * 0.86f;   // (k: the scale of what is under the logo)
-    c.d->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), ui::rgba(14, 10, 6));
+    c.d->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), ui::rgba(12, 14, 26));
     const float lh = 112 * s, top = h * 0.5f - 176 * s;
-    for (int i = 40; i >= 1; i--) c.d->AddCircleFilled(ImVec2(cx, top + lh * 0.5f + 70 * s), h * 0.021f * i, ui::rgba(46, 33, 18, 4), 128);
+    for (int i = 40; i >= 1; i--) c.d->AddCircleFilled(ImVec2(cx, top + lh * 0.5f + 70 * s), h * 0.021f * i, ui::rgba(30, 34, 60, 4), 128);
     float aspect = 1;
     ImTextureData* logo = ui::logo(&aspect);
     if (logo) c.d->AddImage(logo->GetTexRef(), ImVec2(cx - lh * aspect * 0.5f, top), ImVec2(cx + lh * aspect * 0.5f, top + lh));
     float y = top + lh + 16 * s;
-    ui::spaced(c, c.f.heading, 42 * k, ImVec2(cx, y), ui::rgba(246, 232, 204), "HOOKSHOT", 6 * k);
+    ui::spaced(c, c.f.heading, 42 * k, ImVec2(cx, y), ui::rgba(246, 232, 204), "MIOJO", 6 * k);
     ui::flourish(c, cx - 190 * k, cx + 190 * k, y + 66 * k, ui::kAccent);
     ui::text_centre(c, c.f.body, 14.5f * k, ImVec2(cx, y + 78 * k), ui::kDim, v.version.c_str());
     if (!v.title.empty()) {
@@ -4245,6 +4262,10 @@ int menu_heart_protection() {
 int menu_player_flight() { return cheats_on() ? player_flight.load(std::memory_order_relaxed) : -1; }
 int menu_free_camera() { return cheats_on() ? free_camera.load(std::memory_order_relaxed) : 0; }
 int menu_link_speed() { return cheats_on() ? link_speeds[std::clamp(link_speed.load(std::memory_order_relaxed), 0, kLinkSpeeds - 1)] : 100; }
+int menu_infinite_ammo() { return cheats_on() ? infinite_ammo.load(std::memory_order_relaxed) : 0; }
+// The hour to hold the clock at, or -1.
+int menu_time_lock() { return cheats_on() && time_lock.load(std::memory_order_relaxed) ? clock_hour : -1; }
+int menu_moon_jump() { return cheats_on() ? moon_jump.load(std::memory_order_relaxed) : 0; }
 int menu_take_cheat_action() { return cheat_action.exchange(0, std::memory_order_relaxed); }
 
 void menu_note_present_sizes(uint32_t picture_w, uint32_t picture_h, uint32_t window_w, uint32_t window_h) {
@@ -4585,6 +4606,11 @@ void cheat_press(int i, const bool* press, bool& changed) {
     }
     if (press[7] && i >= 2 && i <= 4) cheat_action.store(i == 4 ? 100 + clock_hour : i);
     if (press[7] && i == 6) cheat_action.store(200 + pouch_item * 32 + pouch_delta + 10);
+    if ((press[3] || press[4] || press[7]) && i >= 12 && i <= 14) {   // (miojo: Infinite ammo, Lock time, Moon jump)
+        std::atomic<int>& v = i == 12 ? infinite_ammo : i == 13 ? time_lock : moon_jump;
+        v.store(press[7] ? !v.load() : press[4] ? 1 : 0);
+        changed = true;
+    }
     if ((press[3] || press[4] || press[7]) && i == 7) {   // (an On / Off as the first two: Left Off, Right On, confirm flips)
         free_camera.store(press[7] ? !free_camera.load() : press[4] ? 1 : 0);
         changed = true;
@@ -5018,7 +5044,7 @@ void menu_tick() {
                     changed = true;
                 } else if (hit.part == menu_hit::kRow) {
                     Row& d = rows[tab_row_to_global(cur_tab, hit.index)];
-                    if (!d.value && d.cheat >= 0 && (cheat_chooses(d.cheat) || age_shown(d.cheat) || d.cheat <= 1 || d.cheat == 7) &&
+                    if (!d.value && d.cheat >= 0 && (cheat_chooses(d.cheat) || age_shown(d.cheat) || cheat_toggles(d.cheat)) &&
                         hit.side != 0)
                         press[hit.side < 0 ? 3 : 4] = true;   // (a tool's choice: its halves as Left and Right)
                     else if (!d.value) press[7] = true;   // (a page, a tool: as Enter)
