@@ -650,6 +650,12 @@ bool read_model(const SkinnedDraw& k, Rt::Model& m) {
 /// This frame's skinned draws, skinned here and built as one structure in world space: its triangles, 0 for none
 uint32_t build_skinned(Rt& r, VkCommandBuffer cmd, uint64_t now, int slot) {
     uint64_t nv = 0, ni = 0;
+    // (the models kept are let go here, before the frame's poses ask for theirs. This was inside the loop below: with more
+    // than the limit kept, a new model's arrival dropped the ones the poses before it had just found, and the loop after
+    // read a model that was no longer there: a crash after a long while among many characters, Castle Town's market.
+    // RX_VK_RT_MODELS: the limit, a test)
+    static const size_t models_max = getenv("RX_VK_RT_MODELS") ? (size_t)std::max(1, atoi(getenv("RX_VK_RT_MODELS"))) : 2048;
+    if (r.models.size() > models_max) r.models.clear();
     for (auto it = r.poses.begin(); it != r.poses.end();) {
         auto m = r.models.find(it->key);
         if (m == r.models.end()) {
@@ -659,7 +665,6 @@ uint32_t build_skinned(Rt& r, VkCommandBuffer cmd, uint64_t now, int slot) {
                 it = r.poses.erase(it);
                 continue;
             }
-            if (r.models.size() > 2048) r.models.clear();
             m = r.models.emplace(it->key, std::move(made)).first;
         }
         m->second.used = now;
