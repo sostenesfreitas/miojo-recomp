@@ -19,6 +19,7 @@
 // the memory or the build time shows. A mesh whose buffer the game writes again under the same key stays as first read
 // until it goes 18000 frames unused.
 #include "vk_rt.h"
+#include "hookshot_env.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1047,7 +1048,7 @@ void rt_note_draw(const RtDraw& given, bool shadow_pass) {
         float most = 0.0f;
         for (int i = 0; i < 12; i++) most = std::max(most, std::fabs(m[i]));
         if (!(std::fabs(det) > 1e-9f) || most > 1e6f) return;
-        static const bool flip = getenv("RX_VK_RT_FLIP") != nullptr;
+        static const bool flip = env_on("RX_VK_RT_FLIP");
         // (the rays' clockwise is the other way round from the game's on its screen, whose y runs up: found by the check
         // view, where the wrong way let every ray through the walls. RX_VK_RT_FLIP: the other way, to see that again)
         in.ccw = (d.front_ccw == (det < 0.0f)) != flip;
@@ -1065,7 +1066,7 @@ void rt_note_draw(const RtDraw& given, bool shadow_pass) {
 void rt_note_material(const RtDraw& d) {
     Rt& r = rt();
     if (!r.ok) return;
-    static const bool off = getenv("RX_VK_RT_NO_MATERIALS") != nullptr;   // (a test: the guessed albedo, as it was)
+    static const bool off = env_on("RX_VK_RT_NO_MATERIALS");   // (a test: the guessed albedo, as it was)
     if (off) return;
     const uint64_t key = key_of(d);
     {   // (a built mesh with no material yet: its colour texture looked for, once)
@@ -1158,7 +1159,7 @@ bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_
 bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h) {
     Rt& r = rt();
     if (!r.ok || (opts.ao <= 0 && opts.ambient <= 0) || !out || !w || !h) return false;
-    static const bool off = getenv("RX_VK_RT_AO_POST") != nullptr;   // (a test: the multiply over the picture, as it was)
+    static const bool off = env_on("RX_VK_RT_AO_POST");   // (a test: the multiply over the picture, as it was)
     if (off) return false;
     std::lock_guard lk(r.mu);
     const uint64_t now = texture_frame_no();
@@ -1169,7 +1170,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     // a flash of light over the whole picture)
     if (!r.top.as || !r.prev_depth || now - r.prev_frame > 2 || !make_atlas(r, cmd)) {
         static int told = 0;   // (a test: why a frame went to the game's own)
-        if (getenv("RX_VK_RT_AO_WHY") && told++ < 400)
+        if (env_on("RX_VK_RT_AO_WHY") && told++ < 400)
             logf("vk: rt: ao-why f%llu top %d depth %d age %lld", (unsigned long long)now, r.top.as ? 1 : 0, r.prev_depth ? 1 : 0, (long long)(now - r.prev_frame));
         return false;
     }
@@ -1249,7 +1250,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                     static float told_sun = -1.0f, told_exposure = -1.0f;
                     static int told = 0;
                     const auto far_from = [](float a, float b) { return std::fabs(a - b) > 0.25f * std::max(std::fabs(a), std::fabs(b)); };
-                    if (getenv("RX_VK_RT_AO_WHY") && told < 60 && (far_from(sun, told_sun) || far_from(r.lamps_exposure, told_exposure)))
+                    if (env_on("RX_VK_RT_AO_WHY") && told < 60 && (far_from(sun, told_sun) || far_from(r.lamps_exposure, told_exposure)))
                         told++, told_sun = sun, told_exposure = r.lamps_exposure,
                         logf("vk: rt: light f%llu: sun %.4g %.4g %.4g (over pi %.4g), exposure %.4g, sky kept %.4g, %d lamps", (unsigned long long)now,
                              f[4], f[5], f[6], sun, r.lamps_exposure, sky_level, r.lamps_count);
@@ -1258,7 +1259,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                     static bool had = false;
                     static int told_none = 0;
                     const bool has = now - r.lamps_frame <= 2 && r.lamps_count > 0;
-                    if (getenv("RX_VK_RT_AO_WHY") && had != has && told_none++ < 60)
+                    if (env_on("RX_VK_RT_AO_WHY") && had != has && told_none++ < 60)
                         logf("vk: rt: lamps f%llu: %s (the list's frame %llu, %d in it)", (unsigned long long)now, has ? "back" : "none",
                              (unsigned long long)r.lamps_frame, r.lamps_count);
                     had = has;
@@ -1584,11 +1585,11 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         {   // (a line when the scene's instances change by a fifth in one frame: a frame with a wall out is a flash of sky)
             static uint32_t last_n = 0;
             static int told_n = 0;
-            if (getenv("RX_VK_RT_AO_WHY") && told_n < 80 && last_n > 20 && (n * 10 < last_n * 8 || n * 8 > last_n * 10))
+            if (env_on("RX_VK_RT_AO_WHY") && told_n < 80 && last_n > 20 && (n * 10 < last_n * 8 || n * 8 > last_n * 10))
                 told_n++, logf("vk: rt: instances f%llu: %u after %u, missing %u", (unsigned long long)now, n, last_n, missing);
             last_n = n;
         }
-        if (!fine && getenv("RX_VK_RT_AO_WHY")) logf("vk: rt: ao-why f%llu not fine: n %u missing %u", (unsigned long long)now, n, missing);
+        if (!fine && env_on("RX_VK_RT_AO_WHY")) logf("vk: rt: ao-why f%llu not fine: n %u missing %u", (unsigned long long)now, n, missing);
         // (the upscaler's copy, not the game's depth target: the game clears that at the start of the next frame, some
         // frames before its occlusion pass and some after, and read cleared it was all sky: a frame with no occlusion at
         // all between frames with it, every shadow of the occlusion flickering)
@@ -1731,7 +1732,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
                                        (unsigned long long)held_frame, held_count);
         }
         flush_mapped_range(r.light_list.memory, at, kLights * 80);
-        if (getenv("RX_VK_RT_LIGHT_LOG") && now % 600 == 0)   // (a test: the lights taken)
+        if (env_on("RX_VK_RT_LIGHT_LOG") && now % 600 == 0)   // (a test: the lights taken)
             for (size_t i = 0; i < found.size(); i++) {
                 const float* f = rec + found[i].second * 24;
                 uint32_t type;

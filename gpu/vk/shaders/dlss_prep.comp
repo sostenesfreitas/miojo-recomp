@@ -84,12 +84,12 @@ void main() {
     }
     vec3 e = textureLod(scene, uv, 0.0).rgb;
     e = max(mix(e, vec3(0.0), isnan(e)), vec3(0.0));   // (a NaN taken as black first: max(NaN, 0) is undefined)
-    vec3 c = kSquare ? e * e : e;
     const float d = textureLod(scene_depth, uv, 0.0).r;
     if (pc.ao > 0.0 && d > 0.0 && d < 1.0) {   // ((miojo) not the sky; pc.flags bit 4: the occlusion alone, RX_VK_AO_DEBUG)
-        const float a = mix(1.0, ambient(g, uv, size), pc.ao), a2 = kSquare ? a * a : a;   // (as over the colour not squared)
-        c = (pc.flags & 16) != 0 ? vec3(a * a) : c * a2;
+        const float a = mix(1.0, ambient(g, uv, size), pc.ao);   // (over the colour before it is squared, as it was)
+        e = (pc.flags & 16) != 0 ? vec3(a) : e * a;
     }
+    const vec3 c = kSquare ? e * e : e;
     imageStore(color, g, vec4(min(c, vec3(kColorMax)), 1.0));
     imageStore(depth, g, vec4((pc.flags & 8) != 0 ? 1.0 - d : d));
     vec2 mv = vec2(0.0);

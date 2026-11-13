@@ -1349,9 +1349,9 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     static int64_t last_tick, last_player_tick;
     static float target[3], velocity[3], mark[3], yaw;
     /* Moon jump: while Jump is held Link rises as in the flight, straight up, and falls when it is let go. */
-    const int flight_on = rx_option(HOS_OPT_CHEAT_FLIGHT, 0) > 0;
-    const int moon = !flight_on && rx_option(HOS_OPT_CHEAT_MOONJUMP, 0) > 0 && hos_oot_jump_held;
-    int flying = flight_on || moon;
+    int flying = rx_option(HOS_OPT_CHEAT_FLIGHT, 0) > 0;
+    const int moon = !flying && rx_option(HOS_OPT_CHEAT_MOONJUMP, 0) > 0 && hos_oot_jump_held;
+    if (moon) flying = 1;
     /* An event that takes Link (a map change he flew into, the age toggle's, a cutscene) waits for him to stand, and the
        flight holds him in the air: the screen the event had faded stayed black until the flight was switched off, and a
        second request met "waits until the current event ends". While an event plays he is let go and lands; the flight

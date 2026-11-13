@@ -6683,7 +6683,7 @@ static void rt_scene_draw(const NvnState& s, const DrawArgs& d, const Targets& a
         return;
     }
     {   // (a test, RX_VK_RT_WHY: the scene's depth-writing draws the rays leave out, by what leaves them out, on a traced frame)
-        static const bool why = getenv("RX_VK_RT_WHY") != nullptr;
+        static const bool why = env_on("RX_VK_RT_WHY");
         if (why && texture_frame_no() % 1000 == 500 && at.n && at.color[0] && at.depth && s.ds.dt && s.ds.dw &&
             at.color_format[0] == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && temporal_scene_size(at.width, at.height)) {
             const nvn_va_st p0 = *reinterpret_cast<const nvn_va_st*>(&s.vattr[0]);
