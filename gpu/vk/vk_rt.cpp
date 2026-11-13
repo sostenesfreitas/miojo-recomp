@@ -1238,6 +1238,10 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                 // air has: 0.19 at night in Kakariko, 0.33 by day on the trail.
                 // ponytail: a guess; the cave's own ambient level in the game's buffers for it)
                 sky_level = sun > 1e-4f && sun < 1e4f ? sun / 3.0f : 0.25f;
+                // (and the traced ambient is not for such a place: it scales the game's ambient light by how much sky a
+                // place sees, and a cave's ambient is not the sky's but a level set by hand for it. Scaled, Goron City
+                // went to its fifth, a third darker over the whole picture and its creases black. Left as the game has it)
+                if (!(sun > 1e-4f && sun < 1e4f)) pc.ambient = 0.0f;
                 // (the sun's colour here is as the picture has it, the exposure in already: 0.98 over pi by day with an
                 // exposure of 0.001, read in the log. So not by the exposure again, as it was for a build: that weighed
                 // the lamps 64 times their light at night)
