@@ -5,7 +5,7 @@
 </a>
 
   <br>
-  <b>Hookshot</b>
+  <b>Miojo</b>
   <br>
 </h1>
 
