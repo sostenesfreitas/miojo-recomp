@@ -25,6 +25,24 @@
   <a href="#license">License</a>
 </p>
 
+> [!NOTE]
+> **Miojo Recomp** is a fork of [Hookshot](https://git.magicbean.dev/MagicBeanDev/Hookshot) with an **experimental ray
+> tracing implementation** for the Vulkan renderer. It is not the official project: for releases, support and the
+> project's own roadmap, go to Hookshot. Everything below this note is Hookshot's own readme.
+>
+> What the fork adds, in the graphics tab's *Ray traced lighting* section (RTX-class GPU, the DLSS or DLAA upscaler):
+>
+> - **Ray tracing**: builds the scene for ray queries; the switch for the rows below.
+> - **Ambient occlusion**: the game's own occlusion pass, traced against its geometry.
+> - **Sun shadows**: the sun's and the moon's shadows traced into the game's shadow mask.
+> - **Light shadows**: shadows for the lamps nearby (lanterns, torches, the fairy), which the game lights without any.
+> - **Traced ambient**: the game's ambient light by how much sky each place sees (left as it is where there is no sun).
+> - **Bounce light**: one bounce of light off the surfaces around, a second for what the picture does not show.
+>
+> It also carries a Miojo theme for the menu and three more cheats (infinite ammo, lock time, moon jump). Experimental
+> means it: tested on one PC (an RTX 5090, Windows 11), off by default, and the estimates behind some rows are noted in
+> the code. Like Hookshot it is under the GPL-3.0 and ships no game files.
+
 Hookshot is a static recompilation. The game's code is translated to C and compiled into a Windows or Linux program,
 the console's system software is reimplemented, and the Switch 2 graphics are rebuilt on Vulkan. All of this happens
 **on your PC, from your own copy of the game**.
