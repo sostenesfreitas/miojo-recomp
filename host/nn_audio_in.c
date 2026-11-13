@@ -25,6 +25,9 @@
 #include <string.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 
 #define MIC_MAGIC 0x4D494349u   /* "MICI": the high word of our handle in the game's InputStreamType */
 #define MAX_STREAMS 4
@@ -326,7 +329,7 @@ static void detach(InStream *s) {
 }
 static void note_read(InStream *s, const uint8_t *p, int frames) {
     s->frames_read += frames;
-    if (log_on < 0) log_on = getenv("HOS_MIC_LOG") != NULL;
+    if (log_on < 0) log_on = env_on("HOS_MIC_LOG");
     if (!log_on) return;
     if (s->format == FMT_PCM16)
         for (int i = 0; i < frames * s->channels; i++) {

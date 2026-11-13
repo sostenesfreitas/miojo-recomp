@@ -10,6 +10,9 @@
                                        outlined and the hot-function form) against the same words with FPX off, on
                                        inputs that must be rescued and inputs that must fall back: whole Ctx and the
                                        rescue count
+   fpx_sticky_test fast <n> <seed>     the inline fast paths of FMADD, FRECPS and FRSQRTS S (recomp_fpx_fma32, _recps32,
+                                       _rsqrts32) on n random operands and states, value and FPSR; and binary32
+                                       midpoints, which only a fused FMA keeps: kept exactly when EXPECT_FMA (exit 4)
    fpx_sticky_test random <n> <seed>   n random operand triples (both ops each) over random FPCR/FPSR states
    fpx_sticky_test sweep <stride>      every a with biased exponent <= 4 or >= 250 whose fraction is below 2^12, above
                                        2^23 - 2^12 or a multiple of stride, x a fixed set of b and addends, x FZ on/off,
@@ -235,6 +238,72 @@ static int lifted_cases(void) {
     return bad ? 1 : 0;
 }
 
+/* ---- the inline fast paths of FMADD/FRECPS/FRSQRTS S (a fused FMA when EXPECT_FMA, nx2/suyu_rt_fixes.py) ---- */
+static uint32_t fast_op(int op, Ctx *c, uint32_t a, uint32_t b, uint32_t z, int *kept) {
+    uint64_t v = 0;
+    *kept = RECOMP_FPX_OPEN(c) && (op == 0 ? recomp_fpx_fma32(a, b, z, RECOMP_FPX_FZ(c), &v)
+                                   : op == 1 ? recomp_fpx_recps32(a, b, RECOMP_FPX_FZ(c), &v)
+                                             : recomp_fpx_rsqrts32(a, b, RECOMP_FPX_FZ(c), &v));
+    if (*kept) return (uint32_t)v;
+    return (uint32_t)(op == 0 ? recomp_fpe_fma32(c, a, b, z) : op == 1 ? recomp_fpe_recps32(c, a, b) : recomp_fpe_rsqrts32(c, a, b));
+}
+static const char *const FAST_NAME[3] = {"FMADD", "FRECPS", "FRSQRTS"};
+static uint64_t fast_kept[3];
+static void fast_check(int op, uint64_t cr, uint64_t sr, uint32_t a, uint32_t b, uint32_t z, int *kept) {
+    Ctx ref, got;
+    memset(&ref, 0, sizeof ref);
+    ref.fpcr = cr; ref.fpsr = sr;
+    got = ref;
+    const uint32_t r = (uint32_t)(op == 0 ? recomp_fpe_fma32(&ref, a, b, z) : op == 1 ? recomp_fpe_recps32(&ref, a, b)
+                                                                                  : recomp_fpe_rsqrts32(&ref, a, b));
+    const uint32_t v = fast_op(op, &got, a, b, z, kept);
+    checks++;
+    fast_kept[op] += *kept;
+    if (v != r || got.fpsr != ref.fpsr) {
+        mismatches++;
+        if (report_left-- > 0)
+            printf("MISMATCH %s a=%08x b=%08x z=%08x fpcr=%llx fpsr=%llx: exact %08x/%llx fast %08x/%llx\n", FAST_NAME[op],
+                   a, b, z, (unsigned long long)cr, (unsigned long long)sr, r, (unsigned long long)ref.fpsr, v,
+                   (unsigned long long)got.fpsr);
+    }
+}
+/* exactly halfway between two binary32 values: the binary64 form declines them, a fused FMA keeps them */
+static const uint32_t MIDPOINT[3][3] = {{0x3f800800u, 0x3f800800u, 0}, {0x3f800800u, 0xbf801000u, 0},
+                                        {0x3f800800u, 0x3f800800u, 0}};
+static int fast_cases(uint64_t n, uint64_t seed) {
+    static const float K[] = {1.0f, 2.0f, 3.0f, 1.5f, 0.5f};
+    rs = seed * 0x9E3779B97F4A7C15ULL + 1;
+    for (uint64_t i = 0; i < n; i++) {
+        const int op = (int)rbelow(3);
+        uint32_t a, b, z = 0; uint64_t cr, sr; int kept;
+        if (rbelow(2)) tiny_pair(&a, &b);
+        else { a = any_operand(); b = any_operand(); }
+        if (op && rbelow(2)) {   /* a*b near 1, 2 or 3: the Newton steps, and the cancellations */
+            b = B(K[rbelow(5)] / F(a)) + (uint32_t)((int)rbelow(9) - 4);
+            if (rbelow(4) == 0) b ^= 0x80000000u;
+        }
+        if (op == 0) z = addend_for(a, b);
+        gen_state(&cr, &sr);
+        if (rbelow(4)) { cr &= 1u << 24; sr |= 16u; }   /* mostly the open gate, which is what is tested */
+        fast_check(op, cr, sr, a, b, z, &kept);
+    }
+    int bad = 0;
+    for (int op = 0; op < 3; op++)
+        for (int fz = 0; fz < 2; fz++) {
+            int kept;
+            fast_check(op, fz ? 0x01000000u : 0, 0x10u, MIDPOINT[op][0], MIDPOINT[op][1], MIDPOINT[op][2], &kept);
+            if (kept != EXPECT_FMA) {
+                bad = 1;
+                printf("%s midpoint a=%08x b=%08x fz=%d: %s, want %s\n", FAST_NAME[op], MIDPOINT[op][0], MIDPOINT[op][1], fz,
+                       kept ? "kept" : "fell back", EXPECT_FMA ? "kept (a fused FMA)" : "fell back");
+            }
+        }
+    printf("fast (%s): %llu checks, %llu mismatches, kept %llu FMADD / %llu FRECPS / %llu FRSQRTS\n",
+           EXPECT_FMA ? "x86-64-v3" : "x86-64-v2", (unsigned long long)checks, (unsigned long long)mismatches,
+           (unsigned long long)fast_kept[0], (unsigned long long)fast_kept[1], (unsigned long long)fast_kept[2]);
+    return mismatches ? 1 : bad ? 4 : 0;
+}
+
 int main(int argc, char **argv) {
     unsigned eax, ebx, ecx, edx;
     if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx) || !(ecx >> 9 & 1) || !(ecx >> 20 & 1) || !(ecx >> 23 & 1)) {
@@ -247,9 +316,10 @@ int main(int argc, char **argv) {
     }
     if ((_mm_getcsr() & 0xffc0) != 0x1f80) { printf("MXCSR %x: not the FPX1 host contract\n", _mm_getcsr()); return 2; }
     if (argc == 2 && !strcmp(argv[1], "lifted")) return lifted_cases();
+    if (argc == 4 && !strcmp(argv[1], "fast")) return fast_cases(strtoull(argv[2], 0, 0), strtoull(argv[3], 0, 0));
     if (argc == 4 && !strcmp(argv[1], "random")) random_cases(strtoull(argv[2], 0, 0), strtoull(argv[3], 0, 0));
     else if (argc == 3 && !strcmp(argv[1], "sweep")) sweep((uint32_t)strtoul(argv[2], 0, 0));
-    else { fprintf(stderr, "usage: lifted | random <n> <seed> | sweep <stride>\n"); return 2; }
+    else { fprintf(stderr, "usage: lifted | fast <n> <seed> | random <n> <seed> | sweep <stride>\n"); return 2; }
     printf("%s (%s): %llu checks (%llu with the gate closed), %llu mismatches, the wrappers rescued %llu FMUL / %llu FMLA\n",
            argv[1], EXPECT_FMA ? "x86-64-v3" : "x86-64-v2", (unsigned long long)checks, (unsigned long long)closed_checks,
            (unsigned long long)mismatches, (unsigned long long)rescued[1], (unsigned long long)rescued[0]);

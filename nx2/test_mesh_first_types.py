@@ -8,6 +8,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ["--headers", "{spirv_headers}"]
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -23,7 +26,7 @@ def block(text,marker):
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--headers',type=Path,required=True);p.add_argument('--cxx',default='clang++');a=p.parse_args()
     vk=ROOT/'gpu/vk';source=(vk/'eden/shader_recompiler/backend/spirv/spirv_emit_context.cpp').read_text(encoding='utf-8')
-    setup=block(source,'if (stage == Stage::Task && !runtime_info.mesh_fallback && getenv("RX_VK_MESH_FIRST")')
+    setup=block(source,'if (stage == Stage::Task && !runtime_info.mesh_fallback && env_on("RX_VK_MESH_FIRST")')
     fixture=r'''
 #include <sirit/sirit.h>
 #include <array>
@@ -55,7 +58,7 @@ struct EmitContext:Sirit::Module {
 // Input declaration is irrelevant to type initialization; use a valid ID without introducing a shader interface.
 Id DefineInput(EmitContext& ctx,Id type,bool,spv::BuiltIn){return ctx.Constant(type,0U);}
 int main() {
-    unsigned cases=0;const bool requested=std::getenv("RX_VK_MESH_FIRST")!=nullptr;
+    unsigned cases=0;const bool requested=env_on("RX_VK_MESH_FIRST");
     for(unsigned i=0;i<6;i++) {
         EmitContext ctx{i==1};const Id before=ctx.U64;
         if(i==2)ctx.stage=Stage::Compute;
@@ -80,7 +83,7 @@ int main() {
     work=ROOT/'work';work.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='mesh-first-types-',dir=work) as t:
         folder=Path(t).resolve();folder.relative_to(work.resolve());cpp=folder/'fixture.cpp';exe=folder/'fixture.exe';cpp.write_text(fixture,encoding='utf-8');sirit=vk/'sirit'
-        subprocess.run([a.cxx,'-std=c++20','-O1','-I'+str(sirit/'include'),'-I'+str(sirit/'src'),'-I'+str(a.headers),str(cpp),*map(str,sorted((sirit/'src').rglob('*.cpp'))),'-o',str(exe)],check=True)
+        subprocess.run([a.cxx,'-std=c++20', '-include', ENV_ON_H,'-O1','-I'+str(sirit/'include'),'-I'+str(sirit/'src'),'-I'+str(a.headers),str(cpp),*map(str,sorted((sirit/'src').rglob('*.cpp'))),'-o',str(exe)],check=True)
         env=dict(os.environ);env.pop('RX_VK_MESH_FIRST',None)
         subprocess.run([str(exe)],env=env,check=True)
         env['RX_VK_MESH_FIRST']='1';subprocess.run([str(exe)],env=env,check=True)

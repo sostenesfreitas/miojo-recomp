@@ -249,11 +249,28 @@ def build(dir, with_dict=False):
         with open(path, "wb") as f:
             f.write(data)
 
-    def z(data):
+    def z(data, dictionary=None):
+        try:
+            import zstandard
+        except ImportError:
+            pass
+        else:
+            d = zstandard.ZstdCompressionDict(dictionary) if dictionary is not None else None
+            return zstandard.ZstdCompressor(dict_data=d).compress(data)
+        if dictionary is not None:
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False) as tf:
+                tf.write(dictionary)
+                path = tf.name
+            try:
+                return subprocess.run(["zstd", "-q", "-c", "-D", path], input=data,
+                                      stdout=subprocess.PIPE, check=True).stdout
+            finally:
+                os.unlink(path)
         try:
             from compression import zstd   # (Python 3.14)
             return zstd.compress(data)
-        except Exception:
+        except ImportError:
             return subprocess.run(["zstd", "-q", "-c"], input=data, stdout=subprocess.PIPE, check=True).stdout
 
     write("Shader/Test.bfsha.zs", z(bnsh([graphics_pair(vid=1), compute(local=(8, 4, 1))])))
@@ -273,21 +290,12 @@ def build(dir, with_dict=False):
         # (a raw dictionary; libzstd accepts raw content dictionaries, which is what the pack holds)
         d = (b"bake-ds-dictionary " * 256)[:4096]
         write("Pack/ZsDic.pack.zs", z(dic_pack([d])))
-        import tempfile
-        with tempfile.NamedTemporaryFile(delete=False) as tf:
-            tf.write(d)
-            path = tf.name
-        try:
-            data = bnsh([graphics_pair(vid=10)])
-            comp = subprocess.run(["zstd", "-q", "-c", "-D", path], input=data, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE)
-            if comp.returncode == 0 and comp.stdout[:4] == b"\x28\xb5\x2f\xfd":
-                write("Shader/Dict.bfsha.zs", comp.stdout)
-                stats["dict"] = "written"
-            else:
-                stats["dict"] = "zstd -D failed"
-        finally:
-            os.unlink(path)
+        data = bnsh([graphics_pair(vid=10)])
+        comp = z(data, d)
+        if comp[:4] != b"\x28\xb5\x2f\xfd":
+            raise ValueError("dictionary compressor did not produce a zstd frame")
+        write("Shader/Dict.bfsha.zs", comp)
+        stats["dict"] = "written"
     return stats
 
 

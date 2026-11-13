@@ -83,6 +83,10 @@ void mirror_sync(Pool& p) {   // (model: no CPU page is dirty here)
     p.sync_seg = texture_segment();
 }
 #include "rb_refresh.inc"
+// (gpu/vk/wb_learn.h's table: every write-back queued in this model; tests/test_wb_learn.py runs its rules)
+static bool wb_leave_out(uint64_t, uint64_t, std::vector<std::pair<uint64_t, uint64_t>>&) { return false; }
+static bool wb_skips_log() { return false; }
+static void wb_skip_note(uint64_t, uint64_t) {}
 
 /// gpu_buffer_bind: the pool's mirror when it has one (model of its front), then its actual last lines
 BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {

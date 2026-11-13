@@ -19,6 +19,7 @@ typedef DWORD (*ThreadProc)(void *);
 #define GetLastError mock_GetLastError
 #define ExitProcess mock_ExitProcess
 #define getenv mock_getenv
+#define env_on(name) (getenv(name) && !env_value_off(getenv(name)))   /* (the switches read through the stand-in above) */
 
 static jmp_buf process_exit;
 static int failures;

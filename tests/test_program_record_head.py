@@ -17,6 +17,15 @@ from pathlib import Path
 RUN_ALL_ARGS = ["--cxx", "g++"]
 
 ROOT = Path(__file__).resolve().parents[1]
+
+def _with_cache(path):
+    """vk_shader.cpp with the program cache it held before (vk_progcache.cpp and .h beside it, outside the translator stamp): definitions first"""
+    parts = [path.read_text(encoding="utf-8")]
+    for name in ("vk_progcache.cpp", "vk_progcache.h"):
+        if (path.parent / name).exists():
+            parts.append((path.parent / name).read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
 SHADER = ROOT / "gpu" / "vk" / "vk_shader.cpp"
 
 
@@ -34,7 +43,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cxx", default="g++")
     a = ap.parse_args()
-    src = SHADER.read_text(encoding="utf-8")
+    src = _with_cache(SHADER)
     parts = [
         block(src, "void put_bytes("),
         src[src.index("template <class T> void put("):src.index("\n", src.index("template <class T> void put("))],

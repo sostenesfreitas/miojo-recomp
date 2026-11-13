@@ -12,6 +12,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ["--cxx", "{cxx}"]
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -144,7 +147,7 @@ def main():
         tmp = Path(tmp)
         (tmp / "t.cpp").write_text(FIXTURE.replace("@CODE@", code), encoding="utf-8")
         exe = tmp / "gpl-cold"
-        subprocess.run([args.cxx, "-std=c++20", "-Wall", "-Wextra", str(tmp / "t.cpp"), "-o", str(exe)], check=True)
+        subprocess.run([args.cxx, "-std=c++20", "-include", ENV_ON_H, "-Wall", "-Wextra", str(tmp / "t.cpp"), "-o", str(exe)], check=True)
         for extra, what in (([], "with the feature"), (["off"], "without the feature")):
             r = subprocess.run([str(exe)] + extra, capture_output=True, text=True)
             if r.returncode:

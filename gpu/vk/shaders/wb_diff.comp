@@ -21,10 +21,17 @@ layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Tab
 layout(push_constant) uniform P {
     Table table;
     uint count;
+    uvec2 observations; // Optional uint per chunk; zero address keeps the ordinary write-back.
 } pc;
+shared uint chunk_changed;
 void main() {
     const uint ci = gl_WorkGroupID.x + gl_WorkGroupID.y * 65535u;
     if (ci >= pc.count) return;
+    const bool observe = any(notEqual(pc.observations, uvec2(0u)));
+    if (observe) {
+        if (gl_LocalInvocationID.x == 0u) chunk_changed = 0u;
+        barrier();
+    }
     const Chunk c = pc.table.c[ci];
     if (c.vecs != 0u) {
         Vecs m = Vecs(c.mirror), s = Vecs(c.shadow), g = Vecs(c.guest);
@@ -37,6 +44,7 @@ void main() {
                 v = m.v[i];
                 differs = any(notEqual(v, s.v[i]));
             }
+            if (observe && differs) atomicOr(chunk_changed, 1u);
             if (subgroupAny(differs) && in_run) {
                 g.v[i] = v;
                 s.v[i] = v;
@@ -47,9 +55,14 @@ void main() {
         for (uint i = gl_LocalInvocationID.x; i < c.count; i += 256u) {
             const uint v = m.w[i];
             if (v != s.w[i]) {
+                if (observe) atomicOr(chunk_changed, 1u);
                 g.w[i] = v;
                 s.w[i] = v;
             }
         }
+    }
+    if (observe) {
+        barrier();
+        if (gl_LocalInvocationID.x == 0u) Words(pc.observations).w[ci] = chunk_changed;
     }
 }

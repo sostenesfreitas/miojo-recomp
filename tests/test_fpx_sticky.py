@@ -1,17 +1,22 @@
-"""FPX1's sticky-flag rescue for single-precision FMUL/FNMUL/FMLA, game-free: bit-exact with the exact body.
+"""FPX1's sticky-flag rescue for single-precision FMUL/FNMUL/FMLA and its FMADD/FRECPS/FRSQRTS S fast paths,
+game-free: bit-exact with the exact body.
 
 a64_lift.py's a64_fpx_mul32_fma32 and a64_fpx_fma32_fma32 (the cold wrappers lifted code calls when the inline fast path
 cannot prove its result) try a64_fpx_sticky32 before the exact body recomp_fpe_fma32: when every FPSR flag the Arm op
 could raise is already set, one hardware FMA (or multiply) is the Arm result. This builds what the real build builds,
-a64_fpx.h from a64_lift.fpx_header() and a64_suyu.h / a64_suyu.c from a64_rtgen.py (through suyu's translator,
-a64emit.cpp, built here at -O0 into a temporary folder), and compiles tests/fpx_sticky_test.c against the real rt/a64.h
-at the build's FP flags (-ffp-contract=off -O2) twice: at -march=x86-64-v3 (RECOMP_FPX_FMA64: both ops rescued) and at
--march=x86-64-v2 (what host_march() gives a CPU without AVX2: FMUL's rescue is a plain multiply and FMLA's must decline
-every case). The v2 build runs on any x86-64-v2 CPU, whether or not it has AVX2. In each build:
+a64_fpx.h from a64_lift.fpx_header() and a64_suyu.h / a64_suyu.c from a64_rtgen.py with nx2/suyu_rt_fixes.py (through
+suyu's translator, a64emit.cpp, built here at -O0 into a temporary folder), and compiles tests/fpx_sticky_test.c against
+the real rt/a64.h at the build's FP flags (-ffp-contract=off -O2) twice: at -march=x86-64-v3 (RECOMP_FPX_FMA64: both
+ops rescued) and at -march=x86-64-v2 (what host_march() gives a CPU without AVX2: FMUL's rescue is a plain multiply and
+FMLA's must decline every case). The v2 build runs on any x86-64-v2 CPU, whether or not it has AVX2. In each build:
   - the lifted route: guest FMUL, FNMUL, FMADD and FMLA (by element) S words, hand-encoded, through a64emit.translate and
     a64_lift.op_text (the lifter's per-instruction pipeline, so the C calls the outlined wrapper as lifted code does) and
     hot_text (the hot functions' form), against the same words translated with FPX off (the exact body inline): the
     whole Ctx and the rescue count must match, on 5 inputs that must be rescued and 7 that must not (96 runs);
+  - the inline fast paths of FMADD, FRECPS and FRSQRTS S (recomp_fpx_fma32, _recps32, _rsqrts32), 8M random cases
+    (seeded, mostly with the gate open, a*b near 1, 2 or 3 as in the Newton steps): value and FPSR equal to the exact
+    body's; and three binary32 midpoints, which the binary64 form (v2) declines and a fused FMA (v3, suyu_rt_fixes)
+    keeps;
 and each wrapper's value and FPSR must equal recomp_fpe_fma32's for:
   - 8M random operand triples (16M checks, seeded): zeros, subnormals, inf, NaN (quiet and signalling), the extreme
     normals, products near the underflow and overflow edges, exact and near cancellations, under random FPCR (FZ,
@@ -26,6 +31,7 @@ control bit but FZ set, or IXC clear) fails. That last check is what guards FIZ/
 them, so comparing values could not tell. About 35-50 s here.
 
 It has teeth (each by hand, then restored):
+  - suyu_rt_fixes not installed: v3's fast run fails (exit 4, the midpoints fall back);
   - the emitter no longer outlining FMUL/FNMUL S (arm64_to_c.h's EmitFPMulAddValue: `FpxOutline()` made
     `FpxOutline() && !mul`, so the guest FMUL keeps suyu's inline guard): the lifted case fails in both builds (20
     FMUL/FNMUL runs with no rescue), while the random and sweep runs, which call the wrappers by name, still pass;
@@ -56,9 +62,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KIT = os.path.join(ROOT, "third_party", "a64-kit")
 sys.path.insert(0, os.path.join(KIT, "lift"))
 sys.path.insert(0, os.path.join(KIT, "tools"))
+sys.path.append(os.path.join(ROOT, "nx2"))
 import toolchain  # noqa: E402
 
-RANDOM_TRIPLES, SEED, SWEEP_STRIDE = 8000000, 20261109, 97
+RANDOM_TRIPLES, SEED, SWEEP_STRIDE, FAST_CASES = 8000000, 20261109, 97, 8000000
 FLAGS = ["-ffp-contract=off", "-fno-strict-aliasing", "-O2"]   # (nx2/build.py's lifted-code FP flags, with -march=)
 BUILDS = (("x86-64-v3", 1), ("x86-64-v2", 0))   # (-march, EXPECT_FMA: whether RECOMP_FPX_FMA64 holds there)
 
@@ -157,6 +164,8 @@ def generate(cxx, tmp, flags):
     import a64_lift
     import a64_rtgen
     import a64emit
+    import suyu_rt_fixes
+    suyu_rt_fixes.install()   # (as nx2/lift.py does)
     used = set()
     try:
         a64_rtgen.write(tmp)
@@ -193,7 +202,8 @@ def main():
                   ["-DEXPECT_FMA=%d" % fma, "-D_CRT_SECURE_NO_WARNINGS", "-I" + os.path.join(KIT, "rt"), "-I" + tmp,
                    os.path.join(ROOT, "tests", "fpx_sticky_test.c"), os.path.join(tmp, "a64_suyu.c"), "-o", exe],
                   "the driver at " + march)
-            for args in (["lifted"], ["random", str(RANDOM_TRIPLES), str(SEED)], ["sweep", str(SWEEP_STRIDE)]):
+            for args in (["lifted"], ["fast", str(FAST_CASES), str(SEED)], ["random", str(RANDOM_TRIPLES), str(SEED)],
+                         ["sweep", str(SWEEP_STRIDE)]):
                 r = run([exe] + args)
                 print(r.stdout.rstrip())
                 if r.returncode == 3:

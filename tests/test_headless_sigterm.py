@@ -26,7 +26,7 @@ def main():
     if init < 0 or hint > init:
         raise SystemExit("pads_start sets SDL_NO_SIGNAL_HANDLERS after SDL starts: SDL reads it when it starts")
     line = body[body.rfind("\n", 0, hint):hint]
-    if 'getenv("HOS_HEADLESS")' not in line:
+    if 'env_on("HOS_HEADLESS")' not in line:
         raise SystemExit("SDL_NO_SIGNAL_HANDLERS is not limited to HOS_HEADLESS: a window's close on SIGTERM needs them")
     print("PASS: a headless run leaves SIGINT/SIGTERM to end it")
 

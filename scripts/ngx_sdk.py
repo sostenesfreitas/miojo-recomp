@@ -5,18 +5,20 @@ SDK's LICENSE.txt, fetched beside them; read it before using them). This fetches
 pinned release, each file checked against its SHA-256, into <sdk folder>:
   - LICENSE.txt and the SDK's headers (include/), the same for every platform;
   - the library the build links (lib/): libnvsdk_ngx.a on Linux, nvsdk_ngx_s.lib (the /MT one) on Windows;
-  - the DLSS runtime the driver loads (runtime/): libnvidia-ngx-dlss.so.<version> on Linux, nvngx_dlss.dll on Windows.
+  - the runtimes NGX loads (runtime/): DLSS's, libnvidia-ngx-dlss.so.<version> on Linux and nvngx_dlss.dll on Windows, and
+    DLSS Frame Generation's, libnvidia-ngx-dlssg.so.<version> and nvngx_dlssg.dll. Without the latter beside DLSS's, NGX
+    takes the driver's own copy, which may be older: one that makes 1 frame at most, or refuses every set.
 The NGX core itself comes with NVIDIA's driver (libnvidia-ngx.so on Linux; _nvngx.dll on Windows, which is loaded from the
 driver's own folder and is never to be put beside the game).
 
 Usage:  python -I scripts/ngx_sdk.py [--accept-nvidia-license] [--platform linux|windows] [--game <game folder>]
                                      [--runtime-dir <folder>] [--build-only] [<sdk folder>]
   <sdk folder>: default build-linux/ngx-sdk on Linux, work/ngx-sdk on Windows
-  --game: the DLSS runtime copied into <game folder>/ngx too, where the game looks first (nx2/make_game.py does the same for
-          the folder it builds when HOOKSHOT_NGX_SDK is set)
-  --runtime-dir: the runtime copied into that folder instead (Linux: $XDG_DATA_HOME/hookshot/ngx; Windows:
+  --game: the DLSS runtimes copied into <game folder>/ngx too, where the game looks first (nx2/make_game.py does the same
+          for the folder it builds when HOOKSHOT_NGX_SDK is set)
+  --runtime-dir: the runtimes copied into that folder instead (Linux: $XDG_DATA_HOME/hookshot/ngx; Windows:
           %LOCALAPPDATA%\\Hookshot\\ngx. RX_VK_DLSS_DIR names another when the game runs)
-  --build-only: only what the build reads, not DLSS's runtime (CI's link check)
+  --build-only: only what the build reads, not the runtimes (CI's link check)
   --accept-nvidia-license: NVIDIA's license accepted without the question (scripts, the Hookshot Builder's DLSS tick, CI)
 Then build with HOOKSHOT_NGX_SDK=<sdk folder>.
 """
@@ -59,19 +61,24 @@ COMMON = [
     ("include/nvsdk_ngx_standalone_cuda.h", "b23436ed5040051ac8e81554c9af080f2463c941435bbc3b82222e5431a09499"),
     ("include/nvsdk_ngx_vk.h", "2d364ce7132881eb669e9498fd570d74cba563b1fbebc82c235f8e1ad2dd8b6d"),
 ]
-# each platform's library (into lib/) and DLSS runtime (into runtime/)
+# each platform's library (into lib/), DLSS's runtime and DLSS Frame Generation's (both into runtime/, the game's ngx)
 PLATFORMS = {
     "linux": {
         "library": ("lib/Linux_x86_64/libnvsdk_ngx.a", "d3c50bb0d9624fc35e502a8e929b8fc1e2b505017ebdb84c0d5b627e11a235df"),
         "runtime": ("lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.9.16",
                     "30982c937afed85c96b8d313323de9a650a2eec6de1bb0f714b21750f4ce98f6"),
+        "framegen": ("lib/Linux_x86_64/rel/libnvidia-ngx-dlssg.so.310.9.16",
+                     "574839cae01c835de4d5845c36ca9cf75361f8160bd52397142c36a24e29e6f7"),
     },
     "windows": {
         # (the static NGX loader built against the static C runtime (/MT); llvm-mingw links it with gpu/vk/vk_ngx_msvc_rt.cpp)
         "library": ("lib/Windows_x86_64/x64/nvsdk_ngx_s.lib", "7b9a5239c1145af5f645ab472aa066f9ea79db36ac819562312aae69d65f3765"),
         "runtime": ("lib/Windows_x86_64/rel/nvngx_dlss.dll", "d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e"),
+        "framegen": ("lib/Windows_x86_64/rel/nvngx_dlssg.dll",
+                     "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7"),
     },
 }
+RUNTIMES = ("runtime", "framegen")   # (DLSS's runtime, then DLSS Frame Generation's)
 
 NOTICE = """\
 NVIDIA DLSS: this downloads NVIDIA's DLSS SDK (release v310.9.16) from github.com/NVIDIA/DLSS.
@@ -94,9 +101,10 @@ def destination(path):
 
 
 def files(platform, runtime=True):
-    """[(path in NVIDIA's repository, SHA-256, path in the SDK folder)] for one platform; runtime=False: what a build reads only"""
+    """[(path in NVIDIA's repository, SHA-256, path in the SDK folder)] for one platform; runtime=False: what a build reads only
+    (not the runtimes)"""
     spec = PLATFORMS[platform]
-    return [(p, s, destination(p)) for p, s in COMMON + [spec["library"]] + ([spec["runtime"]] if runtime else [])]
+    return [(p, s, destination(p)) for p, s in COMMON + [spec["library"]] + ([spec[k] for k in RUNTIMES] if runtime else [])]
 
 
 def library(sdk, platform):
@@ -104,13 +112,13 @@ def library(sdk, platform):
     return os.path.join(sdk, *destination(PLATFORMS[platform]["library"][0]).split("/"))
 
 
-def runtime(sdk, platform):
-    """The DLSS runtime in this SDK folder, for that platform"""
-    return os.path.join(sdk, *destination(PLATFORMS[platform]["runtime"][0]).split("/"))
+def runtime(sdk, platform, kind="runtime"):
+    """A runtime in this SDK folder, for that platform: DLSS's ("runtime") or DLSS Frame Generation's ("framegen")"""
+    return os.path.join(sdk, *destination(PLATFORMS[platform][kind][0]).split("/"))
 
 
-def runtime_name(platform):
-    return PLATFORMS[platform]["runtime"][0].rsplit("/", 1)[1]
+def runtime_name(platform, kind="runtime"):
+    return PLATFORMS[platform][kind][0].rsplit("/", 1)[1]
 
 
 def sha256(path):
@@ -144,21 +152,28 @@ def fetch_one(path, digest, dst, opener=urllib.request.urlopen):
 
 
 def fetch(sdk, platform, opener=urllib.request.urlopen, say=print, runtime=True):
-    """Every file of that platform into the SDK folder (runtime=False: not DLSS's runtime)"""
+    """Every file of that platform into the SDK folder (runtime=False: not the runtimes, DLSS's and frame generation's)"""
     for path, digest, rel in files(platform, runtime):
         if fetch_one(path, digest, os.path.join(sdk, *rel.split("/")), opener):
             say("ngx-sdk: %s" % rel)
 
 
 def install_runtime(sdk, platform, folder):
-    """The SDK folder's DLSS runtime copied into folder (made when missing): where the game finds it"""
-    src = runtime(sdk, platform)
-    dst = os.path.join(folder, runtime_name(platform))
+    """The SDK folder's DLSS runtime copied into folder (made when missing), where the game finds it, and DLSS Frame
+    Generation's beside it when the SDK folder has it (one fetched before it was in the table has not: fetch() adds it).
+    Returns DLSS's runtime there"""
     os.makedirs(folder, exist_ok=True)
-    if not (os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(src) and sha256(dst) == sha256(src)):
-        shutil.copyfile(src, dst + ".part")
-        os.replace(dst + ".part", dst)
-    return dst
+    placed = []
+    for kind in RUNTIMES:
+        src = runtime(sdk, platform, kind)
+        dst = os.path.join(folder, runtime_name(platform, kind))
+        if kind != "runtime" and not os.path.isfile(src):
+            continue
+        if not (os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(src) and sha256(dst) == sha256(src)):
+            shutil.copyfile(src, dst + ".part")
+            os.replace(dst + ".part", dst)
+        placed.append(dst)
+    return placed[0]
 
 
 def accepted(flag, ask=input, interactive=None):
@@ -199,6 +214,7 @@ def main(argv=None):
           flush=True)
     for folder in ([os.path.join(a.game, "ngx")] if a.game else []) + ([a.runtime_dir] if a.runtime_dir else []):
         print("ngx-sdk: the DLSS runtime in %s" % install_runtime(sdk, a.platform, folder), flush=True)
+        print("ngx-sdk: DLSS Frame Generation's in %s" % os.path.join(folder, runtime_name(a.platform, "framegen")), flush=True)
     print("ngx-sdk: build with HOOKSHOT_NGX_SDK=%s" % sdk, flush=True)
     return 0
 

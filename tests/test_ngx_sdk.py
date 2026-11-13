@@ -51,6 +51,11 @@ class TableTests(unittest.TestCase):
                          ("lib/Windows_x86_64/x64/nvsdk_ngx_s.lib",
                           "7b9a5239c1145af5f645ab472aa066f9ea79db36ac819562312aae69d65f3765"))
         self.assertEqual(table["runtime/nvngx_dlss.dll"][0], "lib/Windows_x86_64/rel/nvngx_dlss.dll")
+        # (DLSS Frame Generation's runtime beside it: without it NGX took the driver's own, which on an RTX 5080 was 310.2.1,
+        # 1 made frame at most and every set refused at 2x)
+        self.assertEqual(table["runtime/nvngx_dlssg.dll"],
+                         ("lib/Windows_x86_64/rel/nvngx_dlssg.dll",
+                          "8d59d49b36410dd6b62fef2503a5871d347415bd85d943fa0848563a95dd50c7"))
         self.assertIn("LICENSE.txt", table)
         self.assertIn("include/nvsdk_ngx_vk.h", table)
         self.assertIn("include/nvsdk_ngx_helpers_vk.h", table)
@@ -62,13 +67,16 @@ class TableTests(unittest.TestCase):
         table = {rel: path for path, _, rel in ngx_sdk.files("linux")}
         self.assertEqual(table["lib/libnvsdk_ngx.a"], "lib/Linux_x86_64/libnvsdk_ngx.a")
         self.assertEqual(table["runtime/libnvidia-ngx-dlss.so.310.9.16"], "lib/Linux_x86_64/rel/libnvidia-ngx-dlss.so.310.9.16")
+        self.assertEqual(table["runtime/libnvidia-ngx-dlssg.so.310.9.16"],
+                         "lib/Linux_x86_64/rel/libnvidia-ngx-dlssg.so.310.9.16")
         self.assertFalse([p for p in table.values() if "Windows" in p])
 
-    def test_build_only_leaves_out_the_runtime(self):
+    def test_build_only_leaves_out_the_runtimes(self):
         for platform in ngx_sdk.PLATFORMS:
             full = {rel for _, _, rel in ngx_sdk.files(platform)}
             build = {rel for _, _, rel in ngx_sdk.files(platform, runtime=False)}
-            self.assertEqual(full - build, {"runtime/" + ngx_sdk.runtime_name(platform)})
+            self.assertEqual(full - build, {"runtime/" + ngx_sdk.runtime_name(platform, k) for k in ngx_sdk.RUNTIMES})
+            self.assertEqual(len(full - build), 2)   # (DLSS's and DLSS Frame Generation's)
 
     def test_platforms_share_the_headers_and_one_folder(self):
         linux = {rel for _, _, rel in ngx_sdk.files("linux")}
@@ -83,6 +91,8 @@ class TableTests(unittest.TestCase):
         self.assertEqual(ngx_sdk.library(sdk, "linux"), os.path.join(sdk, "lib", "libnvsdk_ngx.a"))
         self.assertEqual(ngx_sdk.runtime(sdk, "windows"), os.path.join(sdk, "runtime", "nvngx_dlss.dll"))
         self.assertEqual(ngx_sdk.runtime_name("windows"), "nvngx_dlss.dll")
+        self.assertEqual(ngx_sdk.runtime(sdk, "windows", "framegen"), os.path.join(sdk, "runtime", "nvngx_dlssg.dll"))
+        self.assertEqual(ngx_sdk.runtime_name("linux", "framegen"), "libnvidia-ngx-dlssg.so.310.9.16")
 
     def test_host_platform(self):
         with mock.patch.dict(os.environ, {"RX_TARGET": "windows"}):
@@ -132,11 +142,24 @@ class FetchTests(unittest.TestCase):
         rt = ngx_sdk.runtime(self.sdk, "windows")
         os.makedirs(os.path.dirname(rt))
         Path(rt).write_bytes(b"runtime")
+        Path(ngx_sdk.runtime(self.sdk, "windows", "framegen")).write_bytes(b"framegen")
         game = os.path.join(self.temp.name, "game")
         dst = ngx_sdk.install_runtime(self.sdk, "windows", os.path.join(game, "ngx"))
         self.assertEqual(dst, os.path.join(game, "ngx", "nvngx_dlss.dll"))
         self.assertEqual(Path(dst).read_bytes(), b"runtime")
+        self.assertEqual(Path(game, "ngx", "nvngx_dlssg.dll").read_bytes(), b"framegen")   # (beside it: where NGX looks)
         self.assertEqual(os.listdir(game), ["ngx"])   # (nothing beside the exe)
+        self.assertEqual(sorted(os.listdir(os.path.join(game, "ngx"))), ["nvngx_dlss.dll", "nvngx_dlssg.dll"])
+
+    def test_an_older_sdk_folder_still_installs_dlss(self):
+        # (an SDK folder fetched before frame generation's runtime was in the table: DLSS's goes in, fetch() adds the other)
+        rt = ngx_sdk.runtime(self.sdk, "windows")
+        os.makedirs(os.path.dirname(rt))
+        Path(rt).write_bytes(b"runtime")
+        game = os.path.join(self.temp.name, "game")
+        dst = ngx_sdk.install_runtime(self.sdk, "windows", os.path.join(game, "ngx"))
+        self.assertEqual(os.listdir(os.path.join(game, "ngx")), ["nvngx_dlss.dll"])
+        self.assertEqual(Path(dst).read_bytes(), b"runtime")
 
 
 class LicenseTests(unittest.TestCase):

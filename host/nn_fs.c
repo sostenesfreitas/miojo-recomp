@@ -11,6 +11,9 @@
 #include <string.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 
 /* (hookshot, #1468) A game folder whose deepest file passes 260 characters (MAX_PATH: "E:\Games\...\romfs\Event\EventSetting\
    Ev..." at 262) is read too. The host paths here are up to HOS_FS_PATH bytes, and on Windows each file call goes through
@@ -242,12 +245,28 @@ HLE(_ZN2nn2fs8MountRomEPKc) {
     RET(mount(gstr(ARG(0)), hos_romfs_dir, 0) ? 0 : R_NOT_MOUNTED);
 }
 
+/* (hookshot) the folder the game's saves are mounted from, for the control bridge's saves (host/control.c) */
+static char save_root[HOS_FS_PATH];
+int hos_fs_save_root(char *out, size_t cap) {
+    AcquireSRWLockShared(&mount_lock);
+    const int have = save_root[0] != 0;
+    if (have) snprintf(out, cap, "%s", save_root);
+    ReleaseSRWLockShared(&mount_lock);
+    return have;
+}
+
 static int user_mount(const char *name, const char *sub) {
     char root[HOS_FS_PATH];
     snprintf(root, sizeof root, "%s\\%s", hos_user_dir, sub);
     make_dirs(root);
     CreateDirectoryA(root, NULL);
-    return mount(name, root, 1);
+    const int ok = mount(name, root, 1);
+    if (ok && !strncmp(sub, "save\\", 5)) {
+        AcquireSRWLockExclusive(&mount_lock);
+        snprintf(save_root, sizeof save_root, "%s", root);
+        ReleaseSRWLockExclusive(&mount_lock);
+    }
+    return ok;
 }
 
 /* nn::fs::IsSaveDataExisting(ApplicationId, account::Uid const&) -> bool */
@@ -316,7 +335,7 @@ int hos_blank_cached_icon(const char *guest, const char *host);   /* (totk_icon_
 /* HOS_FS_TRACE=1: every file opened (or not found) is logged */
 static int fs_trace(void) {
     static int on = -1;
-    if (on < 0) on = getenv("HOS_FS_TRACE") != NULL;
+    if (on < 0) on = env_on("HOS_FS_TRACE");
     return on;
 }
 /* OpenFile(FileHandle*, char const* path, int mode): mode bit 0 read, bit 1 write, bit 2 append */
@@ -324,16 +343,28 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
     char path[HOS_FS_PATH];
     int writable = 0;
     const char *g = gstr(ARG(1));
-    if (!host_path(g, path, sizeof path, &writable)) { hos_log("fs: OpenFile(%s): unknown mount", g); RET(R_PATH_NOT_FOUND); return; }
+    /* (mkw-recomp 16bc3bc: the host's file calls block, so the virtual core goes to another thread meanwhile, as
+       Horizon would run another while this one waits for the file system. OoT's ARes loaders held it up to 250 ms.)
+       (hookshot, #1929) From before host_path: the first open of a button-prompt file builds it there (prompts.c,
+       251-357 ms on Linux), and other threads that open it meanwhile wait in there for the build; with the core held
+       through that, four threads waiting for the core ran without one within 50 ms */
+    const int away = hos_vcore_away();
+    if (!host_path(g, path, sizeof path, &writable)) {
+        if (away) hos_vcore_back();
+        hos_log("fs: OpenFile(%s): unknown mount", g);
+        RET(R_PATH_NOT_FOUND);
+        return;
+    }
     int want_write = (ARG(2) & 6) != 0;
-    if (want_write && !writable) { RET(R_PATH_NOT_FOUND); return; }
+    if (want_write && !writable) { if (away) hos_vcore_back(); RET(R_PATH_NOT_FOUND); return; }
     /* (mkw-recomp) HOS_NO_MOVIES=1: MKW's WebM movies (cup openings, billboards, emblems) are not found, and the
        game goes on without them (decoded by nn_video.c otherwise) */
-    if (!want_write && getenv("HOS_NO_MOVIES")) {
+    if (!want_write && env_on("HOS_NO_MOVIES")) {
         const size_t n = strlen(g);
         if (n > 5 && !_stricmp(g + n - 5, ".webm")) {
             static int logged;
             if (!logged++) hos_log("fs: OpenFile(%s): movies are left out (HOS_NO_MOVIES)", g);
+            if (away) hos_vcore_back();
             RET(R_PATH_NOT_FOUND);
             return;
         }
@@ -341,7 +372,7 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
     { int hos_ultrawide_redirect(const char *guest, char *out, size_t cap);   /* (totk_ultrawide_ui.c: the HUD) */
       char alt[HOS_FS_PATH];
       if (!want_write && hos_ultrawide_redirect(g, alt, sizeof alt)) snprintf(path, sizeof path, "%s", alt); }
-    if (!want_write && hos_blank_cached_icon(g, path)) { RET(R_PATH_NOT_FOUND); return; }
+    if (!want_write && hos_blank_cached_icon(g, path)) { if (away) hos_vcore_back(); RET(R_PATH_NOT_FOUND); return; }
     {   /* HOS_FS_OVERLAY=<folder> (a test): a file of the game's data found there is read in place of the game's own */
         const char *ov = getenv("HOS_FS_OVERLAY");
         const char *rel = !want_write && ov ? strstr(g, ":/") : NULL;
@@ -354,9 +385,6 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
             }
         }
     }
-    /* (mkw-recomp 16bc3bc: the host's file calls block, so the virtual core goes to another thread meanwhile, as
-       Horizon would run another while this one waits for the file system. OoT's ARes loaders held it up to 250 ms) */
-    const int away = hos_vcore_away();
     HANDLE h = CreateFileA(path, GENERIC_READ | (want_write ? GENERIC_WRITE : 0), FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (away) hos_vcore_back();
@@ -592,8 +620,12 @@ HLE(_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci) {
     G64(ARG(0)) = new_handle(dh);
     RET(0);
 }
+/* (hookshot) A directory's listing is read, counted and closed under one lock: a CloseDirectory on another guest thread freed
+   the handle (and its find handle) while a ReadDirectory or GetDirectoryEntryCount still walked it */
+static SRWLOCK dir_lock = SRWLOCK_INIT;
 /* ReadDirectory(long* count, DirectoryEntry* entries, DirectoryHandle, long max) */
 HLE(_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl) {
+    AcquireSRWLockExclusive(&dir_lock);
     Handle *dh = get_handle(c, ARG(2));
     int64_t n = 0, max = (int64_t)ARG(3);
     while (n < max && !dh->find_done) {
@@ -620,11 +652,13 @@ HLE(_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl) {
         G64(e + 0x308) = x->size;
         n++;
     }
+    ReleaseSRWLockExclusive(&dir_lock);
     G64(ARG(0)) = (uint64_t)n;
     RET(0);
 }
 /* (hookshot) GetDirectoryEntryCount(long* count, DirectoryHandle): every entry the open mode lists, read or not */
 HLE(_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE) {
+    AcquireSRWLockExclusive(&dir_lock);
     Handle *dh = get_handle(c, ARG(1));
     int64_t n = 0;
     WIN32_FIND_DATAA fd;
@@ -640,13 +674,16 @@ HLE(_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE) {
     }
     for (int i = 0; i < dh->nextras; i++)
         n += (dh->extras[i].is_dir && (dh->is_dir & 1)) || (!dh->extras[i].is_dir && (dh->is_dir & 2));
+    ReleaseSRWLockExclusive(&dir_lock);
     G64(ARG(0)) = (uint64_t)n;
     RET(0);
 }
 HLE(_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE) {
+    AcquireSRWLockExclusive(&dir_lock);
     Handle *dh = get_handle(c, ARG(0));
     if (dh->find != INVALID_HANDLE_VALUE) FindClose(dh->find);
     free_handle(ARG(0));
+    ReleaseSRWLockExclusive(&dir_lock);
     free(dh->extras);
     free(dh);
 }

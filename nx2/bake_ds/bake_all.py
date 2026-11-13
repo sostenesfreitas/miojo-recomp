@@ -50,7 +50,7 @@ def translator_stamp(root=ROOT):
     files = [os.path.join(d, f) for top in ("eden", "sirit", "compat")
              for d, _, fs in os.walk(os.path.join(vk, top)) for f in fs]
     files = sorted(files) + [os.path.join(vk, n) for n in ("vk_shader.cpp", "vk_bank.cpp", "vk_state.h", "vk_api.h")]
-    h = hashlib.sha1()
+    h = hashlib.sha1(usedforsecurity=False)
     for f in files:
         with open(f, "rb") as src:
             h.update(os.path.relpath(f, vk).replace(os.sep, "/").encode() + src.read().replace(b"\r\n", b"\n"))

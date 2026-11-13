@@ -356,8 +356,8 @@
     },
     {
       "id": "ultrawide",
-      "label": "Ultrawide",
-      "help": "Monitor's shape widens the camera to fill a screen wider than 16:9. The HUD stays stretched. Applies after a restart.",
+      "label": "Aspect ratio",
+      "help": "The picture's shape: your monitor's (the default: wider on an ultrawide, narrower on 4:3 or 16:10), or the game's 16:9. Applies after a restart.",
       "choices": [
         {
           "label": "16:9",
@@ -373,7 +373,7 @@
         }
       ],
       "defaults": {
-        "ultrawide": "0"
+        "ultrawide": "1"
       }
     },
     {

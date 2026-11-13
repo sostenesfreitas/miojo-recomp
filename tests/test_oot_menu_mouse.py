@@ -313,6 +313,9 @@ class OotMenuMouseTests(unittest.TestCase):
             # (beside the stand-in hos.h, and its "../gpu/vk/vk_api.h" the stand-in's)
             (tmp / "host" / "hos.h").write_text(HOS_H, encoding="utf-8")
             (tmp / "gpu" / "vk" / "vk_api.h").write_text(VK_API_H, encoding="utf-8")
+            # (and the real "../gpu/vk/compat/hookshot_env.h": env_on, the switches' rule)
+            (tmp / "gpu" / "vk" / "compat").mkdir()
+            shutil.copy(ROOT / "gpu" / "vk" / "compat" / "hookshot_env.h", tmp / "gpu" / "vk" / "compat" / "hookshot_env.h")
             shutil.copy(ROOT / "host" / "oot_menu.c", tmp / "host" / "oot_menu.c")
             (tmp / "host" / "t.c").write_text(FIXTURE, encoding="utf-8")
             binary = tmp / "t.exe"

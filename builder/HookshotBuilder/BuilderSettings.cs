@@ -8,9 +8,12 @@ sealed class BuilderSettings
     public string? Romfs { get; set; }
     public string? Exefs { get; set; }
     public bool Dlss { get; set; }   // (NVIDIA DLSS ticked: NVIDIA's license was accepted)
+    public bool DlssLicense { get; set; }   // (NVIDIA's license accepted on the DLSS tick: what keeps an update's DLSS, not the SDK's files)
     public bool Fsr { get; set; }    // (AMD FSR 4 ticked)
+    public bool FsrLicense { get; set; }   // (AMD's license accepted when it was ticked: a tick saved before it was asked has not)
     public bool PrepareLater { get; set; }   // ("Prepare shaders now" unticked)
-    public int? MemoryGb { get; set; }   // (Build memory; null: Automatic. The updates use it too, as they show no menu)
+    public int? MemoryGb { get; set; }
+    public string? Track { get; set; }   // (the update track chosen, Updater.cs: release, rc or nightly; null: these tools' own)   // (Build memory; null: Automatic. The updates use it too, as they show no menu)
 
     public static BuilderSettings? Load(string path)
     {

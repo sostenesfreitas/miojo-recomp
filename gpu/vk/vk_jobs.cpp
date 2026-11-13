@@ -73,7 +73,10 @@ void worker() {
 }
 
 void start() {
-    const unsigned n = std::clamp(std::thread::hardware_concurrency() / 3, 2u, 4u);
+    // (hookshot: with 16 hardware threads or more, 6 workers; RX_VK_WORKERS=<n>: n, 1 to 16)
+    const unsigned hw = std::thread::hardware_concurrency();
+    unsigned n = hw >= 16 ? 6u : std::clamp(hw / 3, 2u, 4u);
+    if (const char* e = getenv("RX_VK_WORKERS")) n = (unsigned)std::clamp(atoi(e), 1, 16);
     for (unsigned i = 0; i < n; i++) std::thread(worker).detach();
     started = true;
     logf("vk: %u background workers (shader translation, pipelines)", n);
@@ -145,6 +148,13 @@ void jobs_wait(const std::atomic<bool>& flag) {
                 break;
             }
     done_cv.wait(lk, [&] { return flag.load(std::memory_order_acquire); });
+}
+bool jobs_wait_for(const std::atomic<bool>& flag, double ms) {
+    if (flag.load(std::memory_order_acquire)) return true;
+    if (ms <= 0) return false;
+    std::unique_lock lk(mu);
+    return done_cv.wait_for(lk, std::chrono::duration<double, std::milli>(ms),
+                            [&] { return flag.load(std::memory_order_acquire); });
 }
 int jobs_pending() {
     return pending.load();

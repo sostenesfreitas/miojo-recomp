@@ -1095,10 +1095,22 @@ int FindLayout(uint mode) {
 }
 
 
+// (Frizti/Fritchii f52631cf6, from CheezerWheezer's Lichii) The image's size: a block at the right or bottom edge of an
+// image whose size is not a multiple of the block size reaches past it. Storing those texels is undefined (robustImageAccess2
+// is off); on AMD they landed in other images' memory (black blocks and a crosshatch in OoT on an RX 6750 XT, at last a GPU
+// fault), where NVIDIA dropped them.
+ivec3 image_extent;
+
+void StoreTexel(ivec3 texel, vec4 value) {
+    if (all(lessThan(texel.xy, image_extent.xy))) {
+        imageStore(dest_image, texel, value);
+    }
+}
+
 void FillError(ivec3 coord) {
     for (uint j = 0; j < block_dims.y; j++) {
         for (uint i = 0; i < block_dims.x; i++) {
-            imageStore(dest_image, coord + ivec3(i, j, 0), vec4(0.0, 0.0, 0.0, 0.0));
+            StoreTexel(coord + ivec3(i, j, 0), vec4(0.0, 0.0, 0.0, 0.0));
         }
     }
 }
@@ -1115,7 +1127,7 @@ void FillVoidExtentLDR(ivec3 coord) {
     const float b = float(b_u) / 65535.0f;
     for (uint j = 0; j < block_dims.y; j++) {
         for (uint i = 0; i < block_dims.x; i++) {
-            imageStore(dest_image, coord + ivec3(i, j, 0), vec4(r, g, b, a));
+            StoreTexel(coord + ivec3(i, j, 0), vec4(r, g, b, a));
         }
     }
 }
@@ -1389,7 +1401,7 @@ void DecompressBlock(ivec3 coord) {
                 p = Cf / 65535.0f;
             }
 
-            imageStore(dest_image, coord + ivec3(i, j, 0), clamp(p, 0.0f, 1.0f).gbar);
+            StoreTexel(coord + ivec3(i, j, 0), clamp(p, 0.0f, 1.0f).gbar);
         }
     }
 }
@@ -1421,7 +1433,8 @@ void main() {
     offset += swizzle;
 
     const ivec3 coord = ivec3(gl_GlobalInvocationID * uvec3(block_dims, 1));
-    if (any(greaterThanEqual(coord, imageSize(dest_image)))) {
+    image_extent = imageSize(dest_image);
+    if (any(greaterThanEqual(coord, image_extent))) {
         return;
     }
     local_buff = astc_data[offset / 16];

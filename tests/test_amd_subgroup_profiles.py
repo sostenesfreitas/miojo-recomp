@@ -32,7 +32,10 @@ using VkShaderStageFlags = uint32_t;
 constexpr uint32_t VK_DRIVER_ID_AMD_PROPRIETARY = 1;
 struct {
     uint32_t sg32_stages = 0, subgroup_size = 32, subgroup_max = 32, driver_id = 0;
+    struct { bool shaderFloat16 = true; } vk12;   // (k10: f16 lowered where the GPU has none; here it has)
+    bool float_atomic_add = false;
     struct { struct { uint64_t minStorageBufferOffsetAlignment = 16; } limits; } props;
+    struct { bool gather_offset = false; } fixes;   // (vk_vendor.h: make_profile reads the gather offset from it)
 } dev;
 
 using Shader::Stage;
@@ -63,7 +66,14 @@ int main(int argc, char** argv) {
     dev.subgroup_max = number(2);
     dev.sg32_stages = number(3);
     dev.driver_id = number(4);
+    // (storage buffers bound and translated at 16 bytes at least: AMD's 4 made the 8- and 16-byte vector views inexact)
+    for (const uint64_t device : {uint64_t{4}, uint64_t{16}, uint64_t{64}}) {
+        dev.props.limits.minStorageBufferOffsetAlignment = device;
+        assert(storage_binding_align() == std::max<uint64_t>(device, 16));
+    }
+    dev.props.limits.minStorageBufferOffsetAlignment = 4;
     check(profile(), number(5));
+    assert(profile().min_ssbo_alignment == 16);
     check(profile_graphics(VK_SHADER_STAGE_VERTEX_BIT), number(6));
     check(profile_graphics(VK_SHADER_STAGE_FRAGMENT_BIT), number(7));
     check(profile_pinned(), number(8));
@@ -100,16 +110,20 @@ def main():
 void check_stamp(uint32_t size, uint32_t pinned, bool workaround, bool forced) {
     bool added = false;
     const auto add = [&](const uint32_t* values, size_t bytes) {
-        assert(bytes == 5 * sizeof(uint32_t));
+        assert(bytes == 6 * sizeof(uint32_t));
         assert(values[0] == uint32_t(size > 32) && values[1] == size);
         assert(values[2] == uint32_t(workaround) && values[3] == pinned && values[4] == uint32_t(forced));
+        // (the storage binding alignment the translation is built with: a cache of a 16-aligned GPU is no use on a 64-aligned one)
+        assert(values[5] == uint32_t(storage_binding_align()));
         added = true;
     };
 ''' + stamp + r'''
     assert(added);
 }
 '''
-    fixture = (FIXTURE + section(shader, "Shader::Profile make_profile(", "Shader::HostTranslateInfo host_info()")
+    internal = (VK / "vk_internal.h").read_text(encoding="utf-8")
+    fixture = (FIXTURE + section(internal, "inline uint64_t storage_binding_align()", "/// A range of guest memory")
+               + section(shader, "Shader::Profile make_profile(", "Shader::HostTranslateInfo host_info()")
                + section(shader, "const Shader::Profile& profile()", "const std::vector<Code>& codes_of(")
                + section(warp, "Id HostThreadId(", "Id GuestLane(")
                + section(warp, "bool UseShuffleFallback(", "Id ShuffleAbsolute(") + check_stamp + CASES)

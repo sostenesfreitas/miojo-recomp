@@ -119,6 +119,15 @@ struct Reader {
             dict = ZSTD_createDDict(zsdic.data(), zsdic.size());
         return dict != nullptr;
     }
+    /// A font of another script by name, for the menu's fallback letters (vk_imgui.cpp script_fonts): the .bfotf or the .bfttf,
+    /// whatever letters it has; empty when the files do not have it
+    std::vector<unsigned char> read_script(const char* name) const {
+        std::vector<unsigned char> packed, raw;
+        if (!dict) return {};
+        for (const char* ext : {".Nin_Ounce_NVN2.bfotf.zs", ".Nin_Ounce_NVN2.bfttf.zs"})
+            if (read_file(romfs + "Font2/Scalable/" + name + ext, packed) && unzstd(packed, dict, raw)) return bfotf_font(raw);
+        return {};
+    }
     /// A font by name ("ClarimoUDPE-Regular"); empty when the files do not have it, or it has no Latin letters
     std::vector<unsigned char> read(const char* name) const {
         std::vector<unsigned char> packed, raw;

@@ -6,6 +6,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -74,7 +77,7 @@ def main():
             code = fixture.replace("/* BACKEND */", types + "\n" + state + "\n" + block(source, "void make_uniform_layout()") + "\n" + helper)
             cpp, exe = Path(tmp) / (name + ".cpp"), Path(tmp) / (name + ".exe")
             cpp.write_text(code, encoding="utf-8")
-            subprocess.run([args.cxx, "-std=c++20", "-O1", "-pthread", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers", "-I" + args.headers, str(cpp), "-o", str(exe)], check=True)
+            subprocess.run([args.cxx, "-std=c++20", "-include", ENV_ON_H, "-O1", "-pthread", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers", "-I" + args.headers, str(cpp), "-o", str(exe)], check=True)
             for cache in ["coherent", "noncoherent"]:
                 for case in ["queued", "growth", "reuse", "workers", "failure", "growth-off", "empty", "no-recording", "initial-missing", "admission-failure", "fence-reuse", "batch-reuse"]:
                     subprocess.run([str(exe), case, cache], check=True, timeout=20)

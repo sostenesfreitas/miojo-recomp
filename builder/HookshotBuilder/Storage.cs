@@ -11,7 +11,7 @@ namespace HookshotBuilder;
 /// game uses, and its copy of the game files (.hookshot_exefs) is what updates build from
 static class Storage
 {
-    public static string Base => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HookshotBuilder");
+    public static string Base => BuilderHome.Base;
 
     /// About what a build leaves in the build files folder (the translated code and its compiled objects): said before the build
     public const long BuildFilesBytes = 4L << 30;
@@ -26,7 +26,7 @@ static class Storage
         {
             try
             {
-                var chosen = File.ReadAllText(Path.Combine(Base, "work.txt")).Trim();
+                var chosen = BuilderHome.LoadPath(File.ReadAllText(Path.Combine(Base, "work.txt")).Trim()) ?? "";
                 if (chosen.Length > 2 && Path.IsPathFullyQualified(chosen)) return chosen;
             }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
@@ -40,6 +40,10 @@ static class Storage
     /// --fetch-ngx-sdk, scripts/ngx_sdk.py): HOOKSHOT_NGX_SDK. NVIDIA's files, never part of the builder or its downloads
     public static string NgxSdk => Path.Combine(Base, "ngx-sdk");
 
+    /// (AMD FSR 4, only when ticked) AMD's FSR runtime, downloaded under AMD's license by the build (make_game.py
+    /// --fetch-fsr-runtime, scripts/ffx_sdk.py): HOOKSHOT_FFX_SDK. AMD's files, never part of the builder or its downloads
+    public static string FfxSdk => Path.Combine(Base, "ffx-sdk");
+
     /// The build files go to a folder of their own in the one the player picked (null: back to the builder's own). What the last
     /// builds left at the old place goes: the next build would not look for it there
     public static void MoveWork(string? picked)
@@ -50,7 +54,7 @@ static class Storage
         Directory.CreateDirectory(to);
         Directory.CreateDirectory(Base);
         if (picked == null) File.Delete(Path.Combine(Base, "work.txt"));
-        else File.WriteAllText(Path.Combine(Base, "work.txt"), to);
+        else File.WriteAllText(Path.Combine(Base, "work.txt"), BuilderHome.SavePath(to));
         foreach (var d in WorkParts(old)) Delete(d);
         if (!Same(old, Base))
             try { Directory.Delete(old); } catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }   // (only when empty)
@@ -73,13 +77,26 @@ static class Storage
         return running.StartsWith(Path.GetFullPath(versionDir).TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// make_game.py keep_translation left the lift's small files in sa (its .lift_key marked "kept"): the next update with the same
+    /// tools skips the lift with them. Not let go after a build (Free up space still lets them go)
+    static bool KeptTranslation(string sa)
+    {
+        try
+        {
+            var words = File.ReadAllText(Path.Combine(sa, "gen", ".lift_key")).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            return words.Length >= 3 && words[2] == "kept";
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return false; }
+    }
+
     /// What Free lets go. afterBuild: what goes once the game is ready, the compiled objects of the build (objcache, which make_game.py
     /// prunes to them) and their system headers' stamp kept, so that the next update compiles only what changed (issue 1287: every
     /// update compiled all ~600 files again, an hour and more). The Free up space button lets those go too
     static IEnumerable<string> Freeable(bool afterBuild = false)
     {
         foreach (var d in afterBuild ? new[] { "sa", "exefs", "probe" } : new[] { "objcache", "sa", "exefs", "probe" })
-            yield return Path.Combine(Work, d);
+            if (!(afterBuild && d == "sa" && KeptTranslation(Path.Combine(Work, d))))
+                yield return Path.Combine(Work, d);
         foreach (var d in new[] { "downloads", "update" })
             yield return Path.Combine(Base, d);
         var versions = Path.Combine(Base, "versions");

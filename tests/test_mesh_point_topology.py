@@ -85,8 +85,9 @@ def main():
 
     context = CONTEXT.read_text(encoding="utf-8")
     define = block(context, "void EmitContext::DefineMesh(")
-    if "mesh_map_bytes = 4 + mesh_info.Corners() * mesh_info.max_primitives" not in define:
-        raise SystemExit("the map region is not sized by the index bytes per primitive")
+    # Whole blocks of 32 primitives: the program writes the index bytes of every primitive block, lanes past max_primitives too
+    if "mesh_map_bytes = 4 + mesh_info.Corners() * Common::DivCeil(mesh_info.max_primitives, 32U) * 32" not in define:
+        raise SystemExit("the map region is not sized by the index bytes per primitive, in whole blocks of 32 primitives")
     if not re.search(r"corners == 1\s*\?\s*spv::BuiltIn::PrimitivePointIndicesEXT", define):
         raise SystemExit("points do not output PrimitivePointIndicesEXT")
     if "TypeArray(U32[corners], primitive_count)" not in define:

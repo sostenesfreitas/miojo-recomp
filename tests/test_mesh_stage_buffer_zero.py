@@ -38,7 +38,7 @@ def main():
         raise SystemExit("the zeroing branches: the prologue's entry block is a phi predecessor")
     if "Clamped(ctx," not in zero_fn:
         raise SystemExit("the zeroing stores are not clamped into their arrays")
-    if 'getenv("RX_VK_MESH_NO_ZERO")' not in mesh:
+    if 'env_on("RX_VK_MESH_NO_ZERO")' not in mesh:
         raise SystemExit("no RX_VK_MESH_NO_ZERO switch")
     print("mesh stage buffer zeroed in the prologue ok")
 

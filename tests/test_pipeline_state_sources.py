@@ -55,6 +55,16 @@ def quiet(f, *a):
         return f(*a)
 
 
+def as_merged(recs, merged):
+    """recs in the merged list's version: converted to version 2 when the merge is (a version 2 source, such as the
+    tour's, makes the whole merge version 2)"""
+    if any(len(r) == tool.SIZE2 for r in merged):
+        (conv,), lost = tool.as_v2([list(recs)], force=True)
+        assert lost == 0
+        return conv
+    return list(recs)
+
+
 class Committed(unittest.TestCase):
     def test_check_passes(self):
         r = subprocess.run([sys.executable, "-I", str(TOOL), "check"], capture_output=True, text=True)
@@ -75,6 +85,7 @@ class Committed(unittest.TestCase):
             want = set()
             for p in tool.sources(tool.sources_dir()):
                 want.update(tool.read(p, strict=True))
+            want = set(as_merged(want, recs))
             self.assertEqual(set(recs), want)
             self.assertEqual(len(recs), len(want))
 
@@ -82,13 +93,15 @@ class Committed(unittest.TestCase):
         c = Path(tool.sources_dir(), tool.CONTRIB)
         old = []
         for name, n in MIGRATED.items():
+            # (a list may grow: add keeps the pipelines it holds first, so the migrated ones are its first n)
             recs = tool.read(str(c / (name + tool.EXT)), strict=True)
-            self.assertEqual(len(recs), n, name)
-            old += recs
+            self.assertGreaterEqual(len(recs), n, name)
+            old += recs[:n]
         self.assertEqual(len(set(old)), sum(MIGRATED.values()), "the split lists overlap")
         self.assertEqual(hashlib.sha256(b"".join(sorted(old))).hexdigest(), MIGRATED_SHA256,
                          "the split lists no longer hold assets/pipeline_states.bin.xz's pipelines")
-        self.assertTrue(set(old) <= set(tool.merged(tool.sources_dir())))
+        merged = tool.merged(tool.sources_dir())
+        self.assertTrue(set(as_merged(old, merged)) <= set(merged))
 
 
 class Tool(unittest.TestCase):

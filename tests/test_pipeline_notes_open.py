@@ -59,8 +59,8 @@ class PipelineNotesOpenTests(unittest.TestCase):
         self.assertLess(read, notes)
         self.assertLess(notes, run.index("program_cache_load_some("))
         self.assertLess(states, run.index("program_cache_load_some("))
-        self.assertIn('if (!getenv("RX_VK_NO_PROGRAM_CACHE"))', run[read:notes])
-        self.assertIn('if (!getenv("RX_VK_NO_STATE_LIST"))', run[notes:states])
+        self.assertIn('if (!env_on("RX_VK_NO_PROGRAM_CACHE"))', run[read:notes])
+        self.assertIn('if (!env_on("RX_VK_NO_STATE_LIST"))', run[notes:states])
         self.assertIn("std::lock_guard lk(note_mu);", run[read:notes])
         self.assertIn("std::lock_guard lk(state_mu);", run[notes:states])
 

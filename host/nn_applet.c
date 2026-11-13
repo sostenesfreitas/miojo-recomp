@@ -3,6 +3,7 @@
    "Player". */
 #include "hos.h"
 #include "hos_paths.h"
+#include "hos_wide_size.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,9 +121,9 @@ static int handheld(void) {
 }
 /* (hookshot) The Insert menu's Output resolution (output_res=, HOS_OUTPUT_RES over it), docked only: a size, "<width>x<height>",
    each side a multiple of 8 (rounded down to one), at least 640 x 360, at most 5120 x 2880's pixels (the largest the render
-   targets' pool, hos_rt_pool_size, was played at) and between 5:4 and 32:9 in shape (host/hos_main.c's screen shapes); anything
-   else is the game's own size, said in the log. The menu offers 1920x1080, 2048x1152, 2560x1440, 3840x2160, 5120x1440 and
-   5120x2880, and any other size as its own choice. The numbers it saved before are read as their sizes: 0 the game's
+   targets' pool, hos_rt_pool_size, was played at) and between 5:4 and 48:9 in shape (host/hos_main.c's screen shapes); anything
+   else is the game's own size, said in the log. The menu offers 2048x1152 and the screen's display modes (gpu/vk/display_modes.h;
+   where they are not known 1920x1080, 2560x1440, 3840x2160, 5120x1440 and 5120x2880), and any other size as its own choice. The numbers it saved before are read as their sizes: 0 the game's
    2048 x 1152, 1 2560 x 1440, 2 3840 x 2160, 3 1920 x 1080, 4 5120 x 1440, 5 5120 x 2880. The game's frame is its display size
    (2560 x 1440 as shipped; nx2/oot_patches.py apply_output_size asks hos_output_size) times its graphics scale
    (GetCurrentGraphicsScale: 0 x1, 1 x0.8, 2 x0.667). Here it saw scale 1 (x0 left at the call before's answer), so 2048 x 1152,
@@ -134,8 +135,8 @@ int hos_output_parse(const char *text, uint32_t *w, uint32_t *h) {   /* (an expl
     if (!text) return 0;
     if (sscanf(text, "%u%*[xX]%u", &a, &b) == 2) {
         a &= ~7u, b &= ~7u;
-        if (a < 640 || b < 360 || (uint64_t)a * b > 5120ULL * 2880 || (uint64_t)a * 4 < (uint64_t)b * 5 || (uint64_t)a * 9 > (uint64_t)b * 32) {
-            hos_log("oe: output_res=%s is not a size the game can use (640x360 to 5120x2880's pixels, 5:4 to 32:9): the game's own", text);
+        if (!hos_output_size_valid(a, b)) {
+            hos_log("oe: output_res=%s is not a size the game can use (640x360 to 5120x2880's pixels, 5:4 to 48:9): the game's own", text);
             return 0;
         }
         if (a == 2048 && b == 1152) return 0;   /* (the game's own) */

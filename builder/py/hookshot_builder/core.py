@@ -40,8 +40,11 @@ class Tools:
             cands.append(os.path.join(cur, "HookshotBuilder", "tools"))
         for c in cands:
             if c and os.path.isfile(os.path.join(c, "nx2", "make_game.py")):
+                # (tools with a Python of their own run no other. With its python.exe gone, the first "python" Windows found
+                # ran them instead: another version, without the modules they need, or not one the player chose to trust
+                # with the game files. Its start now fails and says how to get it back: own_python_missing)
                 py = os.path.join(c, "python", "python.exe")
-                return Tools(c, py if os.path.isfile(py) else "python")
+                return Tools(c, py if os.path.isfile(py) or os.path.isdir(os.path.join(c, "python")) else "python")
         d = paths.APP_DIR
         while True:   # (a source checkout: builder/py/hookshot_builder in it)
             if os.path.isfile(os.path.join(d, "nx2", "make_game.py")):
@@ -50,6 +53,15 @@ class Tools:
             if up == d:
                 return None
             d = up
+
+
+OWN_PYTHON_MISSING = ("The builder's own Python (tools/python/python.exe) is missing. Your antivirus probably removed it: restore "
+                      "it from quarantine, then try again.")
+
+
+def own_python_missing(tools):
+    """The tools' own Python is gone: an antivirus took it, most often, after a false alarm on the download"""
+    return not os.path.isfile(tools.python) and os.path.isdir(os.path.join(tools.root, "python"))
 
 
 def build_env(tools, workers=None, ngx_sdk=None):
@@ -98,7 +110,7 @@ class Runner:
                                  stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
                                  creationflags=CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS)
         except OSError as e:
-            self.on_finished("The build tools could not start: %s" % e)
+            self.on_finished(OWN_PYTHON_MISSING if own_python_missing(self.tools) else "The build tools could not start: %s" % e)
             return
         self.process = p
 
@@ -128,9 +140,8 @@ def check(tools, args):
         p = subprocess.run(build_command(tools, args), cwd=tools.root, env=build_env(tools), capture_output=True,
                            stdin=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
     except OSError:
-        if tools.python == "python" and os.path.isdir(os.path.join(tools.root, "python")):
-            return False, ("The builder's own Python (tools/python/python.exe) is missing. Your antivirus probably removed it: restore "
-                           "it from quarantine, then try again.")
+        if own_python_missing(tools):
+            return False, OWN_PYTHON_MISSING
         return False, "Python 3 was not found. Install it from python.org (not the Microsoft Store build)."
     result, answered = (False, "The game files could not be read."), False
     for line in p.stdout.decode("utf-8", "replace").splitlines():
@@ -232,9 +243,20 @@ def _kept_version(d):
     return bool(cur) and _same(cur, d)
 
 
+def kept_translation(sa):
+    """make_game.py keep_translation left the lift's small files in sa (its .lift_key marked "kept"): the next update with the same
+    tools skips the lift with them. Not let go after a build (Free up space still lets them go)"""
+    try:
+        with open(os.path.join(sa, "gen", ".lift_key"), encoding="utf-8") as f:
+            return f.read().split()[2:3] == ["kept"]
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
 def freeable(after_build=False):
     for d in (("sa", "exefs", "probe") if after_build else ("objcache", "sa", "exefs", "probe")):
-        yield os.path.join(work(), d)
+        if not (after_build and d == "sa" and kept_translation(os.path.join(work(), d))):
+            yield os.path.join(work(), d)
     for d in ("downloads", "update"):
         yield os.path.join(paths.base(), d)
     v = paths.versions()

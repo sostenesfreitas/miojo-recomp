@@ -39,9 +39,13 @@ def main():
     if "capture_nt() ? copy_nt : std::memcpy" not in source:
         raise SystemExit("the guarded copy does not use copy_nt")
     part = function(source, "void copy_part(const CopyPart& w)")
-    retry = part[part.index("for (int64_t q = i; q < j; q++)"):]
-    if "copy_fence();" not in retry[:retry.index("i = j;")]:
-        raise SystemExit("copy_part does not fence after its page-by-page retry")
+    # (the page-by-page retries: copy_part's plain and staged copies (the shadow staging), each fenced after its loop)
+    retries = [i for i in range(len(part)) if part.startswith("for (int64_t q = a; q < b; q++)", i)]
+    if len(retries) < 2:
+        raise SystemExit("copy_part's page-by-page retries not found")
+    for at in retries:
+        if "copy_fence();" not in part[at:part.index("};", at)]:
+            raise SystemExit("copy_part does not fence after its page-by-page retry")
     if platform.machine().lower() not in ("amd64", "x86_64", "x64"):
         print("SKIP: not an x86-64 host")
         return

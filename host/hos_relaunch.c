@@ -7,18 +7,33 @@
      AppImage (hookshot-launch starts it with the AppImage's variables taken away), so /proc/self/exe is the game;
      argv[0] on the PATH if that is gone (the folder built again meanwhile).
      Windows: a new process of this executable (GetModuleFileNameW) with this one's command line (GetCommandLineW), in
-     the same folder and environment; then this one exits. */
+     the same folder, with the environment this one started with (kept by hos_relaunch_keep_env before hookshot_env.txt
+     was read: the file's lines are read again, and its edits since are taken, not left out as the environment's own);
+     then this one exits. */
 #include "hos.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include "hos_relaunch.h"
 
 static volatile LONG relaunch_asked;
 
 void hos_relaunch_ask(void) { InterlockedExchange(&relaunch_asked, 1); }
 
 #ifdef _WIN32
+static wchar_t *start_env;   /* (the environment block at the start: hos_relaunch_keep_env) */
+
+void hos_relaunch_keep_env(void) {
+    wchar_t *b = GetEnvironmentStringsW();
+    if (!b) return;
+    size_t n = 0;
+    while (b[n]) n += wcslen(b + n) + 1;
+    start_env = (wchar_t *)malloc((n + 1) * sizeof *start_env);
+    if (start_env) memcpy(start_env, b, (n + 1) * sizeof *start_env);
+    FreeEnvironmentStringsW(b);
+}
+
 static void relaunch(void) {
     wchar_t exe[MAX_PATH * 4];
     const DWORD n = GetModuleFileNameW(NULL, exe, MAX_PATH * 4);
@@ -41,7 +56,8 @@ static void relaunch(void) {
     wchar_t pid[16];
     swprintf(pid, 16, L"%lu", (unsigned long)GetCurrentProcessId());
     SetEnvironmentVariableW(L"HOS_RESTART_OF", pid);
-    if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+    wchar_t *env = start_env ? hos_relaunch_env_block(start_env, L"HOS_RESTART_OF", pid) : NULL;   /* (NULL: this one's) */
+    if (CreateProcessW(exe, cmd, NULL, NULL, FALSE, env ? CREATE_UNICODE_ENVIRONMENT : 0, env, NULL, &si, &pi)) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
     } else {
@@ -49,9 +65,9 @@ static void relaunch(void) {
         hos_log_flush();
     }
     free(cmd);
+    free(env);
 }
 #else
-#include "hos_relaunch.h"
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>

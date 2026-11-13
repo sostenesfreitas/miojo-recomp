@@ -41,17 +41,18 @@ static_assert(MKWVK_API_VERSION >= 14);
 static_assert(offsetof(MkwVkRenderer, jitter_sample) > offsetof(MkwVkRenderer, option_set));
 std::atomic<uint64_t> clock_frame{100};
 bool env_off = false;
+const char* env_off_name = nullptr;   // (one switch set to 0 alone: "fsr-jitter-off" below)
 uint64_t texture_frame_no() { return clock_frame.load(); }
-int env_switch(const char*) { return env_off ? 0 : -1; }
+int env_switch(const char* name) { return env_off || (env_off_name && std::strcmp(name, env_off_name) == 0) ? 0 : -1; }
 std::atomic<bool> dlss_on{true}, fsr_on{false};
-std::atomic<bool> fsr4_on{false};
-namespace ur { enum { GAME=0, DLSS=1, FSR4=4 }; bool is_fsr4(int mode) { return mode==FSR4; } }
-int temporal_mode() { return fsr4_on ? ur::FSR4 : dlss_on ? ur::DLSS : ur::GAME; }
+std::atomic<bool> fsr4_on{false}, fsr3_chain_on{false};
+namespace ur { enum { GAME=0, DLSS=1, FSR3=3, FSR4=4 }; bool is_fsr4(int mode) { return mode==FSR4; } }
+int temporal_mode() { return fsr3_chain_on ? ur::FSR3 : fsr4_on ? ur::FSR4 : dlss_on ? ur::DLSS : ur::GAME; }
 bool fsr3_wanted() { return fsr_on.load(); }
 
 namespace gpu {
 struct State {
-    struct Engine { std::atomic<bool> failed{false}; } engines[2];
+    struct Engine { std::atomic<bool> failed{false}; } engines[3];   // (DLSS, FSR 4, FSR 3.1 on the chain)
     std::atomic<uint64_t> last_frame{100};
     TemporalJitter jitter;
     // Baseline adapters use the old fields, allowing the unchanged baseline to compile and fail causally.
@@ -189,6 +190,22 @@ int main(int argc, char** args) {
         std::puts("PASS: explicit jitter-off paths are inactive");
         return 0;
     }
+    if (argc > 1 && std::strcmp(args[1], "fsr-jitter-off") == 0) {
+        // RX_VK_FSR_JITTER=0 alone: FSR 3.1 on the chain gets no jitter, DLSS and FSR 4 keep theirs
+        env_off_name = "RX_VK_FSR_JITTER";
+        host_read();
+        presents++;
+        host_read();
+        CHECK(equal(observed, {1720, 720, 32}));
+        fsr3_chain_on = true;
+        CHECK(equal(gpu::temporal_jitter_sample(), {}));
+        fsr3_chain_on = false;
+        CHECK(equal(gpu::temporal_jitter_sample(), {1720, 720, 32}));
+        dlss_on = false; fsr4_on = true;
+        CHECK(equal(gpu::temporal_jitter_sample(), {1720, 720, 32}));
+        std::puts("PASS: RX_VK_FSR_JITTER=0 turns off FSR 3.1's jitter on the chain only");
+        return 0;
+    }
     host_read();
     CHECK(equal(observed, {1920, 1080, 8})); // A whole sample, even when B is published before the callback returns.
     CHECK(callbacks == 1 && scalar_queries == 0);
@@ -204,6 +221,16 @@ int main(int argc, char** args) {
     CHECK(equal(gpu::temporal_jitter_sample(), {}));
     gpu::state.engines[1].failed = false;
     fsr4_on = false;
+    // FSR 3.1 on the chain (vk_fsr3.h fsr3_on_chain) takes the same producer too, behind its own failure gate (slot 2)
+    fsr3_chain_on = true;
+    CHECK(equal(gpu::temporal_jitter_sample(), {1720, 720, 32}));
+    gpu::state.engines[2].failed = true;
+    CHECK(equal(gpu::temporal_jitter_sample(), {}));
+    gpu::state.engines[1].failed = true;   // (another engine's gate is not FSR 3.1's)
+    gpu::state.engines[2].failed = false;
+    CHECK(equal(gpu::temporal_jitter_sample(), {1720, 720, 32}));
+    gpu::state.engines[1].failed = false;
+    fsr3_chain_on = false;
     dlss_on = false; fsr_on = true;
     gpu::fsr3_inputs::upscaled(2293, 960, 3440, 1440);
     presents++; host_read();

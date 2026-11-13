@@ -9,9 +9,10 @@
 //  - the scene's camera is taken from the draws into the scene's colour target: their vertex stage's uniform buffer 3
 //    holds the target's size at 0x120, this frame's view-projection at 0x30 (row major, clip = M * position; the projection's w row ends -1, 0 at 0xa8). The largest such target in a frame is
 //    the scene (reflections and half-size passes have the same layout). The scene's depth is that draw's depth target.
-//  - shaders/dlss_prep.comp makes the engine's inputs at the render size: the colour as the network samples it (LDR), the
-//    depth, and motion vectors from the depth reprojected through the two cameras. The game has no motion vectors of its
-//    own (no velocity target: the scene pass draws into one B10G11R11 target, and its upscale network samples the colour alone),
+//  - shaders/dlss_prep.comp makes the engine's inputs at the render size: the colour as the network samples it (LDR; with
+//    the game's native HDR linear light past 1, for an engine made for that: TemporalEngine::hdr), the depth, and motion
+//    vectors from the depth reprojected through the two cameras. The game has no motion vectors of its own (no velocity
+//    target: the scene pass draws into one B10G11R11 target, and its upscale network samples the colour alone),
 //    so that is the camera's motion, and what moves by itself would ghost. The scene camera's sub-pixel jitter
 //    (nx2/oot_jitter.py, while an engine draws) is read back from its projection, given to the engine and taken off the motion.
 //  - actor motion (actor_motion, shaders/dlss_actor.vert): the skinned draws into the scene (vk_draw.cpp's skin_check:
@@ -27,11 +28,14 @@
 //
 // The Insert menu's Upscaler row (opts.dlss, upscaler_rows.h) chooses the engine; RX_VK_DLSS=1 / 2 (DLSS, DLAA) or
 // RX_VK_FSR4=1 / 2 (FSR 4, its native anti-aliasing) over it, and =0 takes that engine out for the run. AMD FSR 3.1
-// (vk_fsr3.cpp, the row's value 3 or RX_VK_FSR=1) has inputs of its own (vk_fsr3_inputs.cpp): while it upscales, this chain
-// stands aside.
+// (vk_fsr3.cpp, the row's value 3 or RX_VK_FSR=1) is an engine of this chain too (fsr3_engine, slot 2); with
+// RX_VK_FSR3_CHAIN=0 it has inputs of its own (vk_fsr3_inputs.cpp), and while it upscales so, this chain stands aside.
+// The row's Off (temporal_off) takes the same dispatches with no engine: the network's input, stretched to its output with
+// a linear filter and squared back to linear colour (shaders/dlss_out.comp, at the same size a copy). No camera, depth, motion
+// or jitter, nothing kept from frame to frame: the network's cost and its anti-aliasing both gone, the cheapest picture there is.
 // RX_VK_DLSS_DEBUG=motion: the motion vectors shown instead of the picture (|x|, |y| over 16 px as red and green, the actors'
 // in it); =alternate: every other frame the game's own upscale (a test's reference beside the engine's). (The names are
-// DLSS's from before FSR came: they apply to either engine.)
+// DLSS's from before FSR came: they apply to every engine of the chain, FSR 3.1 on it too.)
 #include "vk_temporal.h"
 
 #include <algorithm>
@@ -53,7 +57,8 @@
 #include "upscaler_rows.h"
 #include "vk_dlss.h"
 #include "vk_draw.h"
-#include "vk_fsr3.h"   // (fsr3_wanted: AMD FSR 3.1 upscales with inputs of its own)
+#include "fsr3_math.h"   // (hookshot: FSR 3.1's depth constants from the projection)
+#include "vk_fsr3.h"   // (fsr3_wanted: AMD FSR 3.1 upscales with inputs of its own; fsr3_engine: on this chain)
 #include "vk_fsr4.h"
 #include "vk_menu.h"
 #include "vk_rt.h"
@@ -92,9 +97,12 @@ int temporal_mode() {
     int v = opts.dlss;
     if (dlss > 0) v = dlss >= 2 ? ur::DLAA : ur::DLSS;   // (2 and up: DLAA, as RX_VK_DLSS was clamped before)
     else if (fsr4 > 0) v = fsr4 >= 2 ? ur::FSR4_AA : ur::FSR4;
-    // (FSR 3.1, the row's 3, is not an engine of this chain: the game's own as far as it is concerned. Nor anything while
-    // FSR 3.1 upscales: one upscaler at a time, and one camera jitter. A switch above goes over the row's FSR 3.1 too
-    // (fsr3_wanted asks temporal_env_chosen); RX_VK_FSR=1 goes over them)
+    // (hookshot) FSR 3.1, the row's 3 or RX_VK_FSR=1, is an engine of this chain (vk_fsr3.h fsr3_on_chain): its inputs are the
+    // chain's, the skinned draws' motion in them. A switch above goes over the row's FSR 3.1 (fsr3_chosen asks
+    // temporal_env_chosen); RX_VK_FSR=1 goes over them
+    if (fsr3_on_chain() && fsr3_chosen()) return ur::FSR3;
+    // (with RX_VK_FSR3_CHAIN=0 FSR 3.1 upscales with its own inputs, vk_fsr3_inputs.cpp: the game's own as far as this chain is
+    // concerned. Nor anything while it upscales: one upscaler at a time, and one camera jitter)
     if (!ur::is_dlss(v) && !ur::is_fsr4(v)) return ur::GAME;
     if (fsr3_wanted()) return ur::GAME;
     if (ur::is_dlss(v) && dlss_why() != DLSS_OK) return ur::GAME;
@@ -102,6 +110,7 @@ int temporal_mode() {
     return v;
 }
 bool temporal_wanted() { return temporal_mode() != ur::GAME; }
+bool temporal_off() { return opts.dlss == ur::OFF && temporal_mode() == ur::GAME; }
 bool temporal_full_scale() { return ur::full_scale(temporal_mode()); }
 
 namespace {
@@ -117,6 +126,7 @@ struct Image {
 
 struct Camera {
     float current[16]{};      // (its view-projection)
+    float projection[16]{};   // (its projection, jittered: FSR 3.1's depth constants, and DLSS Frame Generation's camera, vk_dlss.cpp dlss_fg_inputs)
     float jitter[2]{};        // (the projection's offset of the picture's centre, in clip space: nx2/oot_jitter.py)
     float near_z = 0, far_z = 0, fov_y = 0;   // (its projection's, 0 when it is not a plain perspective one)
     float proj[4]{};          // (miojo: the projection's [0][0], [1][1], [2][2], [2][3]: dlss_prep.comp's ambient occlusion)
@@ -136,12 +146,20 @@ struct Engine {
 
 struct State {
     std::mutex mu;
-    Engine engines[2];               // (DLSS, FSR: engine_of)
+    Engine engines[3];               // (DLSS, FSR 4, FSR 3.1: engine_of)
     const TemporalEngine* drawing = nullptr;   // (the engine that drew last: another one starts a new history)
+    int drawn_mode = ur::GAME;
+    bool dlaa_waiting = false;
+    uint64_t dlaa_wait_frame = 0;
     Image color, depth, motion, output;
     VkDescriptorSetLayout prep_set = VK_NULL_HANDLE, out_set = VK_NULL_HANDLE;
     VkPipelineLayout prep_layout = VK_NULL_HANDLE, out_layout = VK_NULL_HANDLE;
     VkPipeline prep = VK_NULL_HANDLE, out = VK_NULL_HANDLE;
+    // (dlss_prep.comp and dlss_out.comp again for an engine that takes HDR colour (TemporalEngine::hdr): linear light in,
+    // not clamped to 1, and its linear picture out as it is)
+    VkDescriptorSetLayout prep_hdr_set = VK_NULL_HANDLE, out_hdr_set = VK_NULL_HANDLE;
+    VkPipelineLayout prep_hdr_layout = VK_NULL_HANDLE, out_hdr_layout = VK_NULL_HANDLE;
+    VkPipeline prep_hdr = VK_NULL_HANDLE, out_hdr = VK_NULL_HANDLE;
     VkSampler point = VK_NULL_HANDLE, linear = VK_NULL_HANDLE;
     Camera cam;               // (this frame's, since the last upscale)
     // (the gameplay upscale's output, as last seen: the scene sizes the upscaler can take follow from it,
@@ -214,11 +232,13 @@ void note_output(const Texture* out, uint32_t level) {
     s.out_h.store(std::max(1u, out->height >> level), std::memory_order_relaxed);
 }
 
-/// The chain's slot for the engine of an Upscaler value (DLSS and DLAA: DLSS's; FSR 4 and its native AA: FSR's)
+/// The chain's slot for the engine of an Upscaler value (DLSS and DLAA: DLSS's; FSR 4 and its native AA: FSR 4's; FSR 3.1;
+/// temporal_jitter_sample picks the same one)
 Engine& engine_of(int mode) {
     State& s = st();
-    Engine& k = s.engines[ur::is_fsr4(mode) ? 1 : 0];
-    if (!k.e) k.e = ur::is_fsr4(mode) ? fsr4_engine() : dlss_engine();
+    const int slot = ur::is_fsr4(mode) ? 1 : mode == ur::FSR3 ? 2 : 0;
+    Engine& k = s.engines[slot];
+    if (!k.e) k.e = slot == 1 ? fsr4_engine() : slot == 2 ? fsr3_engine() : dlss_engine();
     return k;
 }
 const char* name_of(int mode) {
@@ -227,6 +247,7 @@ const char* name_of(int mode) {
     case ur::DLAA: return "NVIDIA DLAA";
     case ur::FSR4: return "AMD FSR 4";
     case ur::FSR4_AA: return "AMD FSR 4 Native AA";
+    case ur::FSR3: return "AMD FSR 3.1";
     default: return "the game's own";
     }
 }
@@ -292,9 +313,11 @@ bool make_image(VkCommandBuffer cmd, Image& im, VkFormat format, uint32_t w, uin
     return true;
 }
 
-/// One compute pipeline with push descriptors; what it made is destroyed again when a step fails
+/// One compute pipeline with push descriptors (spec: its specialization constants, or none); what it made is destroyed
+/// again when a step fails
 bool make_pipeline(const uint32_t* code, size_t size, const VkDescriptorType* types, uint32_t n, uint32_t push,
-                   VkDescriptorSetLayout& set, VkPipelineLayout& layout, VkPipeline& pipe) {
+                   VkDescriptorSetLayout& set, VkPipelineLayout& layout, VkPipeline& pipe,
+                   const VkSpecializationInfo* spec = nullptr) {
     const auto undo = [&] {
         if (layout) vkDestroyPipelineLayout(dev.device, layout, nullptr);
         if (set) vkDestroyDescriptorSetLayout(dev.device, set, nullptr);
@@ -316,7 +339,7 @@ bool make_pipeline(const uint32_t* code, size_t size, const VkDescriptorType* ty
     VkShaderModule m{};
     if (vkCreateShaderModule(dev.device, &mi, nullptr, &m) != VK_SUCCESS) return undo();
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", nullptr};
+    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", spec};
     ci.layout = layout;
     const bool ok = vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &ci, nullptr, &pipe) == VK_SUCCESS;
     vkDestroyShaderModule(dev.device, m, nullptr);
@@ -326,13 +349,32 @@ bool make_pipeline(const uint32_t* code, size_t size, const VkDescriptorType* ty
 /// The two passes' pipelines and the samplers, once (temporal_upscale stops trying when this fails)
 bool make_pipelines() {
     State& s = st();
-    if (s.prep && s.out && s.point && s.linear) return true;
+    if (s.prep && s.prep_hdr && s.out && s.out_hdr && s.point && s.linear) return true;
     if (!dev.push_descriptor || !vkCmdPushDescriptorSetKHR) return false;
     const VkDescriptorType S = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, I = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     const VkDescriptorType prep_types[5] = {S, S, I, I, I}, out_types[2] = {S, I};
     if (!s.prep && !make_pipeline(DLSS_PREP_COMP_SPV, sizeof DLSS_PREP_COMP_SPV, prep_types, 5, 104, s.prep_set, s.prep_layout, s.prep))
         return false;
+    // (the HDR ones, for an engine that takes HDR colour. dlss_prep.comp squares the square-root encoded scene into linear
+    // light (kSquare, its constant 1), what an HDR feature and its auto exposure are made for, and its ceiling (kColorMax,
+    // constant 0) is 16384 in place of 1: the game's native HDR keeps its highlights, and a stray value stays well inside the
+    // colour image's RGBA16F. dlss_out.comp then writes the engine's linear picture as it is (kSquare, its constant 0, off):
+    // the same output as the LDR pair's)
+    struct PrepSpec { float color_max; VkBool32 square; };
+    static const PrepSpec prep_hdr_data{16384.0f, VK_TRUE};
+    static const VkSpecializationMapEntry prep_hdr_entries[2] = {{0, 0, sizeof(float)}, {1, sizeof(float), sizeof(VkBool32)}};
+    static const VkSpecializationInfo prep_hdr_spec{2, prep_hdr_entries, sizeof prep_hdr_data, &prep_hdr_data};
+    static const VkBool32 out_hdr_square = VK_FALSE;
+    static const VkSpecializationMapEntry out_hdr_entry{0, 0, sizeof(VkBool32)};
+    static const VkSpecializationInfo out_hdr_spec{1, &out_hdr_entry, sizeof out_hdr_square, &out_hdr_square};
+    static_assert(sizeof(PrepSpec) == sizeof(float) + sizeof(VkBool32), "dlss_prep.comp's constants, packed");
+    if (!s.prep_hdr && !make_pipeline(DLSS_PREP_COMP_SPV, sizeof DLSS_PREP_COMP_SPV, prep_types, 5, 84, s.prep_hdr_set,
+                                      s.prep_hdr_layout, s.prep_hdr, &prep_hdr_spec))
+        return false;
     if (!s.out && !make_pipeline(DLSS_OUT_COMP_SPV, sizeof DLSS_OUT_COMP_SPV, out_types, 2, 8, s.out_set, s.out_layout, s.out))
+        return false;
+    if (!s.out_hdr && !make_pipeline(DLSS_OUT_COMP_SPV, sizeof DLSS_OUT_COMP_SPV, out_types, 2, 8, s.out_hdr_set,
+                                     s.out_hdr_layout, s.out_hdr, &out_hdr_spec))
         return false;
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = si.minFilter = VK_FILTER_NEAREST;
@@ -583,8 +625,9 @@ uint32_t bones_used(const SkinnedDraw& k) {
     for (int64_t i = 0; i < n; i++) {
         const uint8_t* q = v.data() + (size_t)i * k.stride;
         for (int set = 0; set < k.sets; set++)
-            for (int j = 0; j < 4; j++) {
-                if (!q[k.weights[set] + j]) continue;
+            for (int j = 0; j < ((k.formats & (dlss_actor::kSingle << set)) ? 1 : (k.formats & (dlss_actor::kPair << set)) ? 2 : 4);
+                 j++) {   // (one in a single set, two in a pair; a set without weights weighs 1)
+                if (!(k.formats & (dlss_actor::kNoWeight << set)) && !q[k.weights[set] + j]) continue;
                 uint32_t joint = 0;
                 if (k.formats & (dlss_actor::kByteJoints << set)) joint = q[k.joints[set] + j];
                 else std::memcpy(&joint, q + k.joints[set] + 2 * j, 2);
@@ -630,7 +673,8 @@ void temporal_note_scene_draw(const Texture* color0, uint32_t width, uint32_t he
     // pause screen's model views, a reflection) is never the scene; one this size that is not either is left by the checks
     // below: the format, the camera's own size and perspective, the largest in the frame, and the upscale's input)
     if (!color0 || !depth || !camera || camera_size < 0x230 || !temporal_scene_size(width, height)) return;
-    if (color0->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !temporal_wanted()) return;
+    // (with the Upscaler Off too: its stretch takes the fixed shares' networks only with the frame's scene as their input)
+    if (color0->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || (!temporal_wanted() && !temporal_off())) return;
     State& s = st();
     std::lock_guard lk(s.mu);
     const uint64_t now = texture_frame_no();
@@ -644,6 +688,7 @@ void temporal_note_scene_draw(const Texture* color0, uint32_t width, uint32_t he
         return;
     Camera& k = s.cam;
     std::memcpy(k.current, c + 0x30 / 4, sizeof k.current);
+    std::memcpy(k.projection, c + 0x70 / 4, sizeof k.projection);   // (the block's projection, after the view-projection)
     // (the offset sead's projection gave the frustum, in its third column: 2 * offset, which moves the picture by -that)
     k.jitter[0] = -c[0x78 / 4], k.jitter[1] = -c[0x88 / 4];
     // (its planes and field of view, for an engine that wants them (FSR's depth heuristics): an OpenGL-style projection, depth
@@ -666,11 +711,12 @@ bool temporal_scene_size(uint32_t width, uint32_t height) {
 
 MkwVkJitter temporal_jitter_sample() {
     static const bool off = env_switch("RX_VK_DLSS_JITTER") == 0;
+    static const bool fsr3_off = env_switch("RX_VK_FSR_JITTER") == 0;   // (hookshot: FSR 3.1's own switch, on the chain too)
     State& s = st();
     const int mode = temporal_mode();
-    if (off || mode == ur::GAME) return {};
+    if (off || mode == ur::GAME || (mode == ur::FSR3 && fsr3_off)) return {};
     const uint64_t last = s.last_frame.load(std::memory_order_relaxed);
-    if (s.engines[ur::is_fsr4(mode) ? 1 : 0].failed.load(std::memory_order_relaxed) || !last) return {};
+    if (s.engines[ur::is_fsr4(mode) ? 1 : mode == ur::FSR3 ? 2 : 0].failed.load(std::memory_order_relaxed) || !last) return {};
     return s.jitter.read(texture_frame_no());
 }
 
@@ -709,6 +755,18 @@ int temporal_status(char* b, size_t n) {
              (unsigned long long)(own >> 20), feature);
     s.status_draws = s.actor_draws, s.status_frames = s.actor_frames, s.actor_ns = 0, s.status_drawn = s.status_passed = 0;
     return mode;
+}
+
+void temporal_reset_failure() {
+    State& s = st();
+    std::lock_guard lk(s.mu);
+    for (auto& k : s.engines) {
+        k.failed.store(false, std::memory_order_relaxed);
+    }
+    s.reason = nullptr;
+    s.reason_repeats = 0;
+    s.last_frame = 0;
+    dlss_retry();   // (and a DLSS feature that was not made, which is held off there, not by `failed`)
 }
 
 void temporal_idle() {
@@ -763,10 +821,65 @@ void temporal_note_skinned_draw(const SkinnedDraw& k) {
     s.skins.push_back(std::move(d));
 }
 
+namespace {
+/// The Upscaler's Off: the gameplay upscale's input stretched into its output, in place of the network (temporal_upscale's
+/// dispatches, found the same way). known: one of the gameplay networks by its key; else a network of that shape, taken only
+/// when its input is this frame's scene (the camera temporal_note_scene_draw took) and its output the picture. true: written
+bool stretch(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, VkImageView in_view, Texture* out, VkImageView out_view,
+             uint32_t out_level) {
+    State& s = st();
+    std::lock_guard lk(s.mu);
+    if (!in || !in_view || !out || !out_view || out->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32) return false;
+    const uint32_t ow = std::max(1u, out->width >> out_level), oh = std::max(1u, out->height >> out_level);
+    if (ow < in->width || oh < in->height) return false;   // (never a network that makes its picture smaller)
+    if (!known) {
+        // (the gameplay networks' formats, a picture larger than the input, and the input this frame's scene: as above)
+        if (in->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || ow <= in->width) return false;
+        note_output(out, out_level);
+        const Camera& c = s.cam;
+        if (!c.valid || texture_frame_no() - c.frame > 1 || in->width != c.width || in->height != c.height) return false;
+    } else {
+        note_output(out, out_level);
+    }
+    s.cam.valid = false;   // (each frame's own camera)
+    if (!make_pipelines()) {
+        static bool told = false;
+        if (!told) told = true, logf("vk: upscaler: Off: its shader was not made: the game's upscale runs");
+        return false;
+    }
+    struct Disturbed {   // (the program's descriptor pushes are gone from the bind point and are pushed again)
+        ~Disturbed() { descriptors_disturbed(); }
+    } disturbed;
+    full_barrier(cmd);   // (the scene's colour, written before)
+    const int32_t pc[2] = {(int32_t)ow, (int32_t)oh};
+    const VkDescriptorImageInfo info[2] = {{s.linear, in_view, VK_IMAGE_LAYOUT_GENERAL},
+                                           {VK_NULL_HANDLE, out_view, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet w[2]{{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
+    w[0].dstBinding = 0, w[0].descriptorCount = 1, w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[0].pImageInfo = &info[0];
+    w[1].dstBinding = 1, w[1].descriptorCount = 1, w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    w[1].pImageInfo = &info[1];
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.out);
+    vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.out_layout, 0, 2, w);
+    vkCmdPushConstants(cmd, s.out_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, pc);
+    vkCmdDispatch(cmd, (ow + 7) / 8, (oh + 7) / 8, 1);
+    full_barrier(cmd);
+    // (the log: once, and again at another size, as the dynamic resolution or the Render resolution row moves it)
+    static uint64_t told = 0;
+    const uint64_t sizes = (uint64_t)in->width << 48 | (uint64_t)in->height << 32 | (uint64_t)ow << 16 | oh;
+    if (told != sizes) {
+        told = sizes;
+        logf("vk: upscaler: Off: network %016llx left out, its input stretched linearly (%ux%u -> %ux%u)",
+             (unsigned long long)key, in->width, in->height, ow, oh);
+    }
+    return true;
+}
+}  // namespace
+
 bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, VkImageView in_view, Texture* out,
                       VkImageView out_view, uint32_t out_level) {
     const int mode = temporal_mode();
-    if (mode == ur::GAME) return false;
+    if (mode == ur::GAME) return temporal_off() && stretch(cmd, key, known, in, in_view, out, out_view, out_level);
     State& s = st();
     std::lock_guard lk(s.mu);
     if (!known) {   // (another network of the upscale's shape: only the scene into the picture, the rest untouched and unsaid)
@@ -819,6 +932,19 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     }
     const VkImageView dview = depth_view(cam.depth);
     if (!dview) return fail("no view of the scene depth");
+    // Give queued small scenes three frames to reach the requested native size.
+    // Some games keep a smaller scene even at full scale: then use native AA at that size.
+    // Creating DLAA for that queued scene would replace the feature twice in successive frames.
+    const bool entering_dlaa = mode == ur::DLAA && s.drawing == engine.e && s.drawn_mode == ur::DLSS;
+    const bool queued_native = entering_dlaa && (rw != ow || rh != oh);
+    const uint64_t frame = texture_frame_no();
+    if (queued_native && !s.dlaa_waiting) s.dlaa_waiting = true, s.dlaa_wait_frame = frame;
+    const bool wait_expired = queued_native && (frame < s.dlaa_wait_frame || frame - s.dlaa_wait_frame >= 3);
+    if (wait_expired)
+        logf("vk: DLAA native scene still %ux%u after three frames; using it for output %ux%u", rw, rh, ow, oh);
+    const bool waiting_for_native = queued_native && !wait_expired;
+    if (!waiting_for_native) s.dlaa_waiting = false;
+    const int draw_mode = waiting_for_native ? ur::DLSS : mode;
     if (s.drawing != engine.e) {   // (another engine than the one before: that one's state let go, and a new history)
         if (s.drawing) {
             logf("vk: upscaler: %s in place of %s (frame %llu)", engine.e->name, s.drawing->name,
@@ -830,7 +956,7 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     }
     // (DLAA, FSR's native AA: the engine at the render size, anti-aliasing alone; its picture then scaled to the output's by
     // dlss_out.comp. With them the 3D is drawn at full scale, temporal_full_scale)
-    const bool native = ur::full_scale(mode);
+    const bool native = ur::full_scale(draw_mode);
     const uint32_t dw = native ? rw : ow, dh = native ? rh : oh;
     // (from here commands are recorded, the engine's own too: whichever way this returns, the program's descriptor pushes are
     // gone from the bind point and are pushed again)
@@ -839,19 +965,33 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     } disturbed;
     uint32_t iw = rw, ih = rh;
     const char* why = nullptr;
-    const int ready = engine.e->prepare(cmd, rw, rh, dw, dh, &iw, &ih, &why);
+    const int ready = engine.e->prepare(cmd, rw, rh, dw, dh, native, &iw, &ih, &why);
     if (ready < 0) {
         engine.failed = true;
         return fail(why ? why : "it could not be made");
     }
     if (ready == 0) return fail(why ? why : "not this frame");
     if (ready == 2) s.engines_made++, s.last_frame = 0;   // (made just now: a new history)
+    // (NVIDIA DLSS Frame Generation through NGX copies the depth and the motion each frame, vk_dlss.cpp dlss_fg_inputs: a
+    // transfer's source too, always, so the Frame generation by row can turn it on at any time)
+    const VkImageUsageFlags copied = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (!make_image(cmd, s.color, VK_FORMAT_R16G16B16A16_SFLOAT, iw, ih) ||
-        !make_image(cmd, s.depth, VK_FORMAT_R32_SFLOAT, iw, ih) ||
-        !make_image(cmd, s.motion, VK_FORMAT_R16G16_SFLOAT, iw, ih, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
-        !make_image(cmd, s.output, VK_FORMAT_R16G16B16A16_SFLOAT, dw, dh))
+        !make_image(cmd, s.depth, VK_FORMAT_R32_SFLOAT, iw, ih, copied) ||
+        !make_image(cmd, s.motion, VK_FORMAT_R16G16_SFLOAT, iw, ih, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | copied) ||
+        !make_image(cmd, s.output, VK_FORMAT_R16G16B16A16_SFLOAT, dw, dh, VK_IMAGE_USAGE_TRANSFER_DST_BIT))   // (FSR 3.1 copies in)
         return fail("its images were not made");
 
+    // (hookshot) the projection without this frame's jitter, for an engine that makes its depth constants from it (FSR 3.1), and
+    // its depth reversed for FSR's passes where the near plane is at 0 (fsr3_math.h): bit 3 of the prep's flags
+    float projection[16];
+    std::memcpy(projection, cam.projection, sizeof projection);
+    dlss_math::unjitter(projection, cam.jitter);
+    bool fsr_flip = false;
+    if (engine.e->fsr_depth) {
+        fsr3_math::Camera fc;
+        if (!fsr3_math::camera_from_projection(projection, fc)) return fail("the scene's projection is not one FSR takes");
+        fsr_flip = fc.flip_depth;
+    }
     const uint64_t now = texture_frame_no();
     const uint64_t last = s.last_frame;
     bool reset = !last || now - last > 2;
@@ -873,11 +1013,17 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     const bool motion = !reset && dlss_math::reprojection(cam.current, previous, pc.reproject);
     if (!motion) reset = true;   // (without a valid reprojection, prior history has no mapping to this camera)
     pc.jitter[0] = cam.jitter[0], pc.jitter[1] = cam.jitter[1];
-    pc.size[0] = (int32_t)rw, pc.size[1] = (int32_t)rh, pc.flags = (motion ? 1 : 0) | (show_motion ? 2 : 0);
+    pc.size[0] = (int32_t)rw, pc.size[1] = (int32_t)rh;
+    pc.flags = (motion ? 1 : 0) | (show_motion ? 2 : 0) | (fsr_flip ? 8 : 0);
     static const bool show_ao = getenv("RX_VK_AO_DEBUG") != nullptr;   // (miojo: the occlusion alone)
-    if (show_ao) pc.flags |= 8;
+    if (show_ao) pc.flags |= 16;
     pc.ao = cam.near_z > 0.0f && cam.proj[0] > 0.0f && !rt_on() ? (float)opts.ao / 100.0f : 0.0f;   // (traced with Ray tracing on: rt_frame)
     std::memcpy(pc.proj, cam.proj, sizeof pc.proj);
+    // (an engine made for HDR colour, as prepare made it this frame: the game's native HDR goes past 1, and the LDR pass's
+    // clamp cut every highlight at the paper white, a flat picture. It is given linear light and gives it back: the HDR pair)
+    const bool hdr = engine.e->hdr && engine.e->hdr();
+    const VkPipeline prep_pipe = hdr ? s.prep_hdr : s.prep, out_pipe = hdr ? s.out_hdr : s.out;
+    const VkPipelineLayout prep_layout = hdr ? s.prep_hdr_layout : s.prep_layout, out_layout = hdr ? s.out_hdr_layout : s.out_layout;
 
     const auto prep = [&] {
         const VkDescriptorImageInfo info[5] = {{s.point, in_view, VK_IMAGE_LAYOUT_GENERAL},
@@ -891,9 +1037,9 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
             w[i].dstBinding = i, w[i].descriptorCount = 1, w[i].pImageInfo = &info[i];
             w[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         }
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.prep);
-        vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.prep_layout, 0, 5, w);
-        vkCmdPushConstants(cmd, s.prep_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prep_pipe);
+        vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prep_layout, 0, 5, w);
+        vkCmdPushConstants(cmd, prep_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
         vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);
     };
     full_barrier(cmd);   // (the scene's colour and depth, written before)
@@ -916,12 +1062,19 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     dlss_math::jitter_to_pixels(cam.jitter, rw, rh, f.jitter);
     f.reset = reset;
     if (cam.near_z > 0.0f) f.near_z = cam.near_z, f.far_z = cam.far_z, f.fov_y = cam.fov_y;
+    std::memcpy(f.projection, projection, sizeof f.projection);
+    f.jitter_phases = (uint32_t)dlss_jitter_phases(rw, rh, dw, dh);
+    f.depth_reversed = fsr_flip;   // (the prep wrote 1 - d: bit 3 of its flags)
     if (!s.told_camera && cam.near_z > 0.0f) {
         s.told_camera = true;
         logf("vk: upscaler: the scene's camera: near %.3f, far %.1f, vertical field of view %.1f degrees", cam.near_z,
              cam.far_z, cam.fov_y * 57.29578f);
     }
     if (!engine.e->evaluate(cmd, f)) {
+        if (engine.e->retry) {   // (hookshot: this frame only, TemporalEngine::retry; a new history next)
+            s.last_frame = 0;
+            return fail("its evaluation failed this frame");
+        }
         logf("vk: %s: its evaluation failed: the game's upscale from now on", engine.e->name);
         engine.failed = true;
         return false;   // (the network writes its output over whatever the evaluation did)
@@ -936,12 +1089,16 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
         w[0].pImageInfo = &info[0];
         w[1].dstBinding = 1, w[1].descriptorCount = 1, w[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         w[1].pImageInfo = &info[1];
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.out);
-        vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.out_layout, 0, 2, w);
-        vkCmdPushConstants(cmd, s.out_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof opc, opc);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, out_pipe);
+        vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, out_layout, 0, 2, w);
+        vkCmdPushConstants(cmd, out_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof opc, opc);
         vkCmdDispatch(cmd, (ow + 7) / 8, (oh + 7) / 8, 1);
     }
+    // (NVIDIA DLSS Frame Generation through NGX, vk_dlss.cpp: this frame's depth, motion and camera for the present's made
+    // frames. Nothing unless the run asked for it)
+    dlss_fg_inputs(cmd, f, cam.projection, cam.current, cam.jitter, motion);
     s.last_frame = now;
+    s.drawn_mode = draw_mode;
     s.last_jitter[0] = cam.jitter[0], s.last_jitter[1] = cam.jitter[1];
     // (for the status line, temporal_status: the jitter the engine was given, in render pixels)
     s.status_jitter[0] = f.jitter[0], s.status_jitter[1] = f.jitter[1], s.status_motion = motion;

@@ -4,7 +4,7 @@
 
 The walk and the containers are the ones nx2/shader_census.py documents (BNSH variations, agl's BAHS,
 NDSR networks, NDVE upscaler tables, Effect's .vsetb BNSH, SARC wrappers, zstd with the game's
-dictionaries). This module is standalone: no zstandard package, no game files in the repository.
+dictionaries). Uses the build's zstandard package or standalone system libzstd; no game files in the repository.
 The only thing it shares with the census is the format, not code or files.
 
 Output: the same HKSEED01 the back end reads (gpu/vk/vk_shader.cpp:1844 seed_open):
@@ -19,7 +19,7 @@ writes sha1(control+code)[:8] there instead; seed_open recomputes FNV and ignore
 so either reads, but FNV dedupes exactly what the runtime treats as one shader. (Bake-Mimo made the same
 point for its stable IDs.)
 
-zstd: libzstd through ctypes (frames with and without a dictionary), because the game's archives are
+zstd: the Python package or libzstd through ctypes (frames with and without a dictionary), because the game's archives are
 .zs and the dictionaries are player data. A plain zstd CLI fallback exists; nothing is written outside
 --out/--manifest.
 """
@@ -105,10 +105,44 @@ class _Zstd:
 _ZSTD = None
 
 
+class _PythonZstd:
+    """Use the pinned build dependency on platforms without a discoverable libzstd."""
+    def __init__(self):
+        import zstandard
+        self.zstd = zstandard
+
+    def decompress(self, data, dictionaries=()):
+        if data[:4] != ZSTD_MAGIC:
+            return data
+        last = None
+        for dictionary in (None, *dictionaries):
+            try:
+                d = self.zstd.ZstdCompressionDict(dictionary) if dictionary is not None else None
+                decoder = self.zstd.ZstdDecompressor(dict_data=d)
+                cap = 0
+                if self.zstd.frame_content_size(data) < 0:
+                    # max_output_size reserves the whole limit, even for a tiny
+                    # unknown-size frame. Count in bounded chunks first, then
+                    # validate the complete frame with an exactly sized buffer.
+                    with decoder.stream_reader(data, read_across_frames=False) as stream:
+                        while chunk := stream.read(1 << 20):
+                            cap += len(chunk)
+                            if cap > 1 << 31:
+                                raise ValueError("zstd: frame exceeds output bound")
+                    cap = max(1, cap)
+                return decoder.decompress(data, max_output_size=cap, allow_extra_data=False)
+            except self.zstd.ZstdError as error:
+                last = error
+        raise ValueError("zstd: %s" % last)
+
+
 def zstd():
     global _ZSTD
     if _ZSTD is None:
-        _ZSTD = _Zstd()
+        try:
+            _ZSTD = _PythonZstd()
+        except ImportError:
+            _ZSTD = _Zstd()   # (standalone enumeration still works with system libzstd)
     return _ZSTD
 
 

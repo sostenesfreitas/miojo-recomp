@@ -8,6 +8,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -196,7 +199,7 @@ int main() {
         cpp = Path(tmp) / 'fixture.cpp'
         exe = Path(tmp) / 'fixture.exe'
         cpp.write_text(fixture, encoding='utf-8')
-        subprocess.run([args.cxx, '-std=c++20', '-Wall', '-Wextra', '-Werror', str(cpp), '-o', str(exe)], check=True)
+        subprocess.run([args.cxx, '-std=c++20', '-include', ENV_ON_H, '-Wall', '-Wextra', '-Werror', str(cpp), '-o', str(exe)], check=True)
         # (memory_cpu_owned does nothing with RX_VK_WB_REPORTS set: not from the caller's environment)
         env = {k: v for k, v in os.environ.items() if k != 'RX_VK_WB_REPORTS'}
         subprocess.run([str(exe)], check=True, env=env)

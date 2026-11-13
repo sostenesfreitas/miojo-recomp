@@ -5,6 +5,9 @@ import os
 import subprocess
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ["--cxx", "{cxx}", "--headers", "{vulkan_headers}"]
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -41,7 +44,7 @@ def main():
         cpp,exe=tmp/'fixture.cpp',tmp/'fixture.exe'
         cpp.write_text(fixture,encoding='utf-8')
         flags=['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if a.sanitize else []
-        subprocess.run([a.cxx,'-std=c++20','-O1','-Wall','-Wextra','-Werror','-Wno-missing-field-initializers',*flags,'-I'+str(a.headers),str(cpp),'-o',str(exe)],check=True)
+        subprocess.run([a.cxx,'-std=c++20', '-include', ENV_ON_H,'-O1','-Wall','-Wextra','-Werror','-Wno-missing-field-initializers',*flags,'-I'+str(a.headers),str(cpp),'-o',str(exe)],check=True)
         cases=['float','uint','sint','nan-inf','d16','d24','d32','depth-scaled','rgb9e5','ssbo','ssbo-tail','raw','stats','empty']
         for case in cases:
             for coherent,implicit in [(1,1),(1,0),(0,1),(0,0)]:

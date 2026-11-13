@@ -9,6 +9,9 @@
    Environment: HOS_TRACE=1 (log HLE calls), HOS_MEMORY_MB (memory the game is told it has),
                 HOS_NVN_CONTINUE=1 (go on past nvnBootstrapLoader). */
 #include "hos.h"
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 #include "hos_paths.h"
 #include "hos_wide_size.h"   /* (the widescreen picture's size, shared with the Insert menu) */
 #include "../gpu/vk/vk_api.h"
@@ -117,6 +120,7 @@ static void *reserve_large(SIZE_T size) {
 
 #if !defined(_WIN32) && !defined(A64_MEM_ZERO)
 extern int hos_guest_memfd;   /* (below) */
+static int startup_stderr = -1;   /* (keep startup warnings visible if stderr becomes hookshot_log.txt) */
 #endif
 /* The guest window lives at the constant A64_HOST_BASE (rt/a64.h), so lifted code never loads its base. */
 static int reserve_guest(void) {
@@ -128,7 +132,7 @@ static int reserve_guest(void) {
        pages changed (GetWriteWatch) so that it uploads only those (soft write watch builds mark pages themselves). */
 #if defined(A64_WRITE_TRACK)
     const DWORD watch = 0;
-    if (getenv("HOS_LARGE_PAGES") && reserve_large(GUEST_SPACE) == (void *)A64_HOST_BASE) {
+    if (env_on("HOS_LARGE_PAGES") && reserve_large(GUEST_SPACE) == (void *)A64_HOST_BASE) {
         hos_large_pages = 1;
         hos_log("mem: the guest window is in large pages (%llu MB)", (unsigned long long)(GUEST_SPACE >> 20));
         return 1;
@@ -160,6 +164,19 @@ static int reserve_guest(void) {
         unsigned long long limit_mb = 0;
         {
             const int u = open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
+            if (u < 0 && (errno == EACCES || errno == EPERM)) {
+                const int err = errno;
+                static int warned;
+                if (!warned) {
+                    warned = 1;
+                    const char *warning = "WARNING: /dev/udmabuf permission denied; GPU imports may be slower, especially on AMD/RADV. "
+                        "Ask your administrator for access via its device group or a device-specific udev rule "
+                        "(see README, On Linux). Do not run the game as root.";
+                    if (startup_stderr >= 0) dprintf(startup_stderr, "%s (%s)\n", warning, strerror(err));
+                    hos_log("%s (%s)", warning, strerror(err));
+                }
+            }
+            if (startup_stderr >= 0) close(startup_stderr), startup_stderr = -1;
             if (u >= 0) {
                 close(u);
                 FILE *f = fopen("/sys/module/udmabuf/parameters/size_limit_mb", "r");
@@ -196,11 +213,11 @@ static int reserve_guest(void) {
     /* (issue 312) no transparent huge pages in the guest window: the renderer imports its pools as userptr memory, and every
        collapse khugepaged makes in them changes their mappings, which the kernel answers by pinning the pages again at the
        next submission: ~250 ms a submit on RADV while the GPU sat idle. HOS_THP=1: as before */
-    if (!getenv("HOS_THP")) madvise((void *)A64_HOST_BASE, GUEST_SPACE, MADV_NOHUGEPAGE);
+    if (!env_on("HOS_THP")) madvise((void *)A64_HOST_BASE, GUEST_SPACE, MADV_NOHUGEPAGE);
 #ifdef __linux__
     /* (HOS_NO_THP=1, experiment: none outside the window either. With THP "always" 400-450 MB of the host heap's and the binary's bss are huge
        pages, each resident whole when any of its 2 MB is touched) */
-    if (getenv("HOS_NO_THP")) prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
+    if (env_on("HOS_NO_THP")) prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
 #endif
     return 1;
 #endif
@@ -241,12 +258,62 @@ void hos_update_check(void);   /* (host/hos_update.c) */
 #ifndef _WIN32
 /* (linux) Saves live in $XDG_DATA_HOME/hookshot (~/.local/share/hookshot), so a rebuilt game folder still finds them.
    A user/ folder beside the executable from before is moved there the first time, entry by entry. Anything that
-   cannot be moved keeps the old place. --user still wins. */
+   cannot be moved keeps the old place. --user still wins.
+   A symbolic link in it, to saves the player keeps elsewhere (a synced folder, another drive), is made again in the
+   new place, to the same folder, and never entered. It was moved as it stood, and one written from where it stood
+   ("../../saves") then named nothing; from another drive it was copied as the folder it names and delete_tree emptied
+   that folder, which is not Hookshot's: the next start found the link still here, kept the old place, and showed no
+   saves. A user/ that is a link itself is the player's choice of place, and is used as it is. */
 static int is_dir(const char *p) {
     const DWORD a = GetFileAttributesA(p);
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
+static int is_link(const char *p) {
+    struct stat st;
+    return lstat(p, &st) == 0 && S_ISLNK(st.st_mode);
+}
+static const char *move_old, *move_from, *move_new;   /* (the user folder on the move, as realpath names it and as given, and the new place) */
+static int moved_to(char *target, const char *dir) {   /* (a target under dir: named where it will be) */
+    char there[MAX_PATH];
+    const size_t n = dir && dir[0] == SEP ? strlen(dir) : 0;
+    if (!n || strncmp(target, dir, n) || target[n] != SEP) return 0;
+    snprintf(there, sizeof there, "%s%s", move_new, target + n);
+    snprintf(target, MAX_PATH, "%s", there);
+    return 1;
+}
+static int copy_link(const char *from, const char *to) {   /* (to what it names, in full; one that names nothing: as written) */
+    char target[MAX_PATH];
+    if (!realpath(from, target)) {
+        const ssize_t n = readlink(from, target, sizeof target - 1);
+        if (n < 0) return 0;
+        target[n] = 0;
+    }
+    /* (to an entry that moves too: where it will be. One whose entry went first names nothing by now, so its text is
+       checked too: else it named the old place, and only when the folder listed it before the entry) */
+    if (!moved_to(target, move_old)) moved_to(target, move_from);
+    return symlink(target, to) == 0;
+}
+static int has_link(const char *p) {
+    if (is_link(p)) return 1;
+    if (!is_dir(p)) return 0;
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof pattern, "%s" SEP_S "*", p);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    int found = 0;
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            char a[MAX_PATH];
+            snprintf(a, sizeof a, "%s" SEP_S "%s", p, fd.cFileName);
+            found = has_link(a);
+        } while (!found && FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    return found;
+}
 static int copy_tree(const char *from, const char *to) {
+    if (is_link(from)) return copy_link(from, to);
     if (!is_dir(from)) {
         FILE *in = fopen(from, "rb"), *out = in ? fopen(to, "wb") : NULL;
         int ok = in && out;
@@ -276,7 +343,7 @@ static int copy_tree(const char *from, const char *to) {
     return ok;
 }
 static void delete_tree(const char *p) {
-    if (!is_dir(p)) {
+    if (!is_dir(p) || is_link(p)) {   /* (a link goes; what it names stays) */
         DeleteFileA(p);
         return;
     }
@@ -298,6 +365,7 @@ static void delete_tree(const char *p) {
 static const char *saves_dir(const char *beside) {
     static char dir[MAX_PATH];
     const char *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
+    if (is_link(beside)) return beside;
     if (xdg && xdg[0] == '/') snprintf(dir, sizeof dir, "%s", xdg);
     else if (home && home[0] == '/') {
         snprintf(dir, sizeof dir, "%s/.local", home);
@@ -310,21 +378,27 @@ static const char *saves_dir(const char *beside) {
     if (GetFileAttributesA(dir) == INVALID_FILE_ATTRIBUTES) return beside;
     char pattern[MAX_PATH];
     snprintf(pattern, sizeof pattern, "%s" SEP_S "*", beside);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return dir;
     int moved = 0, kept = 0;
-    do {
-        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
-        char from[MAX_PATH], to[MAX_PATH];
-        snprintf(from, sizeof from, "%s" SEP_S "%s", beside, fd.cFileName);
-        snprintf(to, sizeof to, "%s" SEP_S "%s", dir, fd.cFileName);
-        if (GetFileAttributesA(to) != INVALID_FILE_ATTRIBUTES) kept++;
-        else if (MoveFileExA(from, to, 0)) moved++;
-        else if (copy_tree(from, to)) delete_tree(from), moved++;
-        else delete_tree(to), kept++;
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
+    char real[MAX_PATH];
+    move_old = realpath(beside, real), move_from = beside, move_new = dir;
+    /* (looked at first, then moved: with an entry the new place has already, the old place is kept, and it keeps them all.
+       The others used to go all the same, and the game then ran here without them) */
+    for (int move = 0; move < 2 && !kept; move++) {
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) return dir;
+        do {
+            if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+            char from[MAX_PATH], to[MAX_PATH];
+            snprintf(from, sizeof from, "%s" SEP_S "%s", beside, fd.cFileName);
+            snprintf(to, sizeof to, "%s" SEP_S "%s", dir, fd.cFileName);
+            if (!move) kept += GetFileAttributesA(to) != INVALID_FILE_ATTRIBUTES;
+            else if (!has_link(from) && MoveFileExA(from, to, 0)) moved++;
+            else if (copy_tree(from, to)) delete_tree(from), moved++;
+            else delete_tree(to), kept++;
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
     if (kept) {
         hos_log("saves: %d of %s's entries could not go to %s: the saves stay in %s", kept, beside, dir, beside);
         return beside;
@@ -351,11 +425,11 @@ static const char *saves_dir(const char *beside) {
    HOS_ENV_FILE=<path> reads that file instead: a scripted or A/B test run brings its own switches and leaves the
    player's hookshot_env.txt as it is.
    (hookshot) hookshot_env.txt is a file players pass around, so it sets only the game's own switches (RX_, HOS_,
-   HOOKSHOT_, EDEN_, NVN_, TOTK_ and SDL_ names), never HOS_ENV_FILE or SDL's library override, and no value that is a
+   HOOKSHOT_, EDEN_, NVN_ and SDL_ names), never HOS_ENV_FILE or SDL's library override, and no value that is a
    path but RX_VK_DLSS_DIR's: the system's variables (the Vulkan loader's layers, PATH and the like) can load code, and
    the dump switches write files where they name. The file HOS_ENV_FILE names sets anything. */
 static int env_line_allowed(const char *name, const char *value) {
-    static const char *const prefixes[] = {"RX_", "HOS_", "HOOKSHOT_", "EDEN_", "NVN_", "TOTK_", "SDL_"};
+    static const char *const prefixes[] = {"RX_", "HOS_", "HOOKSHOT_", "EDEN_", "NVN_", "SDL_"};
     int ok = 0;
     for (size_t i = 0; i < sizeof prefixes / sizeof *prefixes; i++) ok |= !strncmp(name, prefixes[i], strlen(prefixes[i]));
     if (!ok || !strcmp(name, "HOS_ENV_FILE") || !strcmp(name, "SDL_DYNAMIC_API")) return 0;
@@ -374,7 +448,7 @@ static int env_line_allowed(const char *name, const char *value) {
        the file select) */
     static const char *const by_name[] = {
         "HOS_AUDIO_DUMP", "HOS_AUDIO_WB_DUMP", "HOS_SHADER_DUMP", "HOS_FS_OVERLAY", "HOS_MODS", "HOS_INPUT_LIVE",
-        "HOS_INPUT_SCRIPT", "HOS_SAMPLE_ALL", "HOS_WATCH", "HOOKSHOT_BUILDER_HOME", "RX_VK_SHOTS", "RX_VK_SHOT_GO",
+        "HOS_INPUT_SCRIPT", "HOS_SAMPLE_ALL", "HOS_CHAIN", "HOS_WATCH", "HOOKSHOT_BUILDER_HOME", "RX_VK_SHOTS", "RX_VK_SHOT_GO",
         "RX_VK_FRAMELOG", "RX_VK_HANG_DUMP", "RX_VK_DUMP", "RX_VK_DUMP_SPV", "RX_VK_DUMP_MESH_SPV", "RX_VK_DUMP_STAGES",
         "RX_VK_DUMP_FAILED", "RX_VK_IR", "RX_VK_MENU_SCRIPT", "RX_DUMP_WGSL", "RX_DUMP_SLOW_WGSL", "RX_DUMP_TICS",
         "RX_WGSL_OVERRIDE"};
@@ -398,6 +472,13 @@ static void load_hookshot_env(void) {
     }
     FILE *f = fopen(path, "r");
     if (!f) return;
+    /* The environment the game was started with wins over the file: a switch set for one launch (HOS_FULLSCREEN=0 in a
+       shell, a script's RX_VK_PACE=1) beats the same name saved in the file. The file's own later lines still replace its
+       earlier ones: the names it set are kept here (for the whole run: a second read sets them again), so they are not taken
+       for the environment's */
+    static char from_file[256][128];   /* (names of up to 127 characters; a file with more names than this has its later
+                                          lines for the names past it taken as the environment's, logged as left out) */
+    static int from_file_n;
     char line[512];
     while (fgets(line, sizeof line, f)) {
         char *s = line;
@@ -412,6 +493,15 @@ static void load_hookshot_env(void) {
             fprintf(stderr, "env: hookshot_env.txt: %s left out (only the game's switches, and no paths, are taken from it)\n", s);
             continue;
         }
+        int ours = 0;
+        for (int i = 0; i < from_file_n && !ours; i++) ours = !strcmp(from_file[i], s);
+        if (!ours && getenv(s)) {
+            fprintf(stderr, "env: %s: %s left out (set in the environment, which goes first)\n",
+                    other && *other ? "HOS_ENV_FILE" : "hookshot_env.txt", s);
+            continue;
+        }
+        if (!ours && from_file_n < (int)(sizeof from_file / sizeof *from_file) && strlen(s) < sizeof from_file[0])
+            strcpy(from_file[from_file_n++], s);
 #ifdef _WIN32
         *eq = '=';
         _putenv(s);
@@ -420,6 +510,30 @@ static void load_hookshot_env(void) {
 #endif
     }
     fclose(f);
+}
+
+/* Switches this build no longer reads, still set (in the environment or hookshot_env.txt, as older issues told players):
+   one log line each, naming what took its place, so a bug report shows the switch did nothing */
+static void removed_switch_notes(void) {
+    static const char *const gone[][2] = {
+        {"RX_VK_NO_DESC_REUSE", "RX_VK_DESC_REUSE=never"},
+        {"RX_VK_DESC_SLOTGEN", "RX_VK_DESC_REUSE (the same 0 and 1) or the Descriptor reuse row"},
+        {"RX_VK_DESC_REUSE_DGEN", NULL},
+        {"RX_VK_NO_NAN_GUARD", "RX_VK_NAN_GUARD=0"},
+        {"RX_VK_FOLLOW_MESH", NULL},
+        {"RX_VK_OOT", NULL},
+        {"RX_VK_OOT_EXPOSURE", NULL},
+        {"RX_VK_OOT_FOG", NULL},
+        {"RX_VK_OOT_VISUAL", NULL},
+        {"HOS_FIX_RES", NULL},
+        {"HOS_SCENE_NATIVE", NULL},
+        {"TOTK_MINIMAL_LAYOUT", NULL},
+    };
+    for (size_t i = 0; i < sizeof gone / sizeof *gone; i++)
+        if (getenv(gone[i][0])) {
+            if (gone[i][1]) hos_log("env: %s is no longer read: use %s", gone[i][0], gone[i][1]);
+            else hos_log("env: %s is no longer read: it does nothing", gone[i][0]);
+        }
 }
 
 int hos_oot_protect_hearts;
@@ -534,6 +648,8 @@ static const unsigned char oot_item_kinds[] = {OOT_CHEAT_ITEMS(OOT_NO_SECTION, O
 
 static int oot_item_count(Ctx *c, const char *name);
 static int oot_gamedata_bool(Ctx *c, uint32_t hash, int *value);
+static int oot_gamedata_set_bool(Ctx *c, uint32_t hash, int value);
+static int oot_gamedata_string(Ctx *c, uint32_t hash, char *buf, size_t size);
 
 static void oot_inventory_refresh(Ctx *c, int64_t now) {
     void rx_option_set(int id, int value);
@@ -550,6 +666,17 @@ static void oot_inventory_refresh(Ctx *c, int64_t now) {
     {   /* Link's age for the Debug tab's Switch age row: 0 child, 1 adult, -1 no save loaded (Sequence_IsChildhood) */
         int child = 1;
         rx_option_set(OOT_CHEAT_AGE_ID, loaded && oot_gamedata_bool(c, 0xcea220d3u, &child) ? (child ? 0 : 1) : -1);
+    }
+    if (loaded) {   /* the map Link is in and his age, logged when either changes: where a log's problem happened, the "Where in
+                       the game" of the Insert menu's Bug report (gpu/vk/vk_bug_report.cpp reads the last of these lines) */
+        static char logged[100];
+        char map[80], line[100];
+        int child = 1;
+        if (oot_gamedata_string(c, 0x1d6189dau, map, sizeof map) && map[0]) {   /* Sequence_CurrentBanc */
+            snprintf(line, sizeof line, "%s (%s)", map,
+                     oot_gamedata_bool(c, 0xcea220d3u, &child) ? (child ? "child" : "adult") : "age not known");
+            if (strcmp(line, logged)) hos_log("map: %s", line), snprintf(logged, sizeof logged, "%s", line);
+        }
     }
     if (!probed && oot_pouch_count(c, "Item_DekuSeed") >= 0) {
         probed = 1;   /* (one line naming every count, both spellings: which names the pouch knows) */
@@ -840,16 +967,26 @@ static int oot_event_arg(Ctx *c, uint64_t arg, const char *name, uint32_t type, 
     return 1;
 }
 
+/* (the Main sequence's "Event" test: an event is playing) */
+static int oot_event_playing(Ctx *c) {
+    const uint64_t events = oot_singleton(c, OOT_EVENTMGR_SLOT);
+    return events && recomp_load64(c, events + 104);
+}
+
 static struct {
     int64_t requested_at, check_at;
     unsigned destination;
+    const char *why, *banc;   /* (the last call's: why it was not sent, the map it was sent to; the control bridge's reply) */
+    uint64_t result;          /* (and the event manager's answer to the request: 0 seen when the map did not change) */
 } teleport;
 
 static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
+    teleport.why = "no such destination", teleport.banc = NULL;
     if (index >= sizeof oot_destinations / sizeof oot_destinations[0]) return 0;
     const int64_t now = hos_now_ns();
     if (teleport.requested_at && now - teleport.requested_at < 8000000000LL) {
         hos_log("cheats: teleport ignored, a request is still in progress");
+        teleport.why = "another teleport is still in progress (one every 8 s)";
         return 0;
     }
     const uint64_t events = oot_singleton(c, OOT_EVENTMGR_SLOT);
@@ -857,15 +994,18 @@ static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
     A64Fn set_link = a64_lookup(0x802dc440ULL), release_link = a64_lookup(0x8022b6f0ULL);
     if (!events || !make_arg || !request || !set_link || !release_link) {
         hos_log("cheats: teleport unavailable (event manager %#llx)", (unsigned long long)events);
+        teleport.why = "the game's event manager is not there yet";
         return 0;
     }
     if (recomp_load64(c, events + 104)) {   /* (the Main sequence's "Event" test: an event is playing) */
         hos_log("cheats: teleport waits until the current event ends");
+        teleport.why = "an event is playing (a cutscene, a map change's)";
         return 0;
     }
     int loading = 0, child = 1;
     if (oot_gamedata_bool(c, 0xef2b60c2u, &loading) && loading) {   /* Sequence_IsLoadingBanc */
         hos_log("cheats: teleport ignored while a map loads");
+        teleport.why = "a map is loading";
         return 0;
     }
     if (!oot_gamedata_bool(c, 0xcea220d3u, &child)) hos_log("cheats: Sequence_IsChildhood not found, using child maps");
@@ -875,13 +1015,14 @@ static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
     const char *boot = child ? d->child_boot : d->adult_boot;
     if (!banc) {
         hos_log("cheats: teleport %u has no %s map", index, child ? "child" : "adult");
+        teleport.why = child ? "this destination has no map for the child" : "this destination has no map for the adult";
         return 0;
     }
 
     /* The event reads its string arguments after this request returns, so they live in memory that stays. */
     static uint64_t strings;
     if (!strings) strings = hos_sys_alloc(512, 16);
-    if (!strings) return 0;
+    if (!strings) return teleport.why = "out of memory", 0;
     memset(A64_PTR(strings), 0, 512);
     memcpy(A64_PTR(strings), banc, strlen(banc) + 1);
     memcpy(A64_PTR(strings + 128), start, strlen(start) + 1);
@@ -929,12 +1070,33 @@ static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
         release_link(c);
     }
     *c = saved;
+    /* (issues 2217, 2588) A map-hiding area can leave this saved flag set when a debug teleport skips its exit.
+       Only clear it once the event manager takes the request; the destination may hide its own minimap.
+       Use the game's Bool setter (mgr, value, hash): it queues the change for the live value AND the save's copy.
+       Writing only the live byte restores the HUD until the next load, but saves keep the old hidden value. */
+    int hidden = 0;
+    if (ok && result && oot_gamedata_bool(c, 0x9a4dd779u, &hidden) && hidden) {
+        A64Fn set_bool = a64_lookup(0x806a2b20ULL);
+        const uint64_t mgr = oot_singleton(c, OOT_GAMEDATA_SLOT);
+        if (set_bool && mgr) {
+            c->x[0] = mgr, c->x[1] = 0, c->x[2] = 0x9a4dd779u;   /* MapIconDeactivateByAreaActor */
+            set_bool(c);
+            *c = saved;
+            hos_log("cheats: teleport: the area left had hidden the minimap (MapIconDeactivateByAreaActor): restore queued");
+        } else {   /* (another game build: say so, a report's log then shows why the minimap stayed away) */
+            hos_log("cheats: teleport: the area left had hidden the minimap (MapIconDeactivateByAreaActor): %s not found, left hidden",
+                    set_bool ? "the game data manager" : "the game's Bool setter");
+        }
+    }
     teleport.requested_at = now;
     teleport.check_at = now + 1500000000LL;
     teleport.destination = index;
     hos_log("cheats: teleport %s to %s at %s (boot %s, event %s, starter %d): request %s, result %#llx",
             child ? "child" : "adult", banc, start, boot, event, with_starter, ok ? "sent" : "not built",
             (unsigned long long)result);
+    teleport.result = result;
+    if (ok) teleport.banc = banc;
+    else teleport.why = "the game's event request could not be built";
     return ok;   /* (sent; the request's own result is only logged) */
 }
 
@@ -959,12 +1121,14 @@ static int oot_gamedata_set_bool(Ctx *c, uint32_t hash, int value) {
 }
 
 /* Age toggle: flips Sequence_IsChildhood (what the Temple of Time event sets) and reloads the current map, or the
-   Market when this map is not in oot_destinations, through the teleport so the other age's map and Link load. */
-static void oot_toggle_age(Ctx *c, uint64_t actor) {
+   Market when this map is not in oot_destinations, through the teleport so the other age's map and Link load. 1: the map
+   change was sent (teleport.banc its map); 0: not, teleport.why says why (the control bridge's reply) */
+static int oot_toggle_age(Ctx *c, uint64_t actor) {
     int child = 1;
     if (!oot_gamedata_bool(c, 0xcea220d3u, &child)) {
         hos_log("cheats: age toggle: Sequence_IsChildhood not found");
-        return;
+        teleport.why = "Link's age is not in the game's data (Sequence_IsChildhood not found)", teleport.banc = NULL;
+        return 0;
     }
     char current[80];
     oot_gamedata_string(c, 0x1d6189dau, current, sizeof current);   /* Sequence_CurrentBanc */
@@ -979,14 +1143,17 @@ static void oot_toggle_age(Ctx *c, uint64_t actor) {
     }
     if (!oot_gamedata_set_bool(c, 0xcea220d3u, !child)) {
         hos_log("cheats: age toggle: could not write Sequence_IsChildhood");
-        return;
+        teleport.why = "Link's age could not be written (Sequence_IsChildhood)", teleport.banc = NULL;
+        return 0;
     }
     hos_log("cheats: age toggle: %s -> %s, reloading via destination %u (current map \"%s\")",
             child ? "child" : "adult", child ? "adult" : "child", target, current);
     if (!oot_teleport(c, actor, target)) {
         oot_gamedata_set_bool(c, 0xcea220d3u, child);
         hos_log("cheats: age toggle undone, the map change was not requested");
+        return 0;
     }
+    return 1;
 }
 
 static void oot_teleport_followup(Ctx *c) {
@@ -998,6 +1165,123 @@ static void oot_teleport_followup(Ctx *c) {
     const uint64_t events = oot_singleton(c, OOT_EVENTMGR_SLOT);
     hos_log("cheats: teleport check: reserved \"%s\", current \"%s\", event playing %d", next, current,
             events && recomp_load64(c, events + 104) ? 1 : 0);
+}
+
+/* (hookshot) the control bridge (host/control.c): the map the game is in (Sequence_CurrentBanc), read on the game's thread
+   with the player's update every 250 ms and kept for the bridge's thread; the last one known (it stays through loads and
+   menus, where Link is not updated). And the debug teleport by destination, as the Cheats page asks for it: taken at the
+   next update of the player, in play, and what came of it (sent, or refused and why) kept for the bridge's reply */
+static SRWLOCK oot_map_lock = SRWLOCK_INIT;
+static char oot_map[80];
+static int oot_flags = -1;   /* (1 an event playing, 2 a map loading, 4 the child; -1 not read yet) */
+static void oot_map_refresh(Ctx *c, int64_t now) {
+    static int64_t next;
+    if (now < next) return;
+    next = now + 250000000LL;
+    char map[80];
+    if (!oot_gamedata_string(c, 0x1d6189dau, map, sizeof map) || !map[0]) return;   /* Sequence_CurrentBanc */
+    int loading = 0, child = 1;
+    oot_gamedata_bool(c, 0xef2b60c2u, &loading);   /* Sequence_IsLoadingBanc */
+    oot_gamedata_bool(c, 0xcea220d3u, &child);     /* Sequence_IsChildhood */
+    const uint64_t events = oot_singleton(c, OOT_EVENTMGR_SLOT);
+    const int flags = (events && recomp_load64(c, events + 104) ? 1 : 0) | (loading ? 2 : 0) | (child ? 4 : 0);
+    AcquireSRWLockExclusive(&oot_map_lock);
+    memcpy(oot_map, map, sizeof oot_map);
+    oot_flags = flags;
+    ReleaseSRWLockExclusive(&oot_map_lock);
+}
+/* (with the map) whether an event (a cutscene, a map change's) is playing, a map is loading, Link is the child: 0 before any */
+int hos_oot_state(int *event, int *loading, int *child) {
+    AcquireSRWLockShared(&oot_map_lock);
+    const int f = oot_flags;
+    ReleaseSRWLockShared(&oot_map_lock);
+    if (f < 0) return 0;
+    *event = f & 1, *loading = (f >> 1) & 1, *child = (f >> 2) & 1;
+    return 1;
+}
+int hos_oot_current_map(char *out, size_t cap) {
+    AcquireSRWLockShared(&oot_map_lock);
+    const int have = oot_map[0] != 0;
+    if (have) snprintf(out, cap, "%s", oot_map);
+    ReleaseSRWLockShared(&oot_map_lock);
+    return have;
+}
+int hos_oot_destination(int index, const char **child, const char **adult) {
+    if (index < 0 || index >= (int)(sizeof oot_destinations / sizeof oot_destinations[0])) return 0;
+    *child = oot_destinations[index].child_banc, *adult = oot_destinations[index].adult_banc;
+    return 1;
+}
+/* The bridge's teleport: asked on its thread, taken at the player's next update (oot_bridge_teleport_take), and what came
+   of it kept for the bridge, by ticket. A later ask replaces one not taken yet. (oot_map_lock) */
+#define OOT_BRIDGE_AGE 0x10000   /* (oot_bridge_tp.asked: the age switch to the child, | 1 to the adult; not a destination) */
+static struct {
+    int asked;    /* the destination + 1 waiting to be taken, OOT_BRIDGE_AGE | adult the age switch; 0 none */
+    int ticket;   /* the last ask's */
+    int taking;   /* the ticket taken by the player's update and not done yet (it is not replaced meanwhile) */
+    int done_ticket, result, accepted;   /* the last one taken: 1 sent, -1 refused, 2 (the age switch) Link was that age
+                                            already; accepted: the event manager's answer */
+    char why[96], map[80];
+} oot_bridge_tp;
+int hos_oot_teleport_ask(int index) {
+    if (index < 0 || index >= (int)(sizeof oot_destinations / sizeof oot_destinations[0])) return 0;
+    AcquireSRWLockExclusive(&oot_map_lock);
+    const int ticket = ++oot_bridge_tp.ticket;
+    __atomic_store_n(&oot_bridge_tp.asked, index + 1, __ATOMIC_RELAXED);   /* (read without the lock first: take) */
+    ReleaseSRWLockExclusive(&oot_map_lock);
+    return ticket;
+}
+/* The bridge's age switch to the adult (1) or the child (0): the Debug tab's Switch age (oot_toggle_age), asked and taken as
+   a teleport is, with the same tickets, result and cancel. The age wanted goes with it and is checked when it is taken (the
+   bridge's sample of Link's age can be old): already that age, nothing is done (result 2) */
+int hos_oot_age_ask(int adult) {
+    AcquireSRWLockExclusive(&oot_map_lock);
+    const int ticket = ++oot_bridge_tp.ticket;
+    __atomic_store_n(&oot_bridge_tp.asked, OOT_BRIDGE_AGE | (adult ? 1 : 0), __ATOMIC_RELAXED);
+    ReleaseSRWLockExclusive(&oot_map_lock);
+    return ticket;
+}
+/* 1 sent (map: the map it goes to; accepted: whether the game's event manager took the request), -1 refused (why: the
+   reason), 2 (the age switch) Link was that age already, nothing done, 0 not taken yet (or being taken), -2 replaced by a
+   later ask or cancelled */
+int hos_oot_teleport_result(int ticket, char *why, size_t why_cap, char *map, size_t map_cap, int *accepted) {
+    AcquireSRWLockShared(&oot_map_lock);
+    int r = -2;
+    if (oot_bridge_tp.done_ticket == ticket) {
+        r = oot_bridge_tp.result, *accepted = oot_bridge_tp.accepted;
+        snprintf(why, why_cap, "%s", oot_bridge_tp.why);
+        snprintf(map, map_cap, "%s", oot_bridge_tp.map);
+    } else if (oot_bridge_tp.taking == ticket || (oot_bridge_tp.ticket == ticket && oot_bridge_tp.asked)) r = 0;
+    ReleaseSRWLockShared(&oot_map_lock);
+    return r;
+}
+void hos_oot_teleport_cancel(int ticket) {   /* (the bridge gave up waiting: not taken later behind its back) */
+    AcquireSRWLockExclusive(&oot_map_lock);
+    if (oot_bridge_tp.ticket == ticket) __atomic_store_n(&oot_bridge_tp.asked, 0, __ATOMIC_RELAXED);
+    ReleaseSRWLockExclusive(&oot_map_lock);
+}
+static int oot_bridge_teleport_take(int *ticket) {   /* (the player's update) the destination + 1 asked for, or 0 */
+    if (!__atomic_load_n(&oot_bridge_tp.asked, __ATOMIC_RELAXED)) return 0;
+    AcquireSRWLockExclusive(&oot_map_lock);
+    const int asked = oot_bridge_tp.asked;
+    *ticket = oot_bridge_tp.ticket;
+    if (asked) oot_bridge_tp.taking = *ticket;   /* (still "not taken yet" to the bridge until done) */
+    __atomic_store_n(&oot_bridge_tp.asked, 0, __ATOMIC_RELAXED);
+    ReleaseSRWLockExclusive(&oot_map_lock);
+    return asked;
+}
+static void oot_bridge_teleport_done(int ticket, int sent) {   /* sent: 1, 0 refused (teleport.why), 2 already that age */
+    AcquireSRWLockExclusive(&oot_map_lock);
+    if (sent == 2) {
+        oot_bridge_tp.done_ticket = ticket, oot_bridge_tp.result = 2, oot_bridge_tp.taking = 0, oot_bridge_tp.accepted = 0;
+        oot_bridge_tp.why[0] = oot_bridge_tp.map[0] = 0;
+        ReleaseSRWLockExclusive(&oot_map_lock);
+        return;
+    }
+    oot_bridge_tp.done_ticket = ticket, oot_bridge_tp.result = sent ? 1 : -1, oot_bridge_tp.taking = 0;
+    oot_bridge_tp.accepted = sent && teleport.result != 0;
+    snprintf(oot_bridge_tp.why, sizeof oot_bridge_tp.why, "%s", sent || !teleport.why ? "" : teleport.why);
+    snprintf(oot_bridge_tp.map, sizeof oot_bridge_tp.map, "%s", sent && teleport.banc ? teleport.banc : "");
+    ReleaseSRWLockExclusive(&oot_map_lock);
 }
 
 static uint64_t oot_gameplay_view(Ctx *c) {
@@ -1046,6 +1330,19 @@ static void oot_player_speed(Ctx *c, uint64_t components) {
     logged = percent;
 }
 
+/* Whether the game moved Link since the flight last placed him: he is more than 2 units (the flight moves him 4 a second)
+   from where it holds him. A respawn after a fall or a warp keeps his actor, so the flight took him straight back to
+   where it had him, over the same drop: he fell, respawned and fell again until the flight was switched off. It starts
+   again from where the game put him instead. */
+static int oot_flight_moved_away(Ctx *c, uint64_t actor, const float held[3]) {
+    float apart = 0;
+    for (unsigned i = 0; i < 3; i++) {
+        const float d = oot_load_float(c, actor + 796 + i * 4) - held[i];
+        apart += d * d;
+    }
+    return apart > 2.0f * 2.0f;
+}
+
 static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components) {
     int rx_option(int id, int otherwise);
     static uint64_t flying_actor, marked_actor, marked_controller;
@@ -1054,7 +1351,12 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     /* Moon jump: while Jump is held Link rises as in the flight, straight up, and falls when it is let go. */
     const int flight_on = rx_option(HOS_OPT_CHEAT_FLIGHT, 0) > 0;
     const int moon = !flight_on && rx_option(HOS_OPT_CHEAT_MOONJUMP, 0) > 0 && hos_oot_jump_held;
-    const int flying = flight_on || moon;
+    int flying = flight_on || moon;
+    /* An event that takes Link (a map change he flew into, the age toggle's, a cutscene) waits for him to stand, and the
+       flight holds him in the air: the screen the event had faded stayed black until the flight was switched off, and a
+       second request met "waits until the current event ends". While an event plays he is let go and lands; the flight
+       takes him again, from where he then stands, when it has ended. */
+    if (flying && oot_event_playing(c)) flying = 0;
     if (!flying) flying_actor = 0;
     const int64_t now = hos_now_ns();
     __atomic_store_n(&flight_player_seen, now, __ATOMIC_RELAXED);
@@ -1062,18 +1364,34 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     last_player_tick = now;
     int action = rx_option(HOS_OPT_CHEAT_ACTION, 0);
     if (!action) action = __atomic_exchange_n(&hos_oot_live_action, 0, __ATOMIC_RELAXED);
+    int bridge_ticket = 0;   /* (the control bridge's teleport or age switch, host/control.c: what came of it is kept for its reply) */
+    int bridge_adult = -1;   /* (the bridge's age switch: the age wanted, 1 the adult) */
+    if (!action) {
+        const int asked = oot_bridge_teleport_take(&bridge_ticket);
+        if (asked & OOT_BRIDGE_AGE) action = OOT_AGE_ACTION, bridge_adult = asked & 1;
+        else if (asked) action = OOT_TELEPORT_ACTION + asked - 1;
+    }
     oot_teleport_followup(c);
     oot_inventory_refresh(c, now);
     oot_player_speed(c, components);
     oot_infinite_ammo(c, now);
     oot_lock_time(c, now);
     oot_cheat_hotkeys();
+    oot_map_refresh(c, now);
     if (action >= OOT_CHEAT_ITEM_ACTION && action < OOT_CHEAT_ITEM_ACTION + 256 * (int)OOT_ITEM_COUNT) {
         oot_inventory_edit(c, action);
     } else if (action == OOT_AGE_ACTION) {
-        oot_toggle_age(c, actor);
+        int child = 1;   /* (the bridge's: Link's age now, not its sample's; already the age wanted, nothing to flip) */
+        if (bridge_adult >= 0 && oot_gamedata_bool(c, 0xcea220d3u, &child) && !child == bridge_adult) {
+            hos_log("cheats: age toggle: Link is the %s already", child ? "child" : "adult");
+            oot_bridge_teleport_done(bridge_ticket, 2);
+        } else {
+            const int sent = oot_toggle_age(c, actor);
+            if (bridge_ticket) oot_bridge_teleport_done(bridge_ticket, sent);
+        }
     } else if (action >= OOT_TELEPORT_ACTION) {
-        oot_teleport(c, actor, (unsigned)(action - OOT_TELEPORT_ACTION));
+        const int sent = oot_teleport(c, actor, (unsigned)(action - OOT_TELEPORT_ACTION));
+        if (bridge_ticket) oot_bridge_teleport_done(bridge_ticket, sent);
     } else if (action >= 200) {
         oot_edit_pouch(c, action);
     } else if (action >= 100 && action < 124) {
@@ -1106,7 +1424,7 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
         memcpy(target, mark, sizeof target);
         memset(velocity, 0, sizeof velocity);
         flying_actor = flying ? actor : 0;
-    } else if (flying_actor != actor || elapsed < 0 || elapsed > 250000000) {
+    } else if (flying_actor != actor || elapsed < 0 || elapsed > 250000000 || oot_flight_moved_away(c, actor, target)) {
         for (unsigned i = 0; i < 3; i++) target[i] = oot_load_float(c, actor + 796 + i * 4);
         memset(velocity, 0, sizeof velocity);
         flying_actor = actor;
@@ -1223,6 +1541,82 @@ void hos_oot_flight_pose(Ctx *c, uint64_t actor, uint64_t matrix) {
 #endif
 }
 
+/* The new-game opening, build e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3348. Sequence/Opening.module.ainb requests
+   Opening_Introduction and Opening_LoadingKokiriForest (SeqOneShotRequestEvent, f_80d9a820; the event name is the
+   pointer at the request arg + 6800, which that function reads). Opening_Introduction's flowchart writes the state
+   on both paths: the clock at 6:00, Meet_DekuTree's challenge Step01, the forest terrain pin, then
+   EventTransition of the timeline Dm_Kokiri_0030. Its own skip query (IsEventSkipedMostRecent, f_80de6cb0) then
+   takes the short edge: Navi warped to the position that edge names, the in-game music, Navi's talked flag, the
+   camera handed back, and an autosave. Opening_LoadingKokiriForest's flowchart plays the timeline Dm_Kokiri_0000
+   and then waits until the forest banc has loaded. Neither timeline writes save data. Meet_DekuTree is a later
+   flow and is not one of these names.
+
+   With Skip opening on, the request is still sent, so the flowchart applies that edge. The two timelines are not
+   started: f_83b5bfb0 is their only starter (EventTransition at 0x80eaba00). Leaving bit 0 of the timeline player
+   + 0xf25 clear makes that caller take its own exit at 0x80eac5e0, which finishes the action node, instead of the
+   exit at 0x80eac640 that leaves the timeline running. The skip query is answered yes only while one of these two
+   requests is the current one, so the short edge runs and a title demo that uses the same query does not. The
+   cutscene frame counter is not moved. mode 0 observes a request, 1 a timeline start (return 1: do not start it),
+   2 the skip query (return 1: x0 is 1), 3 Link is updating and no event is playing (the opening has let him go). */
+int hos_oot_opening(Ctx *c, int mode) {
+    int rx_option(int id, int otherwise);
+    static int armed;
+    static char logged[64];
+    char name[80];
+    uint64_t p = 0;
+    if (mode == 3) {
+        armed = 0;
+        logged[0] = 0;
+        return 0;
+    }
+    if (!c || rx_option(HOS_OPT_SKIP_OPENING, 0) <= 0) {
+        armed = 0;
+        return 0;
+    }
+    name[0] = 0;
+    if (mode == 0) {
+        const uint64_t arg = c->x[1];
+        p = arg ? recomp_load64(c, arg + 6800) : 0;
+    } else if (mode == 1 && c->x[1]) {
+        p = recomp_load64(c, c->x[1]);   /* EventTransition passes a pointer to the timeline's name */
+    }
+    if (p) {
+        size_t i = 0;
+        for (; i + 1 < sizeof name; i++) {
+            name[i] = (char)recomp_load8(c, p + i);
+            name[i + 1] = 0;
+            if (!name[i]) break;
+        }
+    }
+    if (mode == 0) {
+        if (!strcmp(name, "Opening_Introduction") || !strcmp(name, "Opening_LoadingKokiriForest")) {
+            armed = 1;
+            if (strcmp(logged, name)) {
+                size_t i = 0;
+                for (; name[i] && i + 1 < sizeof logged; i++) logged[i] = name[i];
+                logged[i] = 0;
+                hos_log("opening skip: %s request sent", name);
+            }
+        } else if (name[0]) {
+            /* a different event (Meet_DekuTree included) is not skipped and drops the arm */
+            armed = 0;
+            logged[0] = 0;
+        }
+        return 0;   /* the request is still sent */
+    }
+    if (!armed) return 0;
+    if (mode == 2) {
+        c->x[0] = 1;
+        return 1;
+    }
+    if (mode == 1 && (!strcmp(name, "Dm_Kokiri_0000") || !strcmp(name, "Dm_Kokiri_0030"))) {
+        const uint64_t player = c->x[0];
+        if (player) recomp_store8(c, player + 0xf25, recomp_load8(c, player + 0xf25) & ~(uint64_t)1);
+        return 1;
+    }
+    return 0;
+}
+
 void hos_oot_lift_player(Ctx *c, uint64_t actor) {
 #if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
     flight_pose_actor = 0;
@@ -1231,6 +1625,7 @@ void hos_oot_lift_player(Ctx *c, uint64_t actor) {
     const uint64_t movement = components ? recomp_load64(c, components + 800) : 0;
     if (movement < HOS_HEAP_BASE + 0x1d50 || recomp_load64(c, movement + 24) != actor ||
         !hos_oot_is_player(c, movement - 0x1d50)) return;
+    if (!oot_event_playing(c)) hos_oot_opening(c, 3);   /* the opening has let Link go: later events keep their own skip */
 
     // Link can be updated by different guest workers on successive frames.
     static SRWLOCK cheats_lock = SRWLOCK_INIT;
@@ -1325,10 +1720,6 @@ void hos_oot_free_view(Ctx *c, uint64_t view) {
 float hos_aspect_ratio = 0;   /* (the window's default shape: host/display.c) */
 /* (nx2/oot_wide.py) read by the widescreen patches in the game's code; 0: the game's own 16:9 */
 volatile uint64_t hos_wide_out, hos_wide_scene;
-/* (nx2/oot_native_resolution.py) mode 1's scene base scale 1.0 instead of 0.8: Resolution 100% (host/nn_vi.c keeps it current),
-   HOS_SCENE_NATIVE=0/1 over it */
-volatile int hos_native_scene;
-volatile int hos_fix_res;   /* (nx2/oot_native_resolution.py's cached-scale refresh: HOS_FIX_RES=1; #849's fixed-scale patch does it by default) */
 volatile float hos_wide_ratio, hos_wide_squeeze, hos_wide_margin;
 volatile uint32_t hos_wide_keep_mask = 0xf;   /* (nx2/oot_wide.py KEEP_VTABLES: the screens that keep the whole picture, a bit each; MkwVkHost.wide_menus) */
 /* (nx2/oot_occlusion.py) read by the game's code where it decides to make occlusion queries: 1, none (HOOKSHOT_OCCLUSION_OFF=1) */
@@ -1372,7 +1763,7 @@ static void memory_notice(void) {
         return;
     }
     hos_log("boot: LOW MEMORY: %llu MB of memory, %llu MB of swap, below the ~%llu MB the game needs", ram, swap, HOS_MEMORY_NEEDED_MB);
-    if (getenv("HOS_HEADLESS")) return;
+    if (env_on("HOS_HEADLESS")) return;
 #ifndef _WIN32
     int hos_sdl_load(void);
     hos_sdl_load();   /* (host/posix MessageBoxA shows it through the SDL already loaded) */
@@ -1399,7 +1790,7 @@ static int narrow_paths_ok(int argc, char **argv) {
     GetModuleFileNameW(NULL, w, MAX_PATH * 2);
     fprintf(stderr, "hookshot: this folder's path cannot be opened (code page %u, %s): move the game to a folder with a plain name\n",
             GetACP(), n >= MAX_PATH ? "too long" : "has characters the code page lacks");
-    int quiet = getenv("HOS_HEADLESS") != NULL;
+    int quiet = env_on("HOS_HEADLESS");
     for (int i = 1; i < argc; i++) quiet |= !strcmp(argv[i], "--prepare-shaders");
     if (!quiet) {
         wchar_t text[MAX_PATH * 2 + 640];
@@ -1421,6 +1812,10 @@ static int game_main(int argc, char **argv) {
 #endif
 #ifdef _WIN32
     if (!narrow_paths_ok(argc, argv)) return 1;
+    {
+        void hos_relaunch_keep_env(void);   /* (host/hos_relaunch.c: the environment before the file's lines, for a restart) */
+        hos_relaunch_keep_env();
+    }
     load_hookshot_env();
 #endif
     occlusion_switch();
@@ -1433,7 +1828,7 @@ static int game_main(int argc, char **argv) {
         // Windows answered such a thread 2560 x 1440: the picture was that size, in the corner of the window. Hookshot issues 15, 18, 20)
         typedef BOOL(WINAPI * SetAware)(void *);
         SetAware set = (SetAware)(void *)GetProcAddress(GetModuleHandleA("user32.dll"), "SetProcessDpiAwarenessContext");
-        if (set && !getenv("HOS_DPI_UNAWARE")) set((void *)(intptr_t)-4);
+        if (set && !env_on("HOS_DPI_UNAWARE")) set((void *)(intptr_t)-4);
     }
 #endif
     {   // (started from its icon the game has nowhere to log to: hookshot_log.txt beside it, last run only, for players to send in)
@@ -1464,10 +1859,16 @@ static int game_main(int argc, char **argv) {
                 MoveFileExA(from, to, MOVEFILE_REPLACE_EXISTING);
             }
             memcpy(path + n, "hookshot_log.txt", 17);
+#if !defined(_WIN32) && !defined(A64_MEM_ZERO)
+            startup_stderr = fcntl(STDERR_FILENO, F_DUPFD_CLOEXEC, 0);
+#endif
             if (freopen(path, "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
         }
     }
     hos_log("hookshot %s", HOOKSHOT_VERSION);   /* (the log's first line: which build a report comes from) */
+    removed_switch_notes();
+    void hos_control_start(const char *version);
+    hos_control_start(HOOKSHOT_VERSION);   /* (HOS_CONTROL=<socket>: the control bridge, host/control.c) */
     const char *image = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--romfs") && i + 1 < argc) hos_romfs_dir = argv[++i];
@@ -1508,7 +1909,6 @@ static int game_main(int argc, char **argv) {
             snprintf(beside_romfs, MAX_PATH, "%s" SEP_S "romfs", dir);
             snprintf(beside_user, MAX_PATH, "%s" SEP_S "user", dir);
             if (GetFileAttributesA(beside_image) != INVALID_FILE_ATTRIBUTES) {
-                hos_update_check();   /* (a game folder from the builder: is a newer release out? host/hos_update.c) */
                 image = beside_image;
                 if (!hos_romfs_dir) hos_romfs_dir = beside_romfs;
 #ifndef _WIN32
@@ -1516,6 +1916,9 @@ static int game_main(int argc, char **argv) {
 #else
                 if (!hos_user_dir) hos_user_dir = beside_user;
 #endif
+                /* (a game folder from the builder: is a newer release out? host/hos_update.c. After the saves' place is known:
+                   on Linux the check keeps its "Skip this version" there) */
+                hos_update_check();
             }
         }
     }
@@ -1524,7 +1927,7 @@ static int game_main(int argc, char **argv) {
                 argv[0]);
         return 2;
     }
-    if (getenv("HOS_TRACE")) hos_trace = 1;
+    if (env_on("HOS_TRACE")) hos_trace = 1;
     if (!hos_user_dir) hos_user_dir = "user";
     CreateDirectoryA(hos_user_dir, NULL);
     if (!reserve_guest()) {
@@ -1563,14 +1966,15 @@ static int game_main(int argc, char **argv) {
     }
     hos_mem_init(hos_image_end);
     {   /* (hookshot) Widescreen and ultrawide (nx2/oot_wide.py): HOS_ASPECT=<ratio> (2.3889 for 3440x1440), else the Insert menu's
-           Ultrawide (off unless it says 1) takes the main monitor's shape. The game's picture takes that shape at its own height (the
-           world wider at the sides on an ultrawide screen, narrower on a 16:10 or 4:3 one), its 16:9 cameras the picture's ratio. Wider
+           Aspect ratio (on unless it says 0) takes the main monitor's shape. The game's picture takes that shape at its own height (the
+           world wider at the sides on an ultrawide screen, narrower on a 16:10 or 4:3 one), its 16:9 cameras the picture's ratio.
+           An output that is not 16:9 takes precedence over both HOS_ASPECT and the Aspect ratio, matching the menu's picture. Wider
            than 16:9 the HUD, menus and movies keep the middle 16:9; narrower they fill the picture's width. Until now the one 16:9
            constant in the game's data was changed and the 16:9 picture stretched to the window. */
         const char *e = getenv("HOS_ASPECT");
         float want = e ? (float)atof(e) : 0.0f;
         if (!e) {
-            int on = 0;
+            int saved = -1, version = 0;   /* (the Aspect ratio's ultrawide= and options_version=, -1 / 0 without them) */
             char path[MAX_PATH];
             const DWORD len = hos_game_path_a(path, MAX_PATH);
             char *slash = len ? strrchr(path, SEP) : NULL;
@@ -1580,32 +1984,35 @@ static int game_main(int argc, char **argv) {
                 if (o) {
                     char line[80];
                     while (fgets(line, sizeof line, o)) {
-                        if (!strncmp(line, "ultrawide=", 10)) on = atoi(line + 10) != 0;
-                        /* (the game sizes its scene before the menu is up: Resolution 100% read here too) */
-                        /* (resolution=1 no longer raises the scene: #849 makes a fixed Resolution reach the 3D; HOS_SCENE_NATIVE=1 below) */
+                        if (!strncmp(line, "ultrawide=", 10)) saved = atoi(line + 10) != 0;
+                        if (!strncmp(line, "options_version=", 16)) version = atoi(line + 16);
                     }
                     fclose(o);
                 }
             }
             const int sw = GetSystemMetrics(SM_CXSCREEN), sh = GetSystemMetrics(SM_CYSCREEN);
+            /* (no line: the monitor's shape; an older file's 16:9 on a screen narrower than 16:9 too: hos_aspect_on) */
+            const int on = hos_aspect_on(saved, version, sw, sh);
             if (on && sh > 0) want = (float)sw / (float)sh;
         }
-        if (getenv("HOS_SCENE_NATIVE")) hos_native_scene = atoi(getenv("HOS_SCENE_NATIVE")) != 0;
-        if (getenv("HOS_FIX_RES")) hos_fix_res = atoi(getenv("HOS_FIX_RES")) != 0;
-        if (hos_native_scene) hos_log("boot: HOS_SCENE_NATIVE=1: the scene's base scale 1.0 (the game's 0.8 otherwise)");
         extern volatile uint64_t hos_wide_out, hos_wide_scene;
         extern volatile float hos_wide_ratio, hos_wide_squeeze, hos_wide_margin;
+        uint32_t hos_output_size(int height);
+        const uint32_t output_w = hos_output_size(0), output_h = hos_output_size(1);
+        /* An output of a shape of its own (the Insert menu's Aspect ratio: 21:9, 16:10, 4:3, a 32:9 surround...) asks for that
+           shape, over HOS_ASPECT and Ultrawide, even if the OS reports one monitor (host/hos_wide_size.h) */
+        if (hos_output_own_shape(output_w, output_h)) want = (float)output_w / (float)output_h;
         const double game = 16.0 / 9.0;
         /* (a screen narrower than 16:9 too, 16:10 to 5:4: the picture keeps the game's height and is narrower, the
            cameras take its ratio, and the HUD fills its width instead of a middle 16:9 wider than the screen. A 4:3 CRT
            at the 1440 output: picture 1920 x 1440, scene 1440 x 1080, HUD 100%) */
         if (want > game * 1.01 || (want > 1.0f && want < game * 0.99)) {
             const double r = hos_wide_clamp(want);
-            uint32_t hos_output_size(int height);   /* (host/nn_applet.c: the Output resolution's height, 1440 as shipped) */
-            /* (the height kept, the width at the screen's ratio, at most 3840 x 2160's pixels with the shape kept:
-               host/hos_wide_size.h, which the Insert menu's Output and Render resolution rows share; issue 1031) */
+            /* (the height kept, the width at the screen's ratio, at most hos_wide_max_px() pixels (5120 x 2160's, a 21:9 screen's
+               native at the 4K output) with the shape kept: host/hos_wide_size.h, which the Insert menu's Output and Render
+               resolution rows share; issue 1031) */
             unsigned ow, oh;
-            hos_wide_size(hos_output_size(1), r, hos_wide_max_px(), &ow, &oh);
+            hos_wide_size(output_h, r, hos_wide_max_px(), &ow, &oh);
             const unsigned sh = oh * 3 / 4, sw = (unsigned)(ow * 0.75 / 8 + 0.5) * 8;   /* (the scene, 3/4 of the picture as shipped) */
             hos_wide_out = (uint64_t)oh << 32 | ow;
             hos_wide_scene = (uint64_t)sh << 32 | sw;
@@ -1631,6 +2038,8 @@ static int game_main(int argc, char **argv) {
     uint64_t sp = c->x[31];
     void hos_prof_start(void);
     hos_prof_start();   /* HOS_PROFILE=<seconds> */
+    void hos_chain_start(void);
+    hos_chain_start();  /* HOS_CHAIN=<path> */
 #ifdef _WIN32
     timeBeginPeriod(1);   /* 1 ms timer resolution: the 60 Hz vsync and the game's frame pacing sleep in short steps */
     no_power_throttling();
@@ -1679,11 +2088,44 @@ static void driver_cache_room(void) {
     setenv("__GL_SHADER_DISK_CACHE_SIZE", "10737418240", 0);   /* (10 GiB, bytes) */
     setenv("MESA_SHADER_CACHE_MAX_SIZE", "10G", 0);
 }
+#include <errno.h>
+#include <sys/stat.h>
+/* (hookshot, linux) NVIDIA's driver keeps no shader cache at all when __GL_SHADER_DISK_CACHE_PATH names a folder that does not exist:
+   it neither creates it nor falls back to ~/.cache/nvidia, and every start compiles every pipeline again (a test of 300 pipelines:
+   7.9 ms each at the first start and at the second, against 0.06 ms from the cache; driver 620.70). The folder a player or a
+   launcher named is made here, before anything loads Vulkan. Mesa makes its own (MESA_SHADER_CACHE_DIR, parents too). Not needed:
+   NVIDIA files the cache by the program's file name alone (bin/hookshot), not its folder, bytes or date, nor VkApplicationInfo, so
+   an update in place, a folder moved or copied and every Hookshot folder on the PC share one cache (a cache of another driver or
+   GPU is the driver's to drop) */
+static void driver_cache_folder(void) {
+    const char *dir = getenv("__GL_SHADER_DISK_CACHE_PATH");
+    if (!dir || !*dir || strlen(dir) >= 4096) return;
+    char path[4096];
+    strcpy(path, dir);
+    for (char *p = path + 1;; p++) {   /* (each parent, then the folder itself: mkdir -p) */
+        const char c = *p;
+        if (c != '/' && c) continue;
+        *p = 0;
+        if (mkdir(path, 0700) != 0 && errno != EEXIST) {
+            fprintf(stderr, "vk: __GL_SHADER_DISK_CACHE_PATH %s: cannot make %s (%s): NVIDIA's driver keeps no shader cache\n", dir,
+                    path, strerror(errno));
+            return;
+        }
+        if (!c) {   /* (a file already at that name counts as made for mkdir, but the driver can't use it) */
+            struct stat st;
+            if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode))
+                fprintf(stderr, "vk: __GL_SHADER_DISK_CACHE_PATH %s: cannot make it, a file has that name: NVIDIA's driver keeps no shader cache\n", dir);
+            return;
+        }
+        *p = '/';
+    }
+}
 int main(int argc, char **argv) {
     int hos_display_init(void);
     void hos_display_loop(void);
     load_hookshot_env();
     driver_cache_room();
+    driver_cache_folder();
     game_argc = argc, game_argv = argv;
     int prepare_shaders = 0;
     for (int i = 1; i < argc; i++) {

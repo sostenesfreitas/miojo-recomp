@@ -48,6 +48,13 @@ inline void index_start(uint64_t address, int itype, uint64_t* aligned, uint32_t
 
 /// Push::formats: the position is RGBA16F (else RGB32F); a set's joints are RGBA8UI (else RGBA16UI)
 constexpr uint32_t kHalfPosition = 1, kByteJoints = 2;
+/// Push::formats: set n is a single influence (an R8 weight; its joint R8UI with kByteJoints << n, else R16UI)
+constexpr uint32_t kSingle = 8;
+/// Push::formats: set n has two influences (an RG8 weight pair and an RG8UI joint pair, any byte offset)
+constexpr uint32_t kPair = 32;
+/// Push::formats: set n has no weights, its one joint weighs 1 (rigid models bound to one bone: Navi's body,
+/// props, held items; with kSingle)
+constexpr uint32_t kNoWeight = 128;
 
 /// The cameras' buffer, 36 words: this frame's camera (as drawn, jittered), the frame before's (its jitter taken off), this
 /// frame's jitter in clip space, the render size

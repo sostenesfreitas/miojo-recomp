@@ -1299,7 +1299,13 @@ MMRESULT waveOutWrite(HWAVEOUT hw, WAVEHDR *h, UINT size) {
     (void)size;
     WaveOut *w = (WaveOut *)hw;
     pthread_mutex_lock(&w->mu);
-    if (w->count == 64) { pthread_mutex_unlock(&w->mu); return MMSYSERR_ERROR; }
+    if (w->count >= 60) {
+        WAVEHDR *old = w->q[w->head];
+        __atomic_store_n(&old->dwFlags, (old->dwFlags & ~(DWORD)WHDR_INQUEUE) | WHDR_DONE, __ATOMIC_RELEASE);
+        w->head = (w->head + 1) % 64;
+        w->count--;
+        w->pos = 0;
+    }
     h->dwFlags = (h->dwFlags & ~(DWORD)WHDR_DONE) | WHDR_INQUEUE;
     w->q[(w->head + w->count) % 64] = h;
     w->count++;

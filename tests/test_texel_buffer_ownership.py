@@ -4,6 +4,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ['--cxx', '{cxx}', '--headers', '{vulkan_headers}']
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,9 +48,10 @@ def main():
         block(memory, "void reap_mirrors("),
         eviction,
     ])
-    # Rollback, prefetch drops and both published-import reapers must share the same owner-release point.
+    # Rollback, prefetch drops, a trim's rollback (mirrors_trim) and both published-import reapers must share the same
+    # owner-release point.
     assert memory.count("vkDestroyBuffer(") == 1
-    assert memory.count("destroy_import_buffer(") == 9
+    assert memory.count("destroy_import_buffer(") == 10
     fixture = (ROOT / "tests/texel_buffer_ownership_test.cpp").read_text(encoding="utf-8")
     fixture = fixture.replace("/* DEAD IMPORT */", block(memory, "struct DeadImport {") + ";")
     fixture = fixture.replace("/* ACTUAL */", actual)
@@ -58,7 +62,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="texel-buffer-ownership-") as temp:
         cpp, exe = Path(temp) / "fixture.cpp", Path(temp) / "fixture.exe"
         cpp.write_text(fixture, encoding="utf-8")
-        subprocess.run([a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Werror",
+        subprocess.run([a.cxx, "-std=c++20", "-include", ENV_ON_H, "-O1", "-Wall", "-Wextra", "-Werror",
                         "-Wno-missing-field-initializers", "-pthread", "-I" + str(a.headers),
                         *(["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-pie", "-no-pie"] if a.sanitize else []),
                         str(cpp), "-o", str(exe)], check=True)

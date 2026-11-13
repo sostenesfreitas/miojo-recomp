@@ -9,6 +9,7 @@
 #include "common/settings.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/backend/spirv/mma_layout.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/ir/modifiers.h"
 
@@ -445,9 +446,10 @@ Id ImageGatherSubpixelOffset(EmitContext& ctx, const IR::TextureInstInfo& info, 
     case TextureType::Color2DRect:
         return calculate_coords(2);
     case TextureType::ColorArray2D:
-    case TextureType::ColorCube:
         return calculate_coords(3);
     default:
+        // (hookshot) a cube's coordinates are a direction: no texel to nudge by, and its size query has two components, not
+        // three (the cube case here made invalid SPIR-V: OpImageQuerySizeLod's result of three components on a cube)
         return coords;
     }
 }
@@ -487,6 +489,64 @@ void AddOffsetToCoordinates(EmitContext& ctx, const IR::TextureInstInfo& info, I
         return;
     }
     coords = ctx.OpIAdd(result_type, coords, offset);
+}
+// (hookshot, mma_layout.h fetch_bounds) Whether a texel fetch of image at coords (with its level, or its sample, when it has one)
+// is inside the image, as U1; coords, lod and sample are made ones that are (a coordinate out of range 0, a level or sample past
+// the last 0), so that the fetch itself never leaves the image, and the caller answers zero for it. NVIDIA's GPUs answer an
+// out-of-bounds fetch with zero (measured on an RTX 3090 with robustness off: every texture type, past each edge, past the last
+// level and the last sample; the alpha of a format without one is 1 there, as in range, and 0 here: the translation does not
+// know the format). Vulkan leaves such a fetch undefined without robustImageAccess, and on AMD the ground fog's depth reads at
+// points projected off screen took the other branch: a pale box at the screen's edges (found by Ocarina of Lain's author on
+// an RX 9070). Id{}: a type left as it was: a texel buffer while robustBufferAccess2 is on (on by default: the Robust buffers
+// row), which answers its out-of-bounds reads with zero already (fetch_bounds_buffers), and the cube types, which no fetch reads
+Id FetchInBounds(EmitContext& ctx, const IR::TextureInstInfo& info, Id image, Id& coords, Id& lod, Id& sample) {
+    u32 dims{};
+    switch (info.type) {
+    case TextureType::Buffer:
+        if (!fetch_bounds_buffers) {
+            return Id{};
+        }
+        dims = 1;
+        break;
+    case TextureType::Color1D:
+        dims = 1;
+        break;
+    case TextureType::ColorArray1D:
+    case TextureType::Color2D:
+    case TextureType::Color2DRect:
+        dims = 2;
+        break;
+    case TextureType::ColorArray2D:
+    case TextureType::Color3D:
+        dims = 3;
+        break;
+    default:
+        return Id{};
+    }
+    const Id size_type{ctx.U32[dims]};
+    Id level_ok{};
+    Id size{};
+    if (Sirit::ValidId(lod)) {
+        const Id levels{ctx.OpImageQueryLevels(ctx.U32[1], image)};
+        level_ok = ctx.OpULessThan(ctx.U1, lod, levels);
+        lod = ctx.OpSelect(ctx.U32[1], level_ok, lod, ctx.u32_zero_value);
+        size = ctx.OpImageQuerySizeLod(size_type, image, lod);
+    } else {
+        size = ctx.OpImageQuerySize(size_type, image);   // (a texel buffer, or a multisampled image)
+    }
+    // (unsigned: a negative coordinate is past the end too)
+    const Id inside{ctx.OpULessThan(dims == 1 ? ctx.U1 : ctx.TypeVector(ctx.U1, dims), coords, size)};
+    coords = ctx.OpSelect(size_type, inside, coords, ctx.ConstantNull(size_type));
+    Id in_bounds{dims == 1 ? inside : ctx.OpAll(ctx.U1, inside)};
+    if (Sirit::ValidId(level_ok)) {
+        in_bounds = ctx.OpLogicalAnd(ctx.U1, in_bounds, level_ok);
+    }
+    if (Sirit::ValidId(sample)) {
+        const Id sample_ok{ctx.OpULessThan(ctx.U1, sample, ctx.OpImageQuerySamples(ctx.U32[1], image))};
+        sample = ctx.OpSelect(ctx.U32[1], sample_ok, sample, ctx.u32_zero_value);
+        in_bounds = ctx.OpLogicalAnd(ctx.U1, in_bounds, sample_ok);
+    }
+    return in_bounds;
 }
 } // Anonymous namespace
 
@@ -723,6 +783,17 @@ Id EmitImageFetch(EmitContext& ctx, IR::Inst* inst, const IR::Value& index, Id c
     if (Sirit::ValidId(ms)) {
         // This image is multisampled, lod must be implicit
         lod = Id{};
+    }
+    if (fetch_bounds) {   // (hookshot: FetchInBounds)
+        const Id image{TextureImage(ctx, info, index)};
+        const Id in_bounds{FetchInBounds(ctx, info, image, coords, lod, ms)};
+        const ImageOperands operands(lod, ms);
+        Id color{Emit(&EmitContext::OpImageSparseFetch, &EmitContext::OpImageFetch, ctx, inst,
+                      result_type, image, coords, operands.MaskOptional(), operands.Span())};
+        if (Sirit::ValidId(in_bounds)) {
+            color = ctx.OpSelect(result_type, in_bounds, color, ctx.ConstantNull(result_type));
+        }
+        return is_integer ? ctx.OpBitcast(ctx.F32[4], color) : color;
     }
     const ImageOperands operands(lod, ms);
     const Id color{Emit(&EmitContext::OpImageSparseFetch, &EmitContext::OpImageFetch, ctx, inst,

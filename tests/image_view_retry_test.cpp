@@ -54,6 +54,7 @@ bool is_astc(VkFormat f) { return f >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && f <= VK
 void logf(const char*, ...) {}
 // Diagnostic toggles are outside this allocation/cache fixture; do not inherit the runner's environment.
 const char* getenv(const char*) { return nullptr; }
+bool env_on(const char* name) { const char* v = getenv(name); return v && !env_value_off(v); }   // (the switches through the stand-in)
 std::vector<VkResult> results;
 std::vector<VkImageViewCreateInfo> creates;
 std::set<VkImageView> live;

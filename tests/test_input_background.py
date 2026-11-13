@@ -19,6 +19,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ["--cc", "gcc"]
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +67,7 @@ def main():
     constants = block(hid, "enum { B_A") + ";\n" + block(api, "enum { HOS_SW_A") + ";\n"
     constants += block(api, "enum { HOS_KEY_MOVE_UP") + ";\n"   # (the keys-only controls)
     constants += block(api, "enum { HOS_OPT_CHEAT_HEARTS") + ";\n"
+    constants += block(api, "enum { HOS_BIND_PAD") + ";\n"   # (the live input's !bind)
     for name in ("STATE_SIZE", "NPAD_NO1", "ATTR_CONNECTED"):
         matches = re.findall(r"^#define " + name + r"\s+[^\n]+", hid, re.M)
         assert len(matches) == 1, name
@@ -92,6 +96,7 @@ static void player_used(void) {}
         # (the bound keys' helpers read_input calls: a mouse button counts only while the mouse is captured)
         block(hid, "static int mouse_vk_slot("), re.search(r"^static int mouse_armed\[5\];", hid, re.M).group(0),
         block(hid, "static void mouse_buttons_arm("), block(hid, "static int bound_down("),
+        block(hid, "static void oc_notes("), block(hid, "static uint64_t oc_pad_word("),
         block(hid, "static int flight_jump_shortcut("), read, block(hid, "static void npad_states(")))
     glue = (ROOT / "host/mkw_glue.c").read_text(encoding="utf-8")
     actual += "\n" + "\n".join(block(glue, "uint64_t " + name + "(")
@@ -114,7 +119,7 @@ static void player_used(void) {}
         (folder / "input_actual.inc").write_text(actual, encoding="utf-8")
         exe = folder / "fixture.exe"
         # Production's button table deliberately leaves its unused axis fields zero-initialized.
-        run([a.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers",
+        run([a.cc, "-std=c11", "-include", ENV_ON_H, "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers",
              "-D_CRT_SECURE_NO_WARNINGS",
              "-I" + str(folder), str(ROOT / "tests/input_background_test.c"), "-o", str(exe)])
         for case in ((a.case,) if a.case else CASES):

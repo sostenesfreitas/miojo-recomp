@@ -8,7 +8,14 @@
 # - Promote (this workflow started by hand, with the release candidate to promote): its version is tagged on the same
 #   commit and built and published the same way, as the latest release, with the notes of its release candidates. Then
 #   .release-please-manifest.json gets the version, so the next release pull request proposes the next version's first
-#   release candidate.
+#   release candidate. A Promote run is one at a time, from promote to record (the concurrency below), and a Promote of
+#   a version already published is refused.
+# - Record: whenever a version's release (v2.1.0, not a prerelease) is published, however it was published, the manifest
+#   and CHANGELOG.md get it (the record job). In a Promote run it runs after publish, or after a failure once the release
+#   is published anyway; a release published by hand starts this workflow (release: published) for it. A release
+#   published with GITHUB_TOKEN starts no workflow, so the Promote run's own record job is the one for those.
+# - rc: after either publish, and for a release published by hand, the rc prerelease gets the newest release candidate's
+#   or release's AppImage and .zsync (the rc job), for the update information of release candidates' AppImages.
 # No game data is involved.
 name: Release
 
@@ -23,9 +30,20 @@ on:
           newest release candidate.
         type: string
         required: false
+  # (a version published by hand, or by anything but this workflow's token: the record job records it)
+  release:
+    types: [published]
 
 permissions:
   contents: read
+
+# A Promote run holds this from its promote job to its record job, its builds and uploads included, so two Promote runs
+# never work on one draft at once (v2.1.0's did: one run's upload published the release while the other's was
+# uploading). A second Promote started meanwhile waits, then is refused once the version is published; a third one
+# replaces the second while it waits. Other runs (a push, a release published) each have their own group.
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && 'release-promote' || format('release-{0}-{1}', github.event_name, github.run_id) }}
+  cancel-in-progress: false
 
 jobs:
   release-please:
@@ -55,16 +73,15 @@ jobs:
 
   # (started by hand on main: the release candidate checked, the version's tag on its commit and its draft release with
   # the release candidates' notes, scripts/release_promote.sh)
+  # (one at a time: the workflow's concurrency group, which covers the whole run)
   promote:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    concurrency:
-      group: release-promote
-      cancel-in-progress: false
-    # (the tag and the draft release)
+    # (the tag and the draft release; actions: read, the other Promote runs in progress)
     permissions:
       contents: write
+      actions: read
     outputs:
       tag: ${{ steps.promote.outputs.tag }}
       rc: ${{ steps.promote.outputs.rc }}
@@ -129,7 +146,7 @@ jobs:
       - if: env.WINDOWS_BY_HAND == 'true'
         run: >-
           echo "::notice::$TAG stays a draft: upload HookshotBuilder.exe and hookshot-setup.txt, run
-          scripts/release_files.sh finish $TAG, then publish it."
+          scripts/release_files.sh finish $TAG, then publish it: that starts this workflow's record job for it."
       - if: env.WINDOWS_BY_HAND != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -147,64 +164,109 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: SHA256SUMS
+      # (by the release's id: a draft is not found by its tag)
       - name: Publish the release
         if: env.WINDOWS_BY_HAND != 'true'
-        run: |
-          if [[ $TAG == *-* ]]; then
-            gh release edit "$TAG" --draft=false --prerelease --latest=false
-          else
-            gh release edit "$TAG" --draft=false --prerelease=false --latest
-          fi
+        run: scripts/release_files.sh publish "$TAG"
 
-  # After a promotion: .release-please-manifest.json gets the version (scripts/release_promote.sh record), so the next
-  # release pull request proposes the next version's first release candidate, and CHANGELOG.md the version's entry.
+  # rc, the latest release candidate (scripts/release_rc.sh): a rolling prerelease, never "latest", holding the Linux
+  # AppImage and .zsync of the newest published release candidate or release, which a release candidate's AppImage names
+  # in its update information so that AppImageUpdate moves it on. After publish (a release candidate's files, or a
+  # promoted version's), and when a release is published by hand (release: published). It makes rc hold the newest
+  # release there is, not this run's, so a run of this job replaced while it waits loses nothing.
+  rc:
+    needs: [publish]
+    if: >-
+      !cancelled() && (needs.publish.result == 'success'
+      || (github.event_name == 'release' && startsWith(github.event.release.tag_name, 'v') && !github.event.release.draft))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # (one at a time, across runs: a release candidate's run and a Promote run never change rc at once)
+    concurrency:
+      group: release-rc
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: The latest release candidate
+        run: scripts/release_rc.sh
+
+  # Once a version's release is published: .release-please-manifest.json gets the version (scripts/release_promote.sh
+  # record), so the next release pull request proposes the next version's first release candidate, and CHANGELOG.md the
+  # version's entry. In a Promote run, after publish, or after a failure when the release was published anyway; on
+  # release: published, for a version's release published by hand. It records only a published v<major>.<minor>.<patch>
+  # release, and once: run again, it finds the manifest and the changelog have it and changes nothing.
   # Pushed to main; where main takes no direct push (branch protection), a small pull request instead, to merge before
   # the release pull request. Then the release pull request is made again from the new manifest.
   record:
     needs: [promote, publish]
-    if: ${{ !cancelled() && needs.promote.result == 'success' && needs.publish.result == 'success' }}
+    if: >-
+      !cancelled() && ((github.event_name == 'workflow_dispatch' && needs.promote.result == 'success')
+      || (github.event_name == 'release' && !github.event.release.prerelease && !github.event.release.draft))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    # (one at a time: a Promote run's and a release: published run's for the same version, the second changing nothing)
+    concurrency:
+      group: release-record
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      TAG: ${{ needs.promote.outputs.tag }}
+      TAG: ${{ needs.promote.outputs.tag || github.event.release.tag_name }}
       RC: ${{ needs.promote.outputs.rc }}
+      BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref_name }}
+          ref: ${{ github.event.repository.default_branch }}
           # (the push below)
           persist-credentials: true
       - name: Manifest and changelog
         id: record
         run: |
+          if [[ ! $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "$TAG is not a version's tag: nothing to record"; exit 0; fi
+          # (published: GitHub's get-a-release-by-tag finds only a published release)
+          if ! gh api "repos/$GH_REPO/releases/tags/$TAG" --jq '"\(.tag_name) published \(.published_at)"'; then
+            echo "::notice::$TAG is not published: nothing to record"
+            exit 0
+          fi
           scripts/release_promote.sh record "$TAG" "$RC"
-          if git diff --quiet; then echo "nothing to record"; exit 0; fi
+          if git diff --quiet; then echo "$TAG is recorded already: nothing to change"; exit 0; fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           title="chore(release): record ${TAG#v} as released"
-          git commit -qam "$title" -m "$RC is published as $TAG. The next release pull request proposes the next version's release candidate."
-          if git push origin "HEAD:refs/heads/$GITHUB_REF_NAME"; then
+          git commit -qam "$title" -m "$TAG is published. The next release pull request proposes the next version's release candidate."
+          if git push origin "HEAD:refs/heads/$BRANCH"; then
             echo "pushed=true" >>"$GITHUB_OUTPUT"
           else
             branch=release-promote--$TAG
             git push --force origin "HEAD:refs/heads/$branch"
-            gh pr create --base "$GITHUB_REF_NAME" --head "$branch" --title "$title" --body "$RC is published as $TAG.
+            if [[ -n $(gh pr list --head "$branch" --base "$BRANCH" --state open --json number --jq '.[].number') ]]; then
+              echo "::notice::the pull request from $branch is open already, now with this commit: merge it before the release pull request"
+              exit 0
+            fi
+            gh pr create --base "$BRANCH" --head "$branch" --title "$title" --body "$TAG is published.
           This sets \`.release-please-manifest.json\` to ${TAG#v} and adds its entry to \`CHANGELOG.md\`, so the next release
           pull request proposes the next version's first release candidate. Merge it before the release pull request.
-          (Opened by the Release workflow: $GITHUB_REF_NAME took no direct push.)"
-            echo "::notice::$GITHUB_REF_NAME took no direct push: merge the pull request from $branch before the release pull request"
+          (Opened by the Release workflow: $BRANCH took no direct push.)"
+            echo "::notice::$BRANCH took no direct push: merge the pull request from $branch before the release pull request"
           fi
       # (the push above was made with GITHUB_TOKEN, which starts no workflow: the release pull request is made again here)
       - if: steps.record.outputs.pushed == 'true'
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ github.token }}
-          target-branch: ${{ github.ref_name }}
+          target-branch: ${{ github.event.repository.default_branch }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           skip-github-release: true

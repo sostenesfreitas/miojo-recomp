@@ -155,7 +155,7 @@ Id EmitConvertF16F32(EmitContext& ctx, Id value) {
     return ctx.OpFConvert(ctx.F16[1], value);
 #else
     const auto result = ctx.OpFConvert(ctx.F16[1], value);
-    const auto isOverflowing = ctx.OpIsNan(ctx.U1, result);
+    const auto isOverflowing = IsNan(ctx, result, 16);   // (hookshot: mma_layout.h nan_bits)
     return ctx.OpSelect(ctx.F16[1], isOverflowing, ctx.Constant(ctx.F16[1], 0), result);
 #endif
 }

@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
+#include "shader_recompiler/backend/spirv/mma_layout.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
 #include "shader_recompiler/frontend/ir/modifiers.h"
 
@@ -381,16 +382,40 @@ Id EmitFPUnordGreaterThanEqual64(EmitContext& ctx, Id lhs, Id rhs) {
     return FPUnordCompare(&EmitContext::OpFUnordGreaterThanEqual, ctx, lhs, rhs);
 }
 
+// (hookshot) isnan of a scalar float of that many bits. With nan_bits (mma_layout.h: AMD's older Windows shader compiler) it is
+// a test of the value's bits, a NaN being an exponent of all ones and a mantissa that is not 0, which no float-mode setting of the
+// compiler can fold away; else OpIsNan, as before
+Id IsNan(EmitContext& ctx, Id value, u32 bits) {
+    if (!nan_bits) {
+        return ctx.OpIsNan(ctx.U1, value);
+    }
+    if (bits == 64) {
+        const Id words{ctx.OpBitcast(ctx.U32[2], value)};
+        const Id high{ctx.OpBitwiseAnd(ctx.U32[1], ctx.OpCompositeExtract(ctx.U32[1], words, 1U),
+                                       ctx.Const(0x7fffffffu))};
+        const Id low{ctx.OpCompositeExtract(ctx.U32[1], words, 0U)};
+        const Id infinity{ctx.Const(0x7ff00000u)};
+        return ctx.OpLogicalOr(ctx.U1, ctx.OpUGreaterThan(ctx.U1, high, infinity),
+                               ctx.OpLogicalAnd(ctx.U1, ctx.OpIEqual(ctx.U1, high, infinity),
+                                                ctx.OpINotEqual(ctx.U1, low, ctx.u32_zero_value)));
+    }
+    if (bits == 16) {
+        value = ctx.OpFConvert(ctx.F32[1], value);   // (exact: a NaN stays a NaN, and nothing else becomes one)
+    }
+    const Id magnitude{ctx.OpBitwiseAnd(ctx.U32[1], ctx.OpBitcast(ctx.U32[1], value), ctx.Const(0x7fffffffu))};
+    return ctx.OpUGreaterThan(ctx.U1, magnitude, ctx.Const(0x7f800000u));
+}
+
 Id EmitFPIsNan16(EmitContext& ctx, Id value) {
-    return ctx.OpIsNan(ctx.U1, value);
+    return IsNan(ctx, value, 16);
 }
 
 Id EmitFPIsNan32(EmitContext& ctx, Id value) {
-    return ctx.OpIsNan(ctx.U1, value);
+    return IsNan(ctx, value, 32);
 }
 
 Id EmitFPIsNan64(EmitContext& ctx, Id value) {
-    return ctx.OpIsNan(ctx.U1, value);
+    return IsNan(ctx, value, 64);
 }
 
 } // namespace Shader::Backend::SPIRV

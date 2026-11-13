@@ -19,6 +19,9 @@
 #include <mftransform.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 
 #ifndef MFVideoFormat_AV1
 DEFINE_GUID(MFVideoFormat_AV1_local, 0x31305641, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71);
@@ -90,11 +93,11 @@ static void av1_missing(void) {
 
 void *mf_av1_open(int w, int h) {
     if (!com_ready()) return NULL;
-    if (getenv("HOS_AV1_MISSING")) { av1_missing(); return NULL; }
+    if (env_on("HOS_AV1_MISSING")) { av1_missing(); return NULL; }
     MFT_REGISTER_TYPE_INFO in = {MFMediaType_Video, MFVideoFormat_AV1};
     IMFActivate **acts = NULL;
     UINT32 n = 0;
-    const int prefer_async = getenv("HOS_AV1_ASYNC") != NULL;
+    const int prefer_async = env_on("HOS_AV1_ASYNC");
     const UINT32 tries[2] = {prefer_async ? MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT : MFT_ENUM_FLAG_SYNCMFT,
                              prefer_async ? MFT_ENUM_FLAG_SYNCMFT : MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_ASYNCMFT};
     IMFTransform *mft = NULL;

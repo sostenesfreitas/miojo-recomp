@@ -59,12 +59,14 @@ VARIANTS = [
 # each pass as GLSL over the SDK's own GPU headers, and the renderer records them as SPIR-V headers
 # beside the upscaler's. The options are the same promises about the same inputs -- the depth is
 # reversed and the motion is at the render extent -- because the inputs are the ones the upscaler is
-# already given (gpu/vk/vk_fsr3fi.cpp).
+# already given (gpu/vk/vk_fsr3fi.cpp). The names are interpolation's own, not the upscaler's: its
+# low-resolution motion option is LOW_RES_, where the upscaler's is LOW_RESOLUTION_. A name the SDK
+# does not read is dropped without a word, so tests/test_fsr3_shader_options.py checks each one.
 FI_OPTIONS = [
     "-DFFX_GPU=1",
     "-DFFX_GLSL=1",
     "-DFFX_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH=1",
-    "-DFFX_FRAMEINTERPOLATION_OPTION_LOW_RESOLUTION_MOTION_VECTORS=1",
+    "-DFFX_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS=1",
     "-DFFX_FRAMEINTERPOLATION_OPTION_JITTERED_MOTION_VECTORS=0",
 ]
 OF_OPTIONS = ["-DFFX_GPU=1", "-DFFX_GLSL=1"]

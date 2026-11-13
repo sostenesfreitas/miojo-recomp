@@ -8,6 +8,12 @@ are those positions (press[7], press[5]), RX_VK_MENU_SCRIPT's PADS/PADE/PADW/PAD
 link answers to confirm (Enter, A, a click) and back (Esc, B): Motion, Controls, and the debug tools' rows on the Debug tab,
 whose Teleport and Inventory open the map list and the inventory, which go back to the tab. The prompts light the same buttons.
 The real keyboard polling block is also compiled to exercise both shortcut keys with queued presses and with polling.
+With it, menu_tick's Esc block, gpu/vk/vk_menu.h's real Options and the Menu shortcut row's names: out of the box (no
+options file, or one without menu_shortcut=) the shortcut is "Insert, F1 or Esc", and Esc opens a closed menu, as a PC
+game's pause menu, without that press also going back a page; open, the press is left to go back or close it. And
+menu_init's reading of hookshot_options.ini: a file from before options_version 5 wrote Insert or F1, the default then,
+whether chosen or not, and loads as Insert, F1 or Esc; F1 only stays, and a file from version 5 on, up to the version
+save() writes now, keeps each choice.
 
     python -I -B tests/test_menu_keys.py [--cxx g++]
 """
@@ -22,9 +28,14 @@ RUN_ALL_ARGS = ["--cxx", "{cxx}"]
 ROOT = Path(__file__).resolve().parents[1]
 
 FIXTURE = r'''#include "gpu/vk/vk_menu_keys.h"
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cctype>
 #include <initializer_list>
+#include <string>
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); std::exit(1); } } while (0)
 using namespace mkwvk::menu_keys;
 static void expect(int a, int b, int confirm, int back, int line) {
@@ -36,8 +47,12 @@ static void expect(int a, int b, int confirm, int back, int line) {
     }
 }
 // KEYBOARD_FIXTURE
-int main() {
+int main(int argc, char** argv) {
+    CHECK(argc == 2);   // (the options file to write: in the test's own folder)
+    ini_file = argv[1];
     test_keyboard();
+    test_esc();
+    test_saved();
     expect(kEast, kSouth, kEast, kSouth, __LINE__);    // (Nintendo, the default: A right, B bottom)
     expect(kSouth, kEast, kSouth, kEast, __LINE__);    // (Xbox / PC)
     expect(kWest, kNorth, kWest, kNorth, __LINE__);    // (bound by hand elsewhere on the face)
@@ -68,7 +83,8 @@ using HWND = int;
 using DWORD = unsigned;
 static int down_key, queued_key;
 static bool focused, pad_last;
-static struct { int menu_shortcut; } opts;
+// OPTIONS
+static Options opts;
 static HWND GetForegroundWindow() { return 1; }
 static DWORD GetCurrentProcessId() { return 1; }
 static void GetWindowThreadProcessId(HWND, DWORD* pid) { *pid = focused ? 1 : 2; }
@@ -78,7 +94,7 @@ static bool take_key_press(int key) {
     queued_key = 0;
     return true;
 }
-static struct { bool (*take_key_press)(int); } queue_host{take_key_press}, *host;
+static struct { bool (*take_key_press)(int); float (*aspect_ratio)(); } queue_host{take_key_press, nullptr}, *host;
 
 static bool keyboard_toggle(int mode, int key, bool queued, bool has_focus = true) {
     opts.menu_shortcut = mode;
@@ -110,6 +126,116 @@ static void test_keyboard() {
     CHECK(keyboard_toggle(0, VK_INSERT, false));
     std::puts("PASS: menu shortcuts respect the saved mode, focus and key edges");
 }
+
+// (menu_tick's Esc block, after the keys are read: what it reaches, stubbed)
+static std::atomic<bool> open_now;
+static int page, ask_sel, listening;
+static bool changed, tune_mode;   // (tune_mode: the compact bar, open; it opens when its key is held as the menu opens)
+static bool compact_key_held;     // (menu_tick's tune_down: Right Shift, or Right Ctrl, held)
+static bool restart_ask() { return false; }
+static int detect_pad_layout() { return 0; }
+static void dlss_probe() {}
+static void fsr4_probe() {}
+static void refresh_mics() {}
+// TX_MENU_SHORTCUT
+
+// One tick with key pressed (0: none) and the options o, the menu open before it or not: whether it is open after. *back:
+// the Esc press left for menu_tick's pages below (back a page, or close the menu)
+static bool tick_key(const Options& o, int key, bool queued, bool open_before, bool* back) {
+    opts = o;
+    focused = true;
+    host = queued ? &queue_host : nullptr;
+    down_key = queued ? 0 : key;
+    queued_key = queued ? key : 0;
+    // KEY_POLL
+    open_now = open_before;
+    page = 0, listening = 0, changed = false, tune_mode = false;
+    const bool tune_down = compact_key_held;
+    auto later = [] {};
+    // ESC_BLOCK
+    CHECK(changed == (open_now.load() != open_before) && page == 0 && listening == 0);
+    // (a menu Esc opens is the full menu, or the compact bar with its key held, as with Insert and F1)
+    CHECK(tune_mode == (open_now.load() && !open_before && compact_key_held));
+    (void)ask_sel;
+    *back = press[5];
+    return open_now.load();
+}
+// Esc pressed and let go
+static bool esc(const Options& o, bool queued, bool open_before, bool* back) {
+    const bool open = tick_key(o, VK_ESCAPE, queued, open_before, back);
+    bool none = true;
+    CHECK(tick_key(o, 0, queued, open, &none) == open && !none);
+    return open;
+}
+
+static void test_esc() {
+    const Options fresh{};   // (no options file, or none of its lines menu_shortcut=: the struct's defaults, menu_init)
+    CHECK(!std::strcmp(tx_menu_shortcut(fresh.menu_shortcut), "Insert, F1 or Esc"));
+    for (bool queued : {false, true}) {
+        bool back = false;
+        CHECK(esc(fresh, queued, false, &back) && !back);   // (Esc opens a closed menu; that press does not go back too)
+        CHECK(esc(fresh, queued, true, &back) && back);     // (open: the press goes back a page or closes it, further down)
+        for (int mode = 0; mode <= 2; mode++) {   // (each choice as loaded: Esc opens the menu with 2 alone)
+            Options saved = fresh;
+            saved.menu_shortcut = mode;
+            CHECK(esc(saved, queued, false, &back) == (mode == 2) && back == (mode != 2));
+            CHECK(esc(saved, queued, true, &back) && back);
+        }
+        compact_key_held = true;   // (the compact menu key held: Esc opens the compact bar, tick_key checks tune_mode)
+        CHECK(esc(fresh, queued, false, &back) && !back);
+        compact_key_held = false;
+    }
+    std::puts("PASS: out of the box, Esc opens the closed menu (Insert, F1 or Esc); Insert or F1 and F1 only leave it closed");
+}
+
+// (menu_init's reading of hookshot_options.ini, stubbed around: the Menu shortcut row as the only row)
+static std::string ini_file;
+static std::string ini_path() { return ini_file; }
+static int parse_output(const char*) { return 0; }
+static std::string mic_want;
+[[maybe_unused]] static uint64_t auto_for = 0, auto_tuned = 0;   // (the Quality preset Auto (this PC)'s fingerprints, which save() writes)
+[[maybe_unused]] static struct { uint32_t w = 0, h = 0; } auto_output;   // (and the Output resolution it set, by its size)
+static struct { int steps = 0; bool went_down = false; } auto_tuning;   // (and its tuning's steps)
+static std::string mic_key(const char* name) { return name; }
+static void mic_tell_host() {}
+static int rumble_step(int v) { return v; }
+struct Row { int tab; const char* name; int* value; int lo, hi; };
+// INI_KEY
+static Row rows[] = {{0, "Menu shortcut", &opts.menu_shortcut, 0, 2}};
+
+// The Menu shortcut after menu_init reads a file with menu_shortcut=<shortcut> and options_version=<version> (-1: no line)
+static int loaded_as(int shortcut, int version) {
+    if (FILE* w = fopen(ini_file.c_str(), "w")) {
+        fputs("output_res=2560x1440\n", w);
+        if (shortcut >= 0) fprintf(w, "menu_shortcut=%d\n", shortcut);
+        if (version >= 0) fprintf(w, "options_version=%d\n", version);
+        fclose(w);
+    }
+    opts = Options{};
+    mic_want.clear();
+    bool has_options = false, has_vram_budget = false, has_memory_budget = false;
+    // LOAD_OPTIONS
+    CHECK(has_options && !has_vram_budget && !has_memory_budget);
+    return opts.menu_shortcut;
+}
+
+static void test_saved() {
+    // (from before the version Esc came with, ESC_FROM (-1, no line: before 2): Insert or F1 was the default, written
+    // whether chosen or not, and moves to Insert, F1 or Esc; F1 only was chosen and stays; no line: the default)
+    for (int old = -1; old < ESC_FROM; old++) {
+        CHECK(loaded_as(0, old) == 2);
+        CHECK(loaded_as(1, old) == 1);
+        CHECK(loaded_as(2, old) == 2);
+        CHECK(loaded_as(-1, old) == 2);
+    }
+    // (a file from ESC_FROM on, up to the version save() writes now: each choice kept, Insert or F1 too, picked after the
+    // change; a later bump of save()'s version for another row must not move it again)
+    for (int v = ESC_FROM; v <= SAVED_VERSION; v++) {
+        for (int mode = 0; mode <= 2; mode++) CHECK(loaded_as(mode, v) == mode);
+        CHECK(loaded_as(-1, v) == 2);
+    }
+    std::puts("PASS: an older file's Insert or F1 moves to Insert, F1 or Esc; F1 only and a file saved now keep theirs");
+}
 '''
 
 
@@ -125,12 +251,41 @@ def main():
     menu = (ROOT / "gpu/vk/vk_menu.cpp").read_text(encoding="utf-8")
     tick = menu[menu.index("void menu_tick() {"):]
     key_poll = tick[tick.index("    enum { K_N ="):tick.index("    // (hookshot) the gamepads")]
-    fixture = FIXTURE.replace("// KEYBOARD_FIXTURE", KEYBOARD.replace("    // KEY_POLL", key_poll))
+    esc_at = tick.index("    const bool esc_opens")
+    esc_block = tick[esc_at:tick.index("    if (open_now.load() && page == 5) {", esc_at)]
+    tx_at = menu.index("const char* tx_menu_shortcut(int v) {")
+    tx = menu[tx_at:menu.index("\n}\n", tx_at) + 3]
+    header = (ROOT / "gpu/vk/vk_menu.h").read_text(encoding="utf-8")
+    options = re.search(r"struct Options \{.*?\n\};", header, re.S)
+    if not options:
+        raise SystemExit("FAIL: vk_menu.h: the menu's Options are missing")
+    # (menu_init's reading of the options file, its moves of old defaults included, and the version save() writes now)
+    init = menu[menu.index("void menu_init() {"):]
+    load_at = init.index('    if (FILE* f = fopen(ini_path().c_str(), "r")) {')
+    load = init[load_at:init.index("    first_start = !has_options;", load_at)]
+    key_at = menu.index("const char* ini_key(const Row& r) {")
+    ini_key = menu[key_at:menu.index("\n}\n", key_at) + 3]
+    saved_version = re.search(r'fprintf\(f, "options_version=(\d+)\\n"\);', menu[menu.index("void save() {"):])
+    if not saved_version:
+        raise SystemExit("FAIL: vk_menu.cpp: save() does not write options_version")
+    # (the version from which a file's Menu shortcut was chosen: menu_init moves an older file's Insert or F1)
+    esc_from = re.search(r"if \(version < (\d+) && opts\.menu_shortcut == 0\) opts\.menu_shortcut = 2;", load)
+    if not esc_from:
+        raise SystemExit("FAIL: vk_menu.cpp: menu_init does not move an older file's Insert or F1 to Insert, F1 or Esc")
+    if int(esc_from.group(1)) > int(saved_version.group(1)):
+        raise SystemExit("FAIL: vk_menu.cpp: save() writes a version below the Menu shortcut's move: a choice would move again")
+    keyboard = (KEYBOARD.replace("// OPTIONS", options.group(0)).replace("// TX_MENU_SHORTCUT", tx)
+                .replace("    // KEY_POLL", key_poll).replace("    // ESC_BLOCK", esc_block)
+                .replace("// INI_KEY", ini_key).replace("    // LOAD_OPTIONS", load)
+                .replace("SAVED_VERSION", saved_version.group(1)).replace("ESC_FROM", esc_from.group(1)))
+    fixture = FIXTURE.replace("// KEYBOARD_FIXTURE", keyboard)
     with tempfile.TemporaryDirectory(prefix="menu-keys-") as tmp:
         cpp, exe = Path(tmp) / "fixture.cpp", Path(tmp) / "fixture"
         cpp.write_text(fixture, encoding="utf-8")
-        subprocess.run([a.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT), str(cpp), "-o", str(exe)], check=True)
-        subprocess.run([str(exe)], check=True)
+        # (_CRT_SECURE_NO_WARNINGS: the MSVC CRT's fopen deprecation, as the game's own Windows build passes)
+        subprocess.run([a.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror", "-D_CRT_SECURE_NO_WARNINGS", "-I" + str(ROOT), str(cpp),
+                        "-o", str(exe)], check=True)
+        subprocess.run([str(exe), str(Path(tmp) / "hookshot_options.ini")], check=True)
 
     need(menu, r'\{TAB_CONTROLS, "Menu shortcut", &opts\.menu_shortcut, 0, 2, 1, tx_menu_shortcut,[^}]*nullptr, false, true\}',
          "the shortcut choice must be saved in Controls and exempt from presets")
@@ -139,9 +294,6 @@ def main():
                r"if \(esc_opens\) press\[5\] = false;", "Esc does not open a closed menu with the Esc shortcut")
     need(tick, r"\} else if \(press\[0\] \|\| press\[6\] \|\| esc_opens\) \{\s*open_now = !open_now\.load\(\)",
          "the Esc shortcut's press does not open the menu")
-    header = (ROOT / "gpu/vk/vk_menu.h").read_text(encoding="utf-8")
-    if "int menu_shortcut = 0;" not in header:
-        raise SystemExit("FAIL: existing options must keep both shortcuts")
     # (the pad: confirm and back from A's and B's bindings, every tick, not fixed positions)
     need(tick, r"menu_keys::confirm_back\(host->binding\(HOS_BIND_PAD, HOS_SW_A, 0\), host->binding\(HOS_BIND_PAD, HOS_SW_B, 0\)",
          "confirm and back are not taken from A's and B's bindings")
@@ -170,7 +322,7 @@ def main():
         need(block[:1500], r"if \(press\[5\]\) page = 0", "back from page %s does not return to the Debug tab" % page)
     need(menu, r'\{TAB_DEBUG, "Developer", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true\}',
          "the Debug tab has no Developer heading")
-    for name in ("Descriptor reuse", "Sampler cache"):
+    for name in ("Descriptor reuse", "Sampler cache", "Robust buffers", "ASTC as RGBA8"):
         need(menu, r'\{TAB_DEBUG, "%s"' % name, name + " is not on the Debug tab")
     need(tick, r"while \(heading_at\(selected\)\)", "the selection does not step over a heading")
     # (the prompts: the buttons lit are the same ones, and the rows say what confirm does)

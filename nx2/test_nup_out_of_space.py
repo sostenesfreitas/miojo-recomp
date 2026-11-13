@@ -34,11 +34,10 @@ class OutOfSpace(unittest.TestCase):
     def test_full_drive_names_the_member_and_the_drive(self):
         with tempfile.TemporaryDirectory() as out:
             member = Path(os.path.realpath(out)) / "romfs" / "Model" / "authored.zs"
-            partial = member.with_name("authored.zs.part")
             seen = []
 
             def usage(path):
-                seen.append((path, partial.exists()))
+                seen.append((path, member.exists()))
                 return SimpleNamespace(free=196 * 10 ** 9)
 
             original = OSError(errno.ENOSPC, "authored disk-full failure")
@@ -54,7 +53,7 @@ class OutOfSpace(unittest.TestCase):
             # (the folder as given or as its Windows long path, \\?\...: nup.py extracts through long paths since #1497)
             plain = [(path[4:] if path.startswith("\\\\?\\") else path, held) for path, held in seen]
             self.assertEqual(plain, [(str(member.parent), True)])
-            self.assertFalse(partial.exists())
+            self.assertFalse(member.exists())
 
     def test_other_errors_pass_through(self):
         with tempfile.TemporaryDirectory() as out:

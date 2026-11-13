@@ -4,7 +4,15 @@
 // no clipping and no flashes
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D src;
+// (FG_SCALE_PQ, compiled into fg_scale_pq_comp_spv.h: the game's own HDR10 picture (Native HDR, PQ codes) into RGB10A2, which
+// keeps the codes' 10 bits; vk_framegen.cpp framegen_scale's pq)
+#ifdef FG_SCALE_PQ
+layout(binding = 1, rgb10_a2) uniform writeonly image2D dst;
+const float kSteps = 1023.0;   // (the destination's steps: the dither below)
+#else
 layout(binding = 1, rgba8) uniform writeonly image2D dst;
+const float kSteps = 255.0;
+#endif
 // (and ultrawide's menus: while a menu shows, the picture's sides outside the middle 16:9, x0..x1 of its width, out of focus
 // (side 1) or black (side 2), with a short soft edge; vk_framegen.cpp wide_sides. Side 3: this dispatch makes the picture at
 // 1/8 for side 1's blur instead, into dst; side 1 then reads it as small)
@@ -74,8 +82,8 @@ vec3 side_fill(vec2 uv) {
         }
     return sum / weight * 0.75;
 }
-// (and less than one step of 8 bits of noise over it: the dim, smooth sides showed 8-bit steps as contour lines)
-float dither(ivec2 g) { return (fract(52.9829189 * fract(0.06711056 * float(g.x) + 0.00583715 * float(g.y))) - 0.5) / 255.0; }
+// (and less than one of the destination's steps of noise over it, kSteps: the dim, smooth sides showed 8-bit steps as contour lines)
+float dither(ivec2 g) { return (fract(52.9829189 * fract(0.06711056 * float(g.x) + 0.00583715 * float(g.y))) - 0.5) / kSteps; }
 void main() {
     const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 d = imageSize(dst);

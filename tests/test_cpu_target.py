@@ -56,6 +56,21 @@ class HostMarch(unittest.TestCase):
     def test_unreadable_cpu_keeps_v3(self):
         self.assertEqual(march_on_linux("processor\t: 0\n"), "x86-64-v3")
 
+    def test_steamdeck_mtune(self):
+        real_open = builtins.open
+
+        def fake_deck(path, *args, **kwargs):
+            if path == "/proc/cpuinfo":
+                return io.StringIO("model name\t: AMD Custom APU 0405\nflags\t\t: fpu\n")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch.object(host_cpu.os, "name", "posix"), mock.patch.object(builtins, "open", fake_deck), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(host_cpu.host_mtune(), "znver2")
+
+        with mock.patch.dict(os.environ, {"RX_STEAMDECK": "1"}, clear=True):
+            self.assertEqual(host_cpu.host_mtune(), "znver2")
+
     def test_windows(self):
         class K32:
             def __init__(self, present):
@@ -72,6 +87,25 @@ class HostMarch(unittest.TestCase):
         self.assertIn('MARCH = os.environ.get("RX_MARCH") or host_march()', build)
         appimage = (ROOT / "scripts" / "linux" / "appimage.sh").read_text(encoding="utf-8")
         self.assertIn("RX_MARCH=x86-64-v3 RX_VK_ONLY=1", appimage)   # (its prebuilt renderer: not the CI runner's CPU)
+
+    def test_build_message_names_the_cause(self):
+        """'this CPU has no AVX2' only when the CPU chose the level: an RX_MARCH of znver2 (AVX2 and more) said it too"""
+        build = (ROOT / "nx2" / "build.py").read_text(encoding="utf-8")
+        start = build.index('MARCH = os.environ.get("RX_MARCH") or host_march()')
+        block = build[start:build.index("CPU = [", start)]
+        for env, host, want in (({"RX_MARCH": "znver2"}, "x86-64-v3", "built for znver2 (RX_MARCH)"),
+                                ({"RX_MARCH": "x86-64-v3"}, "x86-64", ""),
+                                ({}, "x86-64-v2", "this CPU has no AVX2"),
+                                ({}, "x86-64-v3", "")):
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out):
+                exec(block, {"os": os, "host_march": lambda h=host: h})
+            if want:
+                self.assertIn(want, out.getvalue(), env)
+            else:
+                self.assertEqual(out.getvalue(), "", env)
+            if env:
+                self.assertNotIn("no AVX2", out.getvalue(), env)
 
 
 class AppImageCheck(unittest.TestCase):

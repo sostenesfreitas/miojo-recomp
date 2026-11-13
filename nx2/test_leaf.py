@@ -45,6 +45,7 @@ import kit
 import nso2  # noqa: F401
 import insn
 import lift_fixes
+import suyu_rt_fixes
 import poll
 import image as eden_image
 import rtgen
@@ -64,6 +65,7 @@ RUN_ALL_SKIP = {
 
 insn.install()
 lift_fixes.install()
+suyu_rt_fixes.install()
 poll.install()
 
 SCRATCH_SIZE = 0x100000

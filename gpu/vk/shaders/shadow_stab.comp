@@ -1,0 +1,40 @@
+#version 450
+// (patch) OoT's tree-shadow mask (3427a1dbefd5e02c writes its G and B channels, MIN-blended, into an RGBA8 target at the
+// scene's size) evened out over frames: the pass offsets each pixel's shadow lookup by a normal it reconstructs from a
+// gather of neighbouring depths, and on grass blades and leaf edges those neighbours flip between the blade and the
+// ground behind it with the camera's sub-pixel shift each frame: thin streaks flickering over sunlit ground, which the
+// console's TAAU network averages away. This pass's last result (`prev`) is blended in, unbounded by default (radius
+// r > 0 bounds it by the mask's (2r+1)^2 neighbourhood this frame; 3x3 kept nothing). mode 0: the blend into `next`;
+// mode 1: `next`'s G and B written back into the mask (a separate dispatch: the blend reads the mask's neighbours).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0, rgba8) uniform image2D mask;
+layout(binding = 1, rgba8) uniform readonly image2D prev;
+layout(binding = 2, rgba8) uniform image2D next;
+layout(push_constant) uniform P { ivec2 size; int valid; int mode; float weight; int radius; } pc;
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, pc.size))) return;
+    if (pc.mode == 1) {
+        vec4 m = imageLoad(mask, g);
+        m.gb = imageLoad(next, g).gb;
+        imageStore(mask, g, m);
+        return;
+    }
+    const vec4 m = imageLoad(mask, g);
+    vec2 c = m.gb;
+    if (pc.valid != 0 && pc.weight > 0.0) {
+        // (the bound's neighbourhood: radius 1 = 3x3 .. 3 = 7x7; 0: unbounded. The streaks moved as blocks wider than 3x3,
+        // which bounded the history back to this frame's value everywhere they were)
+        vec2 lo = c, hi = c;
+        const int r = clamp(pc.radius, 0, 4);
+        for (int dy = -r; dy <= r; dy++)
+            for (int dx = -r; dx <= r; dx++) {
+                const vec2 n = imageLoad(mask, clamp(g + ivec2(dx, dy), ivec2(0), pc.size - 1)).gb;
+                lo = min(lo, n), hi = max(hi, n);
+            }
+        vec2 p = imageLoad(prev, g).gb;
+        if (r > 0) p = clamp(p, lo, hi);
+        c = mix(c, p, pc.weight);
+    }
+    imageStore(next, g, vec4(m.r, c, m.a));
+}

@@ -1,8 +1,10 @@
 """Quality presets preserve the player's frame-generation choice.
 
 Compile the menu's actual preset and row handlers with small stand-ins.
-Check that the game FPS cap keeps its saved key when its label changes. No game
-or GPU is needed.
+Check that the game FPS cap keeps its saved key when its label changes. Preset
+and frame-generation changes do not reset temporal failures; the three scaling
+rows do, using their real row definitions and scaling helpers. No game or GPU
+is needed.
 """
 import argparse
 import os
@@ -35,6 +37,7 @@ def definition(text, name):
 
 
 FIXTURE = r"""
+#include "upscaler_rows.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -49,29 +52,40 @@ int saves = 0;
 void save() { ++saves; }
 void apply_pad_layout(int) {}
 void sync_preset_budgets(int) {}
+constexpr int kAutoPreset = 6;   /* (the Quality preset Auto (this PC): apply_auto, not reached here) */
+void apply_auto(bool) {}
+void env_release(const int*) {}   // (the environment's hold on a row: none here)
+void vram_budget_sync() {}
+constexpr int kVramMinimumOnly = 1;
 bool row_fixed(const int*) { return false; }
-int upscaler() { return 0; }
-unsigned upscalers_available() { return 1; }
-namespace ur {
-int snap(int, int value) { return value; }
-int snap_render(int, int value) { return value; }   // (the slider)
-int step(int, int value, int dir) { return value + dir; }
-int step_upscaler(int, int dir, unsigned) { return dir; }
-int step_engine(int, int dir, unsigned) { return dir; }   // (the Upscaler by engine)
-void step_render(int up, int value, int dir, int* u, int* r) { *u = up, *r = value + dir; }
-}
+namespace ur = mkwvk::upscaler_rows;
+int upscaler() { return opts.dlss; }
+unsigned upscalers_available() { return ur::bit(ur::GAME) | ur::dlss_bits(true); }
 namespace mr { constexpr int kMax = 8; }
+/* (the Game language row's hook in set_row: language.txt, not written here) */
+namespace i18n { inline void set_game_language(int) {} }
 void restart_values(int*) {}
 struct { void note(const int*) {} } restart_state;
 bool can_mic() { return false; }
 void mic_chosen() {}
 void samplers_changed() {}
+int temporal_resets = 0;
+void temporal_reset_failure() { ++temporal_resets; }
+void prompts_at_once(const Row&) {}
 int step_output_choice(int id, int dir) { return id + dir; }
+// (the Aspect ratio row moves the Output resolution to one of its shape's sizes, output_for_aspect: not what this checks)
+int output_for_aspect(int) { return opts.output_res; }
 const char* tx_framegen(int) { return ""; }
 const char* hn_framegen(int, int) { return ""; }
 const char* tx_preset(int) { return ""; }
 const char* hn_preset(int, int) { return ""; }
 const char* tx_fps_cap(int) { return ""; }
+const char* tx_upscaler(int) { return ""; }
+const char* hn_upscaler(int, int) { return ""; }
+const char* tx_resolution(int) { return ""; }
+const char* hn_resolution(int, int) { return ""; }
+const char* tx_dlss_model(int) { return ""; }
+const char* hn_dlss_model(int, int) { return ""; }
 /* INI_KEY */
 /* STOPS */
 /* PRESET */
@@ -106,6 +120,18 @@ int main() {
     CHECK(std::strstr(quality.help, "Frame generation") != nullptr);
     CHECK(std::strstr(quality.help, "stay yours") != nullptr);
     CHECK(saves > 0);
+    CHECK(temporal_resets == 0);
+
+    // Only the Upscaler, Render resolution and DLSS model rows reset temporal failures.
+    Row temporal_rows[] = {/* UPSCALER_ROW */, /* RESOLUTION_ROW */, /* DLSS_MODEL_ROW */};
+    for (Row& r : temporal_rows) {
+        opts = Options{};
+        if (r.value == &opts.dlss_model) opts.dlss = ur::DLSS;
+        const int previous = *r.value, resets = temporal_resets;
+        set_row(r, previous + r.step, 1);
+        CHECK(*r.value != previous);
+        CHECK(temporal_resets == resets + 1);
+    }
     std::puts("PASS: quality presets preserve frame generation and its row preserves the preset");
 }
 """
@@ -133,6 +159,9 @@ def fixture(source):
         "/* SET_ROW */": definition(menu, "void set_row"),
         "/* FRAMEGEN_ROW */": block(menu, menu.index('{TAB_GRAPHICS, "Frame generation"')),
         "/* QUALITY_ROW */": block(menu, menu.index('{TAB_GRAPHICS, "Quality preset"')),
+        "/* UPSCALER_ROW */": block(menu, menu.index('{TAB_GRAPHICS, "Upscaler"')),
+        "/* RESOLUTION_ROW */": block(menu, menu.index('{TAB_GRAPHICS, "Render resolution"')),
+        "/* DLSS_MODEL_ROW */": block(menu, menu.index('{TAB_GRAPHICS, "DLSS model"')),
     }
     result = FIXTURE
     for marker, value in replacements.items():
@@ -145,15 +174,16 @@ def main():
     parser.add_argument("--source", type=Path, default=ROOT)
     parser.add_argument("--cxx", default="g++")
     args = parser.parse_args()
+    includes = str((args.source / "gpu" / "vk").resolve())
     with tempfile.TemporaryDirectory(prefix="framegen-preset-") as tmp:
         src = Path(tmp) / "framegen_preset.cpp"
         exe = Path(tmp) / ("framegen_preset.exe" if os.name == "nt" else "framegen_preset")
         src.write_text(fixture(args.source), encoding="utf-8")
         if Path(args.cxx).name.lower() in ("cl", "cl.exe", "clang-cl", "clang-cl.exe"):
-            command = [args.cxx, "/nologo", "/std:c++20", "/EHsc", str(src),
+            command = [args.cxx, "/nologo", "/std:c++20", "/EHsc", "/I" + includes, str(src),
                        "/Fo" + str(Path(tmp) / "framegen_preset.obj"), "/Fe" + str(exe)]
         else:
-            command = [args.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror",
+            command = [args.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror", "-I", includes,
                        str(src), "-o", str(exe)]
         subprocess.run(command, cwd=tmp, check=True)
         subprocess.run([str(exe)], check=True)

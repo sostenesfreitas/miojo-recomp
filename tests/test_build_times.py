@@ -140,5 +140,84 @@ class EstimateTests(unittest.TestCase):
             self.assertEqual(build.plan_jobs([job])[0], [])
 
 
+class PhaseTests(unittest.TestCase):
+    """Where a build's time went (PhaseClock): from the stages and the lines the steps print, in build_times.json"""
+
+    def clock(self):
+        self.t = [100.0]
+        return make_game.PhaseClock(100.0, now=lambda: self.t[0])
+
+    def test_a_build_is_cut_into_its_stages_and_their_parts(self):
+        c = self.clock()
+        self.t[0] = 102.0
+        c.enter("read")
+        self.t[0] = 112.0
+        c.enter("lift")
+        # (lift.py's and build.py's own lines, as they print them)
+        for line in ("image: rtld@0x80000000+0x20000, main@0x80020000+0x4ea0000; 295178 entries (7s)",
+                     "discovered 294522 functions (70s)",
+                     "lift: coverage in 39.5s (109s)",
+                     "lift: emit and write (1 processes) in 170.5s (280s)",
+                     "lift: patches (16 processes) in 7.9s (295s)"):
+            c.line(line)
+        self.t[0] = 443.0
+        c.enter("compile")
+        self.t[0] = 452.0
+        c.line("491 files, 24 jobs, -D_CRT_SECURE_NO_WARNINGS -O1 -DA64_POLLING -DA64_WRITE_TRACK")
+        c.line("compiled in 1282s, 0 failed")
+        c.line(r"linked E:\work\sa\build\hookshot.exe: 440 MB (3s)")
+        c.line("linked /home/me/work/sa/build/hookshot_vk.so: 11 MB (0s)")
+        self.t[0] = 1743.0
+        c.enter("finish")
+        self.t[0] = 1800.0
+        c.enter(None)
+        s = c.seconds
+        self.assertEqual((s["checks"], s["read"], s["lift"], s["compile"], s["finish"]), (2.0, 10.0, 331.0, 1300.0, 57.0))
+        self.assertEqual((s["lift: image and discovery"], s["lift: emit and write"], s["lift: patches"]), (70.0, 170.5, 7.9))
+        self.assertEqual((s["compile: planning"], s["compile: compiling"]), (9.0, 1282.0))
+        self.assertEqual((s["compile: linking hookshot.exe"], s["compile: linking hookshot_vk.so"]), (3.0, 0.0))
+        table = c.table()
+        self.assertEqual(table[0], "where the time went:")
+        self.assertTrue(any("emit and write" in row and "170 s" in row for row in table))
+        self.assertLess(next(i for i, r in enumerate(table) if r.split()[0] == "lift"),
+                        next(i for i, r in enumerate(table) if "emit and write" in r))
+
+    def test_a_stage_twice_adds_up(self):
+        c = self.clock()
+        c.enter("lift")
+        self.t[0] = 110.0
+        c.enter("compile")
+        self.t[0] = 115.0
+        c.enter("lift")
+        self.t[0] = 130.0
+        c.enter(None)
+        self.assertEqual((c.seconds["lift"], c.seconds["compile"]), (25.0, 5.0))
+
+    def test_the_planning_is_the_compile_stage_only(self):
+        c = self.clock()
+        c.enter("finish")
+        self.t[0] = 140.0
+        c.line("12 files, 4 jobs, -O1")
+        self.assertNotIn("compile: planning", c.seconds)
+
+    def test_the_phases_are_kept_with_the_build(self):
+        with tempfile.TemporaryDirectory(prefix="hookshot-phases-") as d:
+            make_game.record_times(d, {}, 10.0, 20.0, phases={"lift": 331.04, "compile: linking hookshot.exe": 3.0})
+            make_game.record_times(d, {}, 10.0, 20.0)
+            builds = json.loads((Path(d) / "build_times.json").read_text(encoding="utf-8"))["builds"]
+        self.assertEqual(builds[0]["phases"], {"lift": 331.0, "compile: linking hookshot.exe": 3.0})
+        self.assertNotIn("phases", builds[1])
+
+    def test_the_build_feeds_the_clock(self):
+        """run() gives it every line a step prints; say("stage") moves it on; the build stops it before recording"""
+        src = (ROOT / "nx2" / "make_game.py").read_text(encoding="utf-8")
+        run = src[src.index("\ndef run("):src.index("\ndef ", src.index("\ndef run(") + 1)]
+        self.assertIn("PHASES.line(line)", run)
+        say = src[src.index("\ndef say("):src.index("\ndef ", src.index("\ndef say(") + 1)]
+        self.assertIn("PHASES.enter(str(words[1]))", say)
+        self.assertLess(src.index("PHASES.enter(None)"), src.index("phases=PHASES.seconds"))
+        self.assertNotIn("@@phase", src)   # (no new line for the builders to read: they parse @@stage, @@file, @@times ...)
+
+
 if __name__ == "__main__":
     raise SystemExit(unittest.main(verbosity=1))

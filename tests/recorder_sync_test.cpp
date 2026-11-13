@@ -27,6 +27,9 @@
 #ifdef _WIN32
 #include <malloc.h>
 #endif
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #include "vk_work.h"
 
@@ -105,6 +108,16 @@ static std::atomic<int64_t> g_hold_until_ns{0};
 static bool held_until() {
     const int64_t until = g_hold_until_ns.load();
     return until && std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() < until;
+}
+// (thread runs of the ordering scenarios: hold() before each point where the producer must wait for the recorder (a recording's
+// end, a submit while another command buffer records, the replay lock let go, a pool reset) holds the recorder for this long, so its
+// commands are still in flight there whatever the runner's load: a producer that does not wait is caught every time, not only when
+// the 1 us a call happened to keep the recorder behind (the flakes of the broken variants on CI). 0: no hold (the reference runs)
+static int g_hold_ms = 0;
+static void hold() {
+    if (!g_hold_ms) return;
+    g_hold_until_ns = (int64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() +
+                      (int64_t)g_hold_ms * 1000000;
 }
 static bool g_hash_only = false;         // (stress: each call folded into g_hash and dropped)
 static uint64_t g_hash = 0xcbf29ce484222325ull;
@@ -840,6 +853,7 @@ static void recording_begin() {
     vkBeginCommandBuffer(kUp, &bi);
 }
 static void recording_end(int k) {
+    hold();   // (the recording's commands in flight at its end)
     vkEndCommandBuffer(kUp);
     vkEndCommandBuffer(kCmd);
     VkCommandBufferSubmitInfo cbi[2]{{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO}, {VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO}};
@@ -878,6 +892,7 @@ static void handoff() {
         {
             std::lock_guard lk(g_replay_mu);
             recording_begin();
+            hold();   // (its commands in flight when it lets the lock go)
             frame();
         }
         step = 1;
@@ -923,9 +938,11 @@ static void two_recordings() {
     draws_into(kCmdB, 40, 0);
     vkEndCommandBuffer(kUp);
     vkEndCommandBuffer(kCmd);
+    hold();   // (B's commands in flight at A's submit)
     draws_into(kCmdB, 40, 1);
     const VkCommandBuffer a[2] = {kUp, kCmd};
     submit(a, 2, H<VkFence>(0x31));
+    hold();
     draws_into(kCmdB, 40, 2);
     vkEndCommandBuffer(kCmdB);
     submit(&kCmdB, 1, H<VkFence>(0x32));
@@ -935,6 +952,7 @@ static void reset_while_recording() {
     recording_begin();
     copy_runs(kUp, 0);
     frame();
+    hold();   // (its commands in flight at the pool's reset)
     copy_runs(kUp, 2);
     vkResetCommandPool(kDev, kUpPool, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -950,6 +968,7 @@ static void unlock_then_end() {
         {
             std::lock_guard lk(g_replay_mu);
             recording_begin();
+            hold();   // (its commands in flight when it lets the lock go)
             frame();
         }
         step = 1;
@@ -970,6 +989,17 @@ static void oversize() {
     if (g_mutate) poison(big.data(), big.size());
     draws_into(kCmd, 20, 1);
     recording_end(6);
+}
+/// The same packet first, the ring empty (the recorder just started, at the ring's start): the ring has room for it, the packet's
+/// room has not, so it is still made directly (the room alone decides, not how far the recorder has got)
+static void oversize_first() {
+    recording_begin();
+    std::vector<uint8_t> big(4096);
+    for (size_t i = 0; i < big.size(); i++) big[i] = (uint8_t)(i * 7);
+    vkCmdUpdateBuffer(kUp, H<VkBuffer>(0xE200), 0, big.size(), big.data());
+    if (g_mutate) poison(big.data(), big.size());
+    draws_into(kCmd, 20, 2);
+    recording_end(7);
 }
 /// Teardown with work queued: g_at_stop runs with frames in flight (the recorder stopped and joined), then more is recorded (the
 /// recorder started again), then vkDestroyDevice (stopped again: its boundary)
@@ -1450,18 +1480,27 @@ static void thread_checks(const std::vector<Call>& ref) {
     g_delay_ns = 1000;   // (the recorder behind the producer: a missed wait shows as a call out of place or on a busy command buffer)
     const Out lref = run_tracked(lifecycle, rec::OFF, false);
     const uint64_t fb0 = rec::t_arena.fallbacks;
+    g_hold_ms = 50;   // (and held at each point the producer must wait: hold())
     const Out lt = run_tracked(lifecycle, rec::THREAD, true);
+    g_hold_ms = 0, g_hold_until_ns = 0;
     check_run("thread lifecycle (2 command buffers interleaved; reset, begin, end, submit, wait x2; query read; destruction; caller "
               "memory poisoned; driver 1 us a call)", lref.log, lt);
     if (rec::t_arena.fallbacks - fb0 != 4) std::printf("FAIL thread lifecycle: %llu fallbacks, 4 expected\n", (unsigned long long)(rec::t_arena.fallbacks - fb0)), failures++;
+    // (each thread run with the recorder held at the points the producer must wait: hold(); the direct references without)
+    const auto held = [](void (*scenario)(), bool lock) {
+        g_hold_ms = 50;
+        Out o = run_tracked(scenario, rec::THREAD, true, false, lock);
+        g_hold_ms = 0, g_hold_until_ns = 0;
+        return o;
+    };
     check_run("thread handoff (a recording across two threads under the replay lock)", run_tracked(handoff, rec::OFF, false).log,
-              run_tracked(handoff, rec::THREAD, true, false, false));
+              held(handoff, false));
     check_run("thread: a submit while another command buffer records (its commands in flight)", run_tracked(two_recordings, rec::OFF, false).log,
-              run_tracked(two_recordings, rec::THREAD, true));
+              held(two_recordings, true));
     check_run("thread: a pool reset while its command buffer records (re-begun)", run_tracked(reset_while_recording, rec::OFF, false).log,
-              run_tracked(reset_while_recording, rec::THREAD, true));
+              held(reset_while_recording, true));
     check_run("thread: the replay lock let go, then the recording ended on another thread without it",
-              run_tracked(unlock_then_end, rec::OFF, false).log, run_tracked(unlock_then_end, rec::THREAD, true, false, false));
+              run_tracked(unlock_then_end, rec::OFF, false).log, held(unlock_then_end, false));
     {   // (the status reads made without waiting: the same values as direct, each made while packets were in flight)
         const Out sref = run_tracked(status_reads, rec::OFF, false);
         const Out st = run_tracked(status_reads, rec::THREAD, true);
@@ -1526,6 +1565,17 @@ static void thread_checks(const std::vector<Call>& ref) {
         check_run("thread, a packet bigger than its room (4 KB vkCmdUpdateBuffer, 2 KB room): made directly in order", oref.log,
                   run_tracked(oversize, rec::THREAD, true));
         if (rec::g_rec.direct.load() - d0 != 1) std::printf("FAIL thread oversize: %llu calls made directly, 1 expected\n", (unsigned long long)(rec::g_rec.direct.load() - d0)), failures++;
+        // (again with the ring empty: stopped, its counters moved on to the ring's start, so the 8 KB free ahead of the first
+        // packet would hold it; the 2 KB room must still decide)
+        rec::g_rec.stop();
+        const uint64_t at = (rec::g_rec.W.load() + 8191) & ~uint64_t(8191);
+        rec::g_rec.W.store(at), rec::g_rec.R.store(at);
+        const uint64_t d1 = rec::g_rec.direct.load();
+        check_run("thread, the same packet first with the ring empty: made directly in order",
+                  run_tracked(oversize_first, rec::OFF, false).log, run_tracked(oversize_first, rec::THREAD, true));
+        if (rec::g_rec.direct.load() - d1 != 1)
+            std::printf("FAIL thread oversize, ring empty: %llu calls made directly, 1 expected\n",
+                        (unsigned long long)(rec::g_rec.direct.load() - d1)), failures++;
         rec::g_rec.stop();
         rec::g_ring_bytes = bytes, rec::g_ring_room = room;
     }
@@ -1575,6 +1625,9 @@ static void thread_checks(const std::vector<Call>& ref) {
 int main(int argc, char** argv) {
 #ifdef _WIN32
     SetErrorMode(0x0002 | 0x0001);   // (SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS)
+#endif
+#ifdef __linux__
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);   // (a fault or abort ends it without a core dump: no crash report, no notification)
 #endif
     std::setvbuf(stdout, nullptr, _IONBF, 0);   // (a broken variant may end the process: what it printed before is kept)
     // (the switch as the renderer reads it: first use, from the environment)

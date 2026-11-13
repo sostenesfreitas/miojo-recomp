@@ -2,14 +2,19 @@
    Upscaler, and the names it shows for DLSS's (and FSR 3.1's and FSR 4's) modes. No Vulkan, no menu: tests/test_upscaler_rows.cpp checks them. */
 #pragma once
 
+#include <algorithm>
+#include <cmath>
+
 namespace mkwvk::upscaler_rows {
 
 /// The Upscaler row (opts.dlss, RX_VK_DLSS): the game's own network, NVIDIA DLSS, NVIDIA DLAA, AMD FSR 3.1 (built from AMD's
 /// shader sources: gpu/vk/vk_fsr3.cpp), AMD FSR 4 and its native anti-aliasing (AMD's library, a build with FSR 4:
-/// gpu/vk/vk_fsr4.cpp). The saved values keep their meaning: each came after the ones before, so a saved 1 or 2 is still DLSS
-/// or DLAA and a saved 3 FSR 3.1
-enum { GAME = 0, DLSS = 1, DLAA = 2, FSR3 = 3, FSR4 = 4, FSR4_AA = 5, kUpscalers = 6 };
-/// One bit per upscaler that can run here (1 << GAME always): what the row steps through
+/// gpu/vk/vk_fsr4.cpp), and Off: no upscaler at all, the game's network left out too and its input stretched to the output
+/// with a plain linear filter (vk_temporal.cpp temporal_off: the fastest, and the roughest picture). The saved values keep
+/// their meaning: each came after the ones before, so a saved 1 or 2 is still DLSS or DLAA and a saved 3 FSR 3.1
+enum { GAME = 0, DLSS = 1, DLAA = 2, FSR3 = 3, FSR4 = 4, FSR4_AA = 5, OFF = 6, kUpscalers = 7 };
+/// One bit per upscaler that can run here (1 << GAME and 1 << OFF always: the menu's upscalers_available()): what the row
+/// steps through
 inline unsigned bit(int upscaler) { return 1u << upscaler; }
 /// The DLSS and DLAA bits, for a caller that knows only whether DLSS runs
 inline unsigned dlss_bits(bool dlss_ok) { return dlss_ok ? bit(DLSS) | bit(DLAA) : 0u; }
@@ -36,10 +41,18 @@ inline int percent(int v) { return v > 0 && v < kValues ? kPercent[v] : 0; }
 /// Performance; Auto too, since DLSS follows the game's dynamic size (vk_dlss.cpp makes its feature again when the size
 /// leaves the mode's range; FSR 4's context takes any size up to the output). DLAA, FSR 4's native AA: none (the 3D is drawn at
 /// full size)
+/// Off: the game's and 33% (no network to have one for each share: any size is stretched the same way), Auto too (the game's
+/// dynamic size, stretched as it comes)
+/// FSR 3.1 (no Native of its own, so not on step_render's slider): Auto, 100 % (FSR 3.1's native AA: it takes any size up to the
+/// output), then the slider's stops, 92 % down to 33 % (players asked for sharper than Quality without going to full size)
 constexpr int kGameSteps[] = {0, 1, 2, 3, 4};
 constexpr int kDlssSteps[] = {0, 3, 5, 4, 6};
+constexpr int kFsr3Steps[] = {0, 1, 9, 8, 2, 3, 5, 4, 6};
+constexpr int kOffSteps[] = {0, 1, 2, 3, 4, 6};
 inline const int* steps(int upscaler, int& n) {
+    if (upscaler == FSR3) return n = sizeof kFsr3Steps / sizeof kFsr3Steps[0], kFsr3Steps;
     if (scales_by_mode(upscaler)) return n = sizeof kDlssSteps / sizeof kDlssSteps[0], kDlssSteps;
+    if (upscaler == OFF) return n = sizeof kOffSteps / sizeof kOffSteps[0], kOffSteps;
     return n = sizeof kGameSteps / sizeof kGameSteps[0], kGameSteps;
 }
 
@@ -100,7 +113,7 @@ inline int step_upscaler(int v, int dir, unsigned available) {
 inline int step_upscaler(int v, int dir, bool dlss_ok) { return step_upscaler(v, dir, bit(GAME) | dlss_bits(dlss_ok)); }
 
 // ---- Native under its engine. The menu's Upscaler row chooses the engine (the game's own, NVIDIA DLSS,
-// AMD FSR 3.1, AMD FSR 4); DLAA is DLSS's Native and FSR 4's native AA FSR 4's, the Render resolution row's first step after
+// AMD FSR 3.1, AMD FSR 4, or Off: none); DLAA is DLSS's Native and FSR 4's native AA FSR 4's, the Render resolution row's first step after
 // Auto where the engine has one: Auto, Native, then the engine's modes. The saved values keep their meaning (opts.dlss 2 is
 // still DLAA, 5 FSR 4's native AA); Native leaves opts.resolution as it was, for when a mode comes back.
 /// The engine of an Upscaler value: DLAA is DLSS's, FSR 4's native AA FSR 4's
@@ -112,7 +125,7 @@ inline int native_of(int engine) { return engine == DLSS ? DLAA : engine == FSR4
 /// value that runs). From a Native to an engine that has one: its Native; else the engine's scaled form. A value that
 /// cannot run here steps as the game's own does
 inline int step_engine(int upscaler, int dir, unsigned available) {
-    constexpr int kEngines[] = {GAME, DLSS, FSR3, FSR4};
+    constexpr int kEngines[] = {GAME, DLSS, FSR3, FSR4, OFF};   // (Off: no upscaler, last)
     constexpr int n = sizeof kEngines / sizeof kEngines[0];
     available |= bit(GAME);
     const bool native = full_scale(upscaler);
@@ -187,6 +200,26 @@ inline void step_render(int upscaler, int v, int dir, int* up, int* res) {
 /// DLAA and FSR 4's native AA are their engines' Native)
 inline bool render_fixed(int upscaler) { return full_scale(upscaler) && native_of(engine(upscaler)) < 0; }
 
+/// The texture LOD bias the upscalers add to the game's world materials (the samplers it biases below 0: -0.5 everywhere, for
+/// its network's 3/4 share, about log2(0.75)). share: the Render resolution's in 1/10000 of the output, 0 at Auto (the
+/// game's dynamic size, 3/4 of the output in play). offset: DLSS's extra step, below.
+///  - DLSS and DLAA: NVIDIA's guide (DLSS Programming Guide 3.5): the game's bias at native size + log2(render / output)
+///    - 1.0, so DLSS's network gets the texture detail of the output's size and a little more, which it resolves over its
+///    frames. The game's materials are tuned to -0.5 at 3/4, about 0 at native size, so on top of its -0.5 that is
+///    log2(share / 0.75) + offset, offset -1 by default (RX_VK_DLSS_LOD_OFFSET): Quality (67 %) -1.17, Performance -1.58,
+///    DLAA -0.58, Auto -1. Without the -1 DLSS was given the render size's own texture detail (Quality -0.17, DLAA and Auto
+///    nothing), the soft textures it then upscaled
+///  - FSR 3.1 and FSR 4: log2(share / 0.75) below 75 % (the mips the output's size wants), 0 at Auto and above
+///  - the game's own, Off, FSR 4's native AA: 0
+inline float upscale_lod_bias_for(int upscaler, int share, float offset) {
+    if (is_dlss(upscaler)) {
+        const float r = upscaler == DLAA ? 1.0f : share > 0 ? (float)share / 10000.0f : 0.75f;
+        return std::min(0.0f, std::log2(r / 0.75f) + offset);
+    }
+    if (!scales_by_mode(upscaler) || share <= 0) return 0.0f;
+    return std::min(0.0f, std::log2((float)share / 7500.0f));
+}
+
 /// The DLSS model row (opts.dlss_model, saved as dlss_model): which of NVIDIA's networks DLSS and DLAA draw with, by its
 /// preset (NVSDK_NGX_DLSS_Hint_Render_Preset_*). 0 the transformer, preset K (the default here, the one tested); 1 the second
 /// generation transformer, preset M (NVIDIA's own pick for Performance); 2 the same generation as tuned for Ultra
@@ -217,11 +250,13 @@ inline char preset_letter(unsigned preset) { return preset ? (char)('A' + preset
 /// where DLSS cannot run (dlss_ok: dlss_why() == DLSS_OK), the Render resolution with DLAA or FSR 4's native AA (the 3D at
 /// full size), the DLSS model while DLSS and DLAA are not drawing
 inline bool upscaler_fixed(bool dlss_ok) { return !dlss_ok; }
-/// The same, from the mask of what can run: fixed when only the game's own can
+/// The same, from the mask of what can run: fixed when only the game's own can (the menu's mask always has Off too, so there
+/// the row is never fixed)
 inline bool upscaler_fixed(unsigned available) { return (available & ~bit(GAME)) == 0; }
 /// The Upscaler row is there only where something besides the game's own runs on this PC (available: one bit per upscaler
 /// that runs, the menu's upscalers_available()): a build without DLSS or FSR 4 on a GPU FSR 3.1 does not run on, or DLSS
-/// built for a GPU it cannot run on, has the game's own alone, and the row is hidden rather than shown fixed on it
+/// built for a GPU it cannot run on, has the game's own alone, and the row is hidden rather than shown fixed on it. Off runs
+/// everywhere (the menu's mask has it), so the menu always shows the row
 inline bool upscaler_shown(unsigned available) { return !upscaler_fixed(available); }
 inline bool resolution_fixed(int upscaler) { return full_scale(upscaler); }
 /// The DLSS model row: shown only where DLSS runs (dlss_ok: dlss_why() == DLSS_OK; a build without DLSS, or a GPU or

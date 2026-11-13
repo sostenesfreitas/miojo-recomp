@@ -21,7 +21,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DIR = ROOT / "gpu/vk/host_shaders"
-SHADERS = ["astc_decoder", "bc_encoder", "block_linear_unswizzle_2d"]
+SHADERS = ["astc_decoder", "bc7_encoder", "bc_encoder", "block_linear_unswizzle_2d"]
 TARGET_ENV = "vulkan1.1"   # (as Eden builds them: the bytes match only with this target)
 
 

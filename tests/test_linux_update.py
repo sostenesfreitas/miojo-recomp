@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 import zipfile
 from pathlib import Path
 
@@ -342,13 +343,54 @@ class UpdateTests(unittest.TestCase):
             def __exit__(self, *exc):
                 return False
 
-        def urlopen(req, timeout=None):
+        def opened(req, timeout=None):
             seen.append(req)
             return Answer(b"list")
-        with mock.patch("urllib.request.urlopen", urlopen):
+        with mock.patch.object(linux_update._OPENER, "open", opened):
             self.assertEqual(linux_update._request("https://example.invalid/list.txt", 5), b"list")
         self.assertEqual(seen[0].get_method(), "GET")
         self.assertIsNone(seen[0].data)
+
+    def test_a_redirect_is_followed_only_to_https(self):
+        # (urllib's own handler follows a redirect to http: and ftp: too: _https checked the first link alone)
+        import urllib.request
+        handlers = [h for h in linux_update._OPENER.handlers if isinstance(h, urllib.request.HTTPRedirectHandler)]
+        self.assertEqual([type(h) for h in handlers], [linux_update._HttpsRedirects])   # (in place of urllib's, not beside it)
+        first = urllib.request.Request("https://github.com/NotRexed/Hookshot/releases/download/v9/part.zip",
+                                       headers={"User-Agent": "Hookshot"})
+        onward = handlers[0].redirect_request(first, None, 302, "Found", {}, "https://objects.example.invalid/part.zip")
+        self.assertEqual(onward.full_url, "https://objects.example.invalid/part.zip")
+        self.assertEqual(onward.get_method(), "GET")
+        for away in ("http://objects.example.invalid/part.zip", "ftp://objects.example.invalid/part.zip",
+                     "file:///etc/hostname"):
+            with self.subTest(away=away), self.assertRaisesRegex(ValueError, "not an https link"):
+                handlers[0].redirect_request(first, None, 302, "Found", {}, away)
+
+    def test_a_redirect_to_http_never_connects(self):
+        # (the real opener and urllib's own redirect handling, with the https connection alone replaced: it answers 302)
+        import email
+        import urllib.request
+        import urllib.response
+        from unittest import mock
+        asked = []
+
+        def https_open(req):
+            asked.append(req.full_url)
+            headers = email.message_from_string("Location: http://objects.example.invalid/part.zip\n\n")
+            answer = urllib.response.addinfourl(io.BytesIO(b""), headers, req.full_url, 302)
+            answer.msg = "Found"
+            return answer
+
+        def http_open(req):
+            asked.append(req.full_url)
+            raise AssertionError("connected to a plain http link")
+
+        https = next(h for h in linux_update._OPENER.handlers if isinstance(h, urllib.request.HTTPSHandler))
+        http = next(h for h in linux_update._OPENER.handlers if type(h) is urllib.request.HTTPHandler)
+        with mock.patch.object(https, "https_open", https_open), mock.patch.object(http, "http_open", http_open), \
+                self.assertRaisesRegex(ValueError, "not an https link: 'http://objects.example.invalid/part.zip'"):
+            linux_update._request("https://github.com/NotRexed/Hookshot/releases/download/v9/part.zip", 5)
+        self.assertEqual(asked, ["https://github.com/NotRexed/Hookshot/releases/download/v9/part.zip"])
 
     def test_a_link_chain_cannot_leave_the_staging_tree(self):
         # x/../.. is inside the folder as written, but the system resolves x first: a link made after it (in the same zip
@@ -574,7 +616,8 @@ class UpdateTests(unittest.TestCase):
             for name in make_game.BESIDE:   # (a folder from a builder before the launcher: the game and its libraries in it)
                 (out / name).write_bytes(b"old " + name.encode())
             with mock.patch.dict(os.environ, {"HOOKSHOT_TOOLS": str(ROOT)}):
-                exec(finish, make_game.__dict__, {"built": str(built), "out": str(out), "work": str(work)})
+                exec(finish, make_game.__dict__, {"built": str(built), "out": str(out), "work": str(work),
+                                                   "a": SimpleNamespace(fsr=False, no_fsr=False, update=None, fetch_fsr_runtime=False)})
             self.assertEqual((out / "hookshot").read_bytes(), (ROOT / "builder" / "linux" / "hookshot-folder").read_bytes())
             self.assertTrue((out / "hookshot").stat().st_mode & stat.S_IXUSR)
             self.assertEqual(sorted(p.name for p in out.iterdir()), ["bin", "hookshot", "image.bin"])

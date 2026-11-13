@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -21,6 +22,7 @@
 #include "vk_draw.h"      // (descriptors_disturbed)
 #include "vk_gprof.h"     // (RX_VK_PASS_TIMING: a span per pass, so the report names them)
 #include "vk_menu.h"
+#include "vk_reactive.h"
 #include "vk_temporal.h"   // (temporal_env_chosen: RX_VK_DLSS / RX_VK_FSR4 over the row's FSR 3.1)
 #include "vk_texture.h"
 #include "upscaler_rows.h"
@@ -239,7 +241,8 @@ bool make_image(Image& t, VkFormat format, uint32_t width, uint32_t height, uint
     ci.arrayLayers = 1;
     ci.samples = VK_SAMPLE_COUNT_1_BIT;
     ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ci.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // (hookshot: and a copy's source: the output's picture goes into vk_temporal.cpp's chain output, kChainEngine)
+    ci.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (!create_image(ci, t.image, t.memory, false)) {
         logf("vk: fsr3: a %ux%u image (format %d) was not made", t.width, t.height, (int)format);
@@ -464,6 +467,16 @@ bool prepare(uint32_t render_width, uint32_t render_height, uint32_t upscale_wid
 
 } // namespace
 
+int prepare_sizes(uint32_t render_width, uint32_t render_height, uint32_t upscale_width, uint32_t upscale_height) {
+    if (!supported()) return -1;
+    free_dead();   // (as upscale does first: a prepare that fails retires what it made, and the next try must not keep it all)
+    const bool had = g.output.image && g.render_width == std::max(1u, render_width) &&
+                     g.render_height == std::max(1u, render_height) && g.upscale_width == std::max(1u, upscale_width) &&
+                     g.upscale_height == std::max(1u, upscale_height);
+    if (!prepare(render_width, render_height, upscale_width, upscale_height)) return g.tried && !g.ok ? -1 : 0;
+    return had ? 1 : 2;
+}
+
 bool supported() {
     if (!dev.device) return false;   // (asked before the device is made, by the menu: not an answer to keep)
     static const bool answer = [] {
@@ -487,6 +500,19 @@ bool supported() {
         return true;
     }();
     return answer;
+}
+
+uint64_t memory() {
+    uint64_t sum = 0;
+    for (const Image* t : all_images())
+        if (t->image) sum += allocation_size(t->memory);
+    return sum;
+}
+
+void release() {
+    for (Image* t : all_images()) drop_image(*t);   // (retired: freed once the GPU's uses of them are done)
+    g.render_width = g.render_height = g.upscale_width = g.upscale_height = 0;
+    free_dead();
 }
 
 bool upscale(VkCommandBuffer cmd, const Inputs& in) {
@@ -650,7 +676,8 @@ bool upscale(VkCommandBuffer cmd, const Inputs& in) {
         spd_x, spd_y);
     run(P_SHADING_CHANGE, {tex(g.spd_mips), tex(g.shading_change), cb_fsr}, groups(rw / 2, 8), groups(rh / 2, 8));
     run(P_PREPARE_REACTIVITY,
-        {tex(g.previous_nearest_depth), tex(g.dilated_motion_vectors), tex(g.dilated_depth), tex(g.default_reactive),
+        {tex(g.previous_nearest_depth), tex(g.dilated_motion_vectors), tex(g.dilated_depth),
+         in.reactive ? Resource{in.reactive} : tex(g.default_reactive),
          tex(g.default_reactive), tex(g.accumulation[p]), tex(g.shading_change), current_luma, exposure,
          tex(g.dilated_reactive_masks), tex(g.new_locks), tex(g.accumulation[q]), cb_fsr},
         groups(rw, 8), groups(rh, 8));
@@ -746,13 +773,101 @@ bool fail(const char* why) {   // (the network runs: why, when it changes and ev
 
 } // namespace
 
-bool fsr3_wanted() {
+bool fsr3_chosen() {
     static const int env = env_switch("RX_VK_FSR");
     if (env == 0) return false;
     // (the Upscaler row's FSR 3.1, upscaler_rows.h, read each time: the row changes it while the game runs. RX_VK_DLSS=1 / 2
     // or RX_VK_FSR4=1 / 2 goes over the row, its FSR 3.1 too: vk_temporal.cpp's chain draws then)
     return (env > 0 || (opts.dlss == upscaler_rows::FSR3 && !temporal_env_chosen())) && fsr3::supported();
 }
+
+bool fsr3_on_chain() {
+    static const bool on = env_switch("RX_VK_FSR3_CHAIN") != 0;
+    return on;
+}
+
+bool fsr3_wanted() { return !fsr3_on_chain() && fsr3_chosen(); }
+
+// ---- (hookshot) FSR 3.1 as an engine of the temporal chain (vk_temporal.cpp) ----
+// The chain's frame into the passes above: its colour (the network's input as it samples it), its depth reversed for FSR
+// (the chain's prep takes it so for an engine with fsr_depth), its motion toward the frame before in render pixels with the
+// skinned draws' own drawn over the camera's (vk_temporal.cpp actor_motion), and the jitter the host gave the camera. The
+// passes' picture (RGBA16F at the output size) is copied into the chain's output, which the chain squares back into the
+// network's output with dlss_out.comp, as fsr3_upscale's own last pass does.
+namespace {
+struct ChainState {
+    std::chrono::steady_clock::time_point last{};
+    uint64_t drawn = 0;
+    bool told = false;
+};
+ChainState& chain_state() {
+    static ChainState& c = *new ChainState;   // (never destroyed: as the chain's own state)
+    return c;
+}
+bool chain_start() { return fsr3::supported(); }
+int chain_prepare(VkCommandBuffer, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool, uint32_t* in_w, uint32_t* in_h,
+                  const char** why) {
+    // (the passes' pipelines and images for these sizes, here and not in the evaluation: an image that cannot be made now
+    // (VRAM full as the size changes) is "not this frame", and the next frame tries again, as fsr3_upscale's own path did)
+    *in_w = rw, *in_h = rh;
+    const int r = fsr3::prepare_sizes(rw, rh, ow, oh);
+    if (r == 0) *why = "its images could not be made at this size";
+    if (r < 0) *why = "its passes could not be made";
+    return r;
+}
+bool chain_evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
+    ChainState& c = chain_state();
+    fsr3_math::Camera camera;
+    if (!fsr3_math::camera_from_projection(f.projection, camera)) {
+        logf("vk: fsr3 on the chain: the scene's projection is not one FSR takes");
+        return false;
+    }
+    if (!f.color.view || !f.depth.view || !f.motion.view || !f.output.image || f.output.format != VK_FORMAT_R16G16B16A16_SFLOAT)
+        return false;
+    fsr3::Inputs ai;
+    ai.color = f.color.view, ai.depth = f.depth.view, ai.motion = f.motion.view;
+    ai.render_width = f.render_w, ai.render_height = f.render_h;
+    ai.upscale_width = f.output.width, ai.upscale_height = f.output.height;
+    ai.jitter[0] = f.jitter[0], ai.jitter[1] = f.jitter[1];
+    ai.jitter_phases = f.jitter_phases ? f.jitter_phases : 8;
+    ai.camera = camera;
+    const auto now = std::chrono::steady_clock::now();
+    ai.frame_time_ms = c.last.time_since_epoch().count() && !f.reset
+                           ? (float)std::min(250.0, std::chrono::duration<double, std::milli>(now - c.last).count())
+                           : 16.667f;
+    c.last = now;
+    ai.reset = f.reset;
+    // (what the scene's transparent draws changed, when RX_VK_REACTIVE asks for it and there were any: vk_reactive.h. The
+    // same mask DLSS gets on this chain, as large as the chain's inputs; without one FSR's default reactivity, as before)
+    if (reactive::Mask m; reactive::mask(cmd, f.render_w, f.render_h, f.color.width, f.color.height, f.color.view, m))
+        ai.reactive = m.view;
+    if (!fsr3::upscale(cmd, ai)) return false;
+    const VkImage picture = fsr3::output_image();
+    if (!picture) return false;
+    full_barrier(cmd);   // (the accumulate and RCAS passes' writes, before the copy reads them)
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.extent = {f.output.width, f.output.height, 1};
+    vkCmdCopyImage(cmd, picture, VK_IMAGE_LAYOUT_GENERAL, f.output.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+    if (++c.drawn % 600 == 0 || !c.told)
+        logf("vk: fsr3 on the chain: %llu frames drawn, %ux%u -> %ux%u, jitter %+.3f %+.3f px of %u phases, depth %s",
+             (unsigned long long)c.drawn, f.render_w, f.render_h, f.output.width, f.output.height, f.jitter[0], f.jitter[1],
+             ai.jitter_phases, camera.flip_depth ? "reversed for FSR by the chain" : "reversed already");
+    c.told = true;
+    return true;
+}
+void chain_release() { fsr3::release(); }   // (the passes stay; their images are made again when FSR 3.1 draws next)
+uint64_t chain_memory() { return fsr3::memory(); }   // (its internal images, for the chain's status line)
+// (fsr_depth: its passes are built with FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH, scripts/fsr3_shaders.py; retry: an
+// evaluation that fails (no room for its constants in the frame's stream) leaves that frame to the network, and the next one
+// tries again. Named, so a field added to TemporalEngine cannot shift these into another)
+const TemporalEngine kChainEngine{.name = "AMD FSR 3.1", .short_name = "FSR 3.1", .start = chain_start,
+                                  .prepare = chain_prepare, .evaluate = chain_evaluate, .release = chain_release,
+                                  .memory = chain_memory, .fsr_depth = true, .retry = true};
+} // namespace
+
+const TemporalEngine* fsr3_engine() { return &kChainEngine; }
 
 bool fsr3_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, VkImageView in_view, Texture* out,
                   VkImageView out_view, uint32_t out_level) {
@@ -784,6 +899,8 @@ bool fsr3_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, Vk
     ai.camera = f.camera;
     ai.frame_time_ms = f.frame_ms;
     ai.reset = f.reset;
+    // (what the scene's transparent draws changed, when RX_VK_REACTIVE asks for it and there were any: vk_reactive.h)
+    if (reactive::Mask m; reactive::mask(cmd, f.width, f.height, f.width, f.height, f.color, m)) ai.reactive = m.view;
     if (!fsr3::upscale(cmd, ai)) return fail("its passes could not be recorded");
     {
         const int32_t pc[2] = {(int32_t)ow, (int32_t)oh};

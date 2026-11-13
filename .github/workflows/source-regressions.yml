@@ -2,8 +2,10 @@
 # tests/test_*.py and nx2/test_*.py (all of them, even after a failure), the C++ unit tests under gpu/vk/tests and a
 # byte-compile of every tracked Python file, and writes a table of them to the run's summary. A check that needs a GPU,
 # the game or MSVC says so, and why, in its own file (RUN_ALL_SKIP). No game data is involved.
-# Windows runs the tests in two parts at once (run_all.py --shard, split by tests/run_all_times.json): each part is one
-# job, and every check is in exactly one of them. Its Windows-only build checks (MSVC, the Builder) are in part 1.
+# Each system runs the tests in two parts at once (run_all.py --shard, split by tests/run_all_times.json): each part is
+# one job, and every check is in exactly one of them. Windows' own build checks (MSVC, the Builder) are in its part 1.
+# On Linux the C and C++ compiles go through ccache (the compilers in its PATH), with the cache main's runs leave
+# (actions/cache: read by every run, written only by a push to main, so a pull request never writes what another reads).
 name: Game-free source regressions
 
 on:
@@ -28,7 +30,9 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            shard: 1/1
+            shard: 1/2
+          - os: ubuntu-24.04
+            shard: 2/2
           - os: windows-2022
             shard: 1/2
           - os: windows-2022
@@ -59,12 +63,40 @@ jobs:
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      # (the one package a test imports: nx2/test_nup_codec.py's zstandard. The runner itself needs none)
+      # (the packages tests import: nx2/test_nup_codec.py's zstandard; tests/test_prompt_guide_lines.py's Pillow and numpy,
+      # nx2/prompt_assets.py's, pinned as nx2/prompt_requirements.txt and requirements.txt have them. The runner itself needs none)
       - name: Python packages for the tests
-        run: python -m pip install --disable-pip-version-check --no-deps zstandard==0.25.0
+        run: python -m pip install --disable-pip-version-check --no-deps zstandard==0.25.0 pillow==13.0.0 numpy==2.5.4
       - name: Compilers and the SPIR-V validator
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y g++ clang spirv-tools
+        run: sudo apt-get update && sudo apt-get install -y g++ clang spirv-tools ccache libdav1d-dev
+      # (the cache's key: the compilers' versions and the shader recompiler's sources, the objects worth keeping: the
+      # bake and nx2 checks compile its ~164 files. A key already cached is not saved again)
+      - name: Compiler cache
+        if: runner.os == 'Linux'
+        id: ccache
+        env:
+          RECOMPILER: ${{ hashFiles('gpu/vk/eden/**', 'gpu/vk/sirit/**', 'gpu/vk/compat/**', 'gpu/compat/**', 'gpu/shaderbatch.cpp') }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/ccache-bin"
+          for c in cc c++ gcc g++ clang clang++; do ln -sf "$(command -v ccache)" "$RUNNER_TEMP/ccache-bin/$c"; done
+          echo "$RUNNER_TEMP/ccache-bin" >> "$GITHUB_PATH"
+          {
+            echo "CCACHE_DIR=$RUNNER_TEMP/ccache"
+            echo "CCACHE_MAXSIZE=400M"
+          } >> "$GITHUB_ENV"
+          compilers=$( { clang++ --version; g++ --version; } | sha256sum | cut -c1-16)
+          prefix="ccache-tests-linux-part${SHARD%/*}-$compilers-"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "key=$prefix$RECOMPILER" >> "$GITHUB_OUTPUT"
+      - if: runner.os == 'Linux'
+        id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ steps.ccache.outputs.key }}
+          restore-keys: ${{ steps.ccache.outputs.prefix }}
       - name: Pinned glslang for generated shader comparisons
         if: runner.os == 'Linux'
         shell: bash
@@ -132,11 +164,22 @@ jobs:
           HOOKSHOT_VULKAN_HEADERS: ${{ github.workspace }}/_deps/vulkan-headers/include
           SHARD: ${{ matrix.shard }}
         run: python -I -B tests/run_all.py --strict --shard ${{ env.SHARD }}
+      - name: Compiler cache statistics
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        run: ccache --show-stats
+      - if: ${{ !cancelled() && runner.os == 'Linux' && github.event_name == 'push' && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ steps.ccache.outputs.key }}
 
-  spirv-global16:
-    name: SPIR-V global narrow load/store lowering
+  # (the focused shader recompiler fixtures, in one job: they build the same recompiler sources, through ccache with the
+  # cache main's runs leave, as the Python checks' above; the direct surface atomic fixture takes the objects the global
+  # load/store one made. The F2I fixture's steps run whether or not the others passed, as when it was a job of its own)
+  spirv-fixtures:
+    name: SPIR-V fixtures (global narrow load/store, direct surface atomics, F2I immediate)
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -149,8 +192,27 @@ jobs:
           ref: 496543121ce6419f23d6fa5d7194ba66c36212d2
           path: _deps/spirv-headers
           persist-credentials: false
-      - name: Install Clang C++20 and SPIR-V validator
-        run: sudo apt-get update && sudo apt-get install -y clang spirv-tools
+      - name: Install Clang C++20, SPIR-V validator and ccache
+        run: sudo apt-get update && sudo apt-get install -y clang spirv-tools ccache
+      - name: Compiler cache
+        id: ccache
+        env:
+          RECOMPILER: ${{ hashFiles('gpu/vk/eden/**', 'gpu/vk/sirit/**', 'gpu/vk/compat/**', 'gpu/compat/**') }}
+        run: |
+          {
+            echo "CCACHE_DIR=$RUNNER_TEMP/ccache"
+            echo "CCACHE_MAXSIZE=400M"
+            echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+          } >> "$GITHUB_ENV"
+          prefix="ccache-spirv-fixtures-$(clang++ --version | sha256sum | cut -c1-16)-"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "key=$prefix$RECOMPILER" >> "$GITHUB_OUTPUT"
+      - id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ steps.ccache.outputs.key }}
+          restore-keys: ${{ steps.ccache.outputs.prefix }}
       - name: Configure the focused real-IR fixture
         run: >-
           CC=clang CXX=clang++ cmake -S tests/global_load_16 -B ${{ runner.temp }}/global-load-16
@@ -187,35 +249,27 @@ jobs:
           for module in "${{ runner.temp }}"/native-suatom/modules/*.spv; do
             spirv-val --target-env vulkan1.3 "$module"
           done
-
-  spirv-f2i-immediate:
-    name: Native F2I immediate lowering
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Check out pinned SPIR-V headers
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: KhronosGroup/SPIRV-Headers
-          ref: 496543121ce6419f23d6fa5d7194ba66c36212d2
-          path: _deps/spirv-headers
-          persist-credentials: false
-      - name: Install Clang and validator
-        run: sudo apt-get update && sudo apt-get install -y clang spirv-tools
-      - name: Build the focused fixture
+      - name: Build the F2I immediate fixture
+        id: f2i
+        if: ${{ !cancelled() }}
         run: |
           CC=clang CXX=clang++ cmake -S tests/f2i_immediate -B "${{ runner.temp }}/f2i" -DREPO_ROOT="${{ github.workspace }}" -DSPIRV_HEADERS_ROOT="${{ github.workspace }}/_deps/spirv-headers"
           cmake --build "${{ runner.temp }}/f2i" --parallel "$(nproc)"
-      - name: Emit and validate authored modules
+      - name: Emit and validate the F2I immediate modules
+        if: ${{ !cancelled() && steps.f2i.outcome == 'success' }}
         run: |
           "${{ runner.temp }}/f2i/f2i_immediate" "${{ runner.temp }}/f2i/modules"
           for module in "${{ runner.temp }}"/f2i/modules/*.spv; do
             spirv-val --target-env vulkan1.3 --uniform-buffer-standard-layout "$module"
           done
+      - name: Compiler cache statistics
+        if: ${{ !cancelled() }}
+        run: ccache --show-stats
+      - if: ${{ !cancelled() && github.event_name == 'push' && steps.ccache-restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ steps.ccache.outputs.key }}
 
   actionlint:
     name: Workflow lint (actionlint)

@@ -18,8 +18,18 @@ struct PipeNote {
     uint32_t color_format[8];
     NvnState s;
 };
+/// (vk_predict.cpp) What the prediction left out: pipelines whose vertex layout or targets have types the program was not made for
+/// (no draw asks for them), and the program variants left with none; and the notes whose own types do not fit (0: else the rule
+/// that leaves them out is wrong)
+struct PredictCounts {
+    size_t vertex_types = 0, output_types = 0, variants_unfit = 0, notes_unfit = 0;
+    size_t refit = 0;   // (program variants whose signature fallback took a less common class, the most common not fitting)
+};
 /// (vk_predict.cpp) The pipelines the notes predict for the kept graphics program variants no note names (key 0: not made yet)
-std::vector<std::unique_ptr<PipeNote>> predict_pipelines(const std::vector<std::unique_ptr<PipeNote>>& notes, size_t* programs);
+std::vector<std::unique_ptr<PipeNote>> predict_pipelines(const std::vector<std::unique_ptr<PipeNote>>& notes, size_t* programs,
+                                                         PredictCounts* left_out = nullptr);
+/// The colour output types a note's targets give a program (Shader::AttributeType, as a draw's: color_types_of)
+void note_color_types(const PipeNote& n, uint8_t types[8]);
 }
 
 #include <functional>
@@ -70,7 +80,7 @@ void draw_stats3(int64_t* pending_skips, int64_t* waits, double* wait_ms);
 bool draw_stats4(int64_t* links, double* link_ms, int64_t* lib_hits, int64_t* lib_cold, int64_t* lib_built, double* lib_build_ms);
 void draw_skip_report(double frames);   // (hookshot) skips by the line that made them
 int64_t draw_desc_reused();
-/// (RX_VK_DESC_SLOTGEN) Of those, the reuses the global registrations' generation check would have rebuilt for
+/// (Descriptor reuse) Of those, the reuses the global registrations' generation check would have rebuilt for
 int64_t draw_slotgen_saves();
 /// RX_VK_FLASH_RECORD=<key>,...: the last frames' draws of those programs, written to the log for frames around a flash
 void draw_records_log(uint64_t frame_lo, uint64_t frame_hi);
@@ -82,9 +92,12 @@ uint64_t ub_generation();
 void ub_thread_off();
 /// The pipeline cache to disk (force: whatever was built since the last save; else only after a few new ones)
 void pipeline_cache_save(bool force);
+void pipeline_cache_save_play();   // what play made since the last save, into a play file now
 // (the window closed: what play made since the last save, a few ms; the start's cache is not written there, as before)
 void pipeline_cache_close();
 void pipeline_cache_play();   // (the start-up done: what play makes goes into play files of its own)
+/// (hookshot) hookshot_pipeline_states.bin's bytes now, no record half written (the menu's Save my pipeline list); *present: it is there
+std::string state_list_snapshot(bool* present);
 
 /// The stream's uniform updates (UPDATE_UB, vk_replay.cpp) that overlap [addr, addr + n) and may not be in guest
 /// memory yet when the GPU reads it: a copy of the range with them applied, at the offset alloc returns in the

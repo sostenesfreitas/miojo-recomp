@@ -9,14 +9,25 @@ sealed record Tools(string Root, string Python, string[]? PythonArgs = null)
     /// Which release these tools are (tools/version.txt, written when the release is packed); null from the source tree
     public string? Version => File.Exists(Path.Combine(Root, "version.txt")) ? File.ReadAllText(Path.Combine(Root, "version.txt")).Trim() : null;
 
+    /// The package's own Python is gone: an antivirus took it, most often, after a false alarm on the download
+    public bool OwnPythonMissing => !File.Exists(Python) && Directory.Exists(Path.Combine(Root, "python"));
+
+    public const string OwnPythonMissingText =
+        "The builder's own Python (tools/python/python.exe) is missing. Your antivirus probably removed it: restore it " +
+        "from quarantine, or unpack the zip again into a folder your antivirus allows, then try again.";
+
     public static Tools? Find()
     {
         var at = AppContext.BaseDirectory;
         var bundled = Path.Combine(at, "tools");
         if (File.Exists(Path.Combine(bundled, "nx2", "make_game.py")))
         {
+            // (a package with a Python of its own runs no other. With its python.exe gone, the first "python" Windows found
+            // ran the tools instead: another version, without the modules the tools need, or not one the player chose to
+            // trust with the game files. Its start now fails and says how to get the package's Python back. Only a
+            // package with no python folder at all uses the PC's)
             var py = Path.Combine(bundled, "python", "python.exe");
-            return new Tools(bundled, File.Exists(py) ? py : "python");
+            return new Tools(bundled, File.Exists(py) || Directory.Exists(Path.Combine(bundled, "python")) ? py : "python");
         }
         // (the source tree the app was built in: its builder\ folder holds the app. Not any parent folder with an nx2\
         // folder, such as one another user of the PC made at the drive's root)
@@ -65,6 +76,7 @@ sealed class Runner
     readonly int? workers;
     readonly string? ngxSdk;
     readonly int? memoryGb;
+    readonly string? ffxSdk;
     Process? process;
     string? error;
     bool cancelled;
@@ -72,8 +84,10 @@ sealed class Runner
     public event Action<string>? Line;
     public event Action<string?>? Finished;
 
-    /// ngxSdk: NVIDIA DLSS (the builder's tick): the folder of NVIDIA's DLSS SDK, as HOOKSHOT_NGX_SDK; null builds without it
-    public Runner(Tools tools, List<string> args, int? workers = null, string? ngxSdk = null, int? memoryGb = null)
+    /// ngxSdk: NVIDIA DLSS (the builder's tick): the folder of NVIDIA's DLSS SDK, as HOOKSHOT_NGX_SDK; null builds without it.
+    /// ffxSdk: AMD FSR 4 (the builder's tick): where AMD's FSR runtime is kept between builds, as HOOKSHOT_FFX_SDK
+    public Runner(Tools tools, List<string> args, int? workers = null, string? ngxSdk = null, int? memoryGb = null,
+                  string? ffxSdk = null)
     {
         this.tools = tools;
         this.args = args;
@@ -82,10 +96,11 @@ sealed class Runner
         this.workers = workers;
         this.ngxSdk = ngxSdk;
         this.memoryGb = memoryGb;
+        this.ffxSdk = ffxSdk;
     }
 
     static ProcessStartInfo Info(Tools tools, IEnumerable<string> args, int? workers = null, string? ngxSdk = null,
-                                 int? memoryGb = null)
+                                 int? memoryGb = null, string? ffxSdk = null)
     {
         var si = new ProcessStartInfo(tools.Python)
         {
@@ -99,10 +114,14 @@ sealed class Runner
         BuildWorkers.Apply(si, workers);
         BuildMemory.Apply(si, memoryGb);
         // (written into the game folder's hookshot_version.txt: the game starts this app again to update, host/hos_update.c)
+        BuilderHome.PassTo(si);
         if (Environment.ProcessPath != null) si.Environment["HOOKSHOT_BUILDER_EXE"] = Environment.ProcessPath;
         // (NVIDIA DLSS: only when ticked. Without it, one set on the PC is not passed on either: a build is with DLSS only when asked)
         if (ngxSdk != null) si.Environment["HOOKSHOT_NGX_SDK"] = ngxSdk;
         else si.Environment.Remove("HOOKSHOT_NGX_SDK");
+        // (AMD FSR 4, the same: AMD's runtime kept in the builder's own folder only when ticked)
+        if (ffxSdk != null) si.Environment["HOOKSHOT_FFX_SDK"] = ffxSdk;
+        else si.Environment.Remove("HOOKSHOT_FFX_SDK");
         // (the folder's own compiler, headers and libraries, when it has them: nothing of the PC's but Windows' own)
         var sets = new[] { ("EMSDK", "emsdk"), ("RX_CPM", "cpm"), ("WGPU_NATIVE", "wgpu-native") };
         foreach (var (name, folder) in sets)
@@ -123,7 +142,7 @@ sealed class Runner
         {
             try
             {
-                using var p = Process.Start(Info(tools, args, workers, ngxSdk, memoryGb))!;
+                using var p = Process.Start(Info(tools, args, workers, ngxSdk, memoryGb, ffxSdk))!;
                 process = p;
                 p.ErrorDataReceived += (_, e) => { if (e.Data != null) Line?.Invoke(e.Data); };
                 p.BeginErrorReadLine();
@@ -138,7 +157,7 @@ sealed class Runner
             }
             catch (Exception e)
             {
-                Finished?.Invoke("The build tools could not start: " + e.Message);
+                Finished?.Invoke(tools.OwnPythonMissing ? Tools.OwnPythonMissingText : "The build tools could not start: " + e.Message);
             }
         });
     }
@@ -179,10 +198,7 @@ sealed class Runner
         }
         catch (Exception)
         {
-            // (the package's own Python missing: an antivirus took it, most often, after a false alarm on the download)
-            if (tools.Python == "python" && Directory.Exists(Path.Combine(tools.Root, "python")))
-                return (false, "The builder's own Python (tools/python/python.exe) is missing. Your antivirus probably removed it: restore it " +
-                               "from quarantine, or unpack the zip again into a folder your antivirus allows, then try again.");
+            if (tools.OwnPythonMissing) return (false, Tools.OwnPythonMissingText);
             return (false, "Python 3 was not found. Install it from python.org (not the Microsoft Store build), or use the full Hookshot Builder package.");
         }
     }

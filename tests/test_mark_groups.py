@@ -261,12 +261,15 @@ class MarkGroupsTests(unittest.TestCase):
                     self.assertNotEqual(make_game.lift_key(exefs, work, {}), key)
 
     def test_the_lift_groups_once_with_its_stats(self):
-        """emit_function leaves the marks as they are; nx2/lift.py calls chunks.edit_c, which groups the written files once, with
-        the lift's stats, before its report"""
+        """emit_function leaves the marks as they are; nx2/lift.py calls chunks.edit_c, which groups the written files once (a
+        process per file: _edit_marks), with the lift's stats, before its report"""
         self.assertNotIn("mark_groups", inspect.getsource(a64_lift.Lifter.emit_function))
         src = read(os.path.join(ROOT, "nx2", "lift.py"))
-        self.assertEqual(src.count("group_marks(") + read(os.path.join(ROOT, "nx2", "chunks.py")).count("group_marks("), 1)
-        self.assertIn("group_marks(", inspect.getsource(chunks.edit_c))
+        chunks_src = read(os.path.join(ROOT, "nx2", "chunks.py"))
+        self.assertEqual(src.count("group_marks(") + src.count("mark_groups(") + chunks_src.count("group_marks("), 0)
+        self.assertEqual(chunks_src.count("mark_groups("), 1)
+        self.assertIn("mark_groups(", inspect.getsource(chunks._edit_marks))
+        self.assertIn("_each(_edit_marks, ", inspect.getsource(chunks.edit_c))
         call = src.find("chunks.edit_c(gen, L.stats, ")
         self.assertGreater(call, 0)
         self.assertLess(call, src.find("L.report()"))
@@ -416,6 +419,43 @@ class OutputSizeOrderTests(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 oot_patches.apply_output_size(d, required=False)
             self.assertIn("WARNING: the output size places were found [0, 1, 1, 0, 1, 1, 1, 1] times", out.getvalue())
+
+    def test_processes_make_the_one_process_edits(self):
+        """edit_c's two passes, a process per file, write the files, print the lines and count the stats of the edits made one
+        after the other in one process (oot_patches.apply, then a64_lift.group_marks), also with a place missing"""
+        filler = ('#include "a64.h"\n' + "".join(
+            "void f_%08x(Ctx *__restrict A64_NOESC c) {\n" % (0x80200000 + 0x40 * i) +
+            "    recomp_store64(c,c->x[19] + %d,c->x[1]);\n    recomp_store32(c,c->x[19] + %d,c->x[2]);\n    return;\n}\n"
+            % (8 * i, 8 * i + 12) for i in range(5)))
+
+        def gen(d, broken):
+            make_gen(d)
+            for n in range(2, 10):
+                with open(os.path.join(d, "code_%03d.c" % n), "w", newline="") as f:
+                    f.write(filler.replace("c->x[19]", "c->x[%d]" % (19 + n % 3)))
+            if broken:
+                path = os.path.join(d, "code_001.c")
+                text = read(path).replace("L_836cea54:;\n", "L_836cea58:;\n")
+                with open(path, "w", newline="") as f:
+                    f.write(text)
+            return sorted(glob.glob(os.path.join(d, "code_*.c")))
+
+        for supported, broken in ((True, False), (False, False), (False, True)):
+            runs = []
+            for how in ("serial", 1, 4):
+                with tempfile.TemporaryDirectory() as d:
+                    files = gen(d, broken)
+                    st, out = Counter(), io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        if how == "serial":
+                            oot_patches.apply(d, protect_hearts=supported, required=supported)
+                            a64_lift.group_marks(files, st)
+                        else:
+                            chunks.edit_c(d, st, supported, jobs=how)
+                    runs.append(([read(f) for f in files], out.getvalue(), st))
+            self.assertGreater(runs[0][2]["groups"], 8)
+            self.assertEqual(runs[1], runs[0], (supported, broken))
+            self.assertEqual(runs[2], runs[0], (supported, broken))
 
     def test_a_missing_place_fails_once_required(self):
         """the supported build's whole lift stops on a missing place; another build's, or part of a lift, warns as before"""

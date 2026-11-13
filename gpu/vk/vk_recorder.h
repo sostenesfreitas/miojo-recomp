@@ -416,8 +416,9 @@ struct Recorder {
         spin([&] { return cap - (w - (r_seen = R.load(std::memory_order_acquire))) >= need; });
         note_wait(B_RING_FULL, now_ns() - t0);
     }
-    /// (the producer, an encoder starting) the next packet's place, with at least `room` contiguous bytes: its header, and the end
-    /// of what it may use
+    /// (the producer, an encoder starting) the next packet's place, with `room` contiguous bytes: its header, and the end of what it
+    /// may use. Never more than `room`, even when the ring has more free: whether a packet is made directly depends on its size
+    /// alone, not on how far the recorder had got (tests/test_recorder_sync.py: the oversize runs)
     Packet* reserve(uint8_t*& lim) {
         size_t off = (size_t)(w & mask), tail = cap - off;
         if (tail < room) {   // (the ring's tail: passed over, the packet at its start)
@@ -431,7 +432,7 @@ struct Recorder {
         } else {
             wait_room(room);
         }
-        lim = base + off + std::min<uint64_t>(tail, cap - (w - r_seen));
+        lim = base + off + room;   // (free and contiguous: tail >= room, and wait_room() made room bytes free past w)
         return reinterpret_cast<Packet*>(base + off);
     }
     void publish(const Packet* p, const uint8_t* end) {

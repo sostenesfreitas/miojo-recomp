@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <chrono>
 #include <deque>
+#include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -37,21 +39,29 @@ void destroy_image(VkImage image, VmaAllocation) {
 }
 }
 // Keep submission code real; the queue executes captured command buffers only on advance().
-struct Recording { int slot = 0; VkCommandBuffer cmd{}, upload{}; VkFence fence{}; uint64_t value = 0, batch = 0; bool submitted = false; };
+struct Recording { int slot = 0; VkCommandBuffer cmd{}, upload{}; VkFence fence{}; uint64_t value = 0, batch = 0, part = 0; bool submitted = false; };
 Recording* rec_cur = nullptr;
 uint64_t done_max = 20, oldest = UINT64_MAX, rec_seq = 0, batch_next = 0, batch_flushed = 0;
 VkSemaphore rec_timeline = reinterpret_cast<VkSemaphore>(uintptr_t(2));
 VkSemaphore batch_tl = reinterpret_cast<VkSemaphore>(uintptr_t(3));
 std::mutex rec_map_mu;
+// (the readback's part bookkeeping and the held-submit flag: gpu/vk/vk_replay.cpp)
+uint64_t rec_part_next = 0;
+std::map<uint64_t,uint64_t> part_rec;
+std::condition_variable rec_map_cv;
+std::atomic<bool> pend_held{false};
 std::map<uint64_t,uint64_t> value_rec;
 std::vector<uint64_t> rec_open_values;
-struct { std::vector<VkCommandBufferSubmitInfo> cbs; uint64_t signal = 0, rec = 0; bool any_signal = false; } pend;
+struct { std::vector<VkCommandBufferSubmitInfo> cbs; uint64_t signal = 0, rec = 0; bool any_signal = false; uint64_t reflex = 0; } pend;
+uint64_t reflex_frame() { return 0; }   // (vk_reflex.cpp: no Reflex here)
+const void* reflex_submit_id(const void* next, uint64_t = ~0ull) { return next; }   // (vk_reflex.cpp: no tag without Reflex)
 std::chrono::steady_clock::time_point pend_since;
 int st_flushes = 0, st_reason[2]{};
 int64_t st_batched_cbs = 0;
 enum { FR_OTHER, FR_CAP }; int flush_reason = FR_OTHER;
 bool batched = false;
 bool batch_on() { return batched; }
+bool batch_gpu_idle() { return false; }   // (#1993's flush at an idle GPU: none here)
 bool texture_uploads_recorded() { return false; }
 // Stream flushing is a modeled boundary; keep the real submission's slot/order contract.
 int flushed_slot = -1;
@@ -63,10 +73,11 @@ void gprof_submitted(int slot, bool) {
 void gpu_time_end(Recording&) {}
 void end_pass(VkCommandBuffer) {}
 void flush_ub_updates(VkCommandBuffer) {}
-void memory_end_submission(VkCommandBuffer) {}
+void memory_end_submission(VkCommandBuffer, uint64_t) {}
 void full_barrier(VkCommandBuffer, const char*) {}
 void logf(const char*, ...) {}
 void device_lost() { need(false, "unexpected device loss"); }
+void note_timeline_sent(uint64_t) {}
 uint64_t oldest_unfinished() { return oldest; }
 #define PROF(x) ((void)0)
 VKAPI_ATTR VkResult VKAPI_CALL vkEndCommandBuffer(VkCommandBuffer) { return VK_SUCCESS; }

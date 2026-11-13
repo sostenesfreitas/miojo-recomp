@@ -11,6 +11,7 @@ int hos_sdl_load(void);   /* 3 or 2, the SDL loaded (the first call loads it); 0
 enum { HOS_SDL_AUDIO = 0x10, HOS_SDL_VIDEO = 0x20, HOS_SDL_GAMEPAD = 0x2000, HOS_SDL_EVENTS = 0x4000 };   /* (both's) */
 int hos_sdl_init(uint32_t subsystems);   /* 1 when started */
 void hos_sdl_hint(const char *name, const char *value);   /* (a hint the loaded SDL does not know is nothing) */
+int hos_sdl_hint_override(const char *name, const char *value);   /* (over the environment's: SDL_HINT_OVERRIDE) */
 const char *hos_sdl_error(void);
 /* the app's name and id, before the window and the sound start: Wayland's app_id and X11's WM_CLASS (what the desktop
    matches the window to its menu entry by, for its icon and name), the name the sound mixer shows */
@@ -72,6 +73,8 @@ void hos_sdl_pads_update(void);
 int hos_sdl_pad_button(void *pad, int button);
 int16_t hos_sdl_pad_axis(void *pad, int axis);
 const char *hos_sdl_pad_name(void *pad);
+/* Connection diagnostics only: hardware GUID and active mapping name, never a serial number or device path. */
+void hos_sdl_pad_log_connection(void *pad, int motion, int steam);
 int32_t hos_sdl_pad_id(void *pad);
 void hos_sdl_pad_rumble(void *pad, uint16_t low, uint16_t high, uint32_t ms);
 /* (HD rumble, host/pad_sdl.c) the pad's SDL_GetGamepadType / SDL_GameControllerGetType, in the loaded SDL's numbers (0
@@ -85,3 +88,8 @@ enum { HOS_SDL_SENSOR_ACCEL = 1, HOS_SDL_SENSOR_GYRO = 2 };
 int hos_sdl_pad_has_sensor(void *pad, int type);
 int hos_sdl_pad_sensor_enable(void *pad, int type, int on);   /* 1 when done */
 int hos_sdl_pad_sensor(void *pad, int type, float *data, int n);   /* 1 when read */
+/* Steam's stand-in pads (host/steam_pads.h): whether the SDL tells them apart (vendor, Steam handle and hint priority
+   calls); a pad's USB vendor (0 unknown); its Steam Input handle (0 for a real pad) */
+int hos_sdl_knows_steam_pads(void);
+uint16_t hos_sdl_pad_vendor(void *pad);
+uint64_t hos_sdl_pad_steam_handle(void *pad);

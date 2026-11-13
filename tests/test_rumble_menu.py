@@ -3,7 +3,7 @@
 gpu/vk/vk_menu.cpp's row, set_row (the arrows, Enter and a click on the value) and the ini's snap to the row's steps are
 compiled from the source with stubs and run: one step below Off stays Off, one above 150% stays 150%, however it is
 asked. The mouse wheel never changes a value (it scrolls the rows): menu_tick is checked for that. The option id the host reads it by (9, host/pad_sdl.c) is checked against the
-renderer's option table (gpu/vk/vk_replay.cpp) and the other ids.
+renderer's option table (gpu/vk/vk_replay.cpp) and the other ids. Rumble changes do not reset temporal failures.
 
     python -I -B tests/test_rumble_menu.py [--cxx g++]
 """
@@ -63,6 +63,9 @@ void save() { saves++; }
 void apply_pad_layout(int) {}
 void apply_preset(int) { presets++; }
 void sync_preset_budgets(int) {}
+void env_release(const int*) {}   // (the environment's hold on a row: none here)
+void vram_budget_sync() {}
+constexpr int kVramMinimumOnly = 1;
 /* (stand-ins for the rest of set_row, which the Rumble strength row never reaches: the Upscaler's rows, the restart offer) */
 bool row_fixed(const int*) { return false; }
 int upscaler() { return 0; }
@@ -75,6 +78,8 @@ int step_engine(int, int, unsigned) { return 0; }   // (the Upscaler by engine)
 void step_render(int up, int v, int dir, int* u, int* r) { *u = up, *r = v + dir; }
 }
 namespace mr { constexpr int kMax = 8; }
+/* (the Game language row's hook in set_row: language.txt, not written here) */
+namespace i18n { inline void set_game_language(int) {} }
 void restart_values(int*) {}
 struct { void note(const int*) {} } restart_state;
 %(is_slider)s
@@ -87,8 +92,13 @@ bool can_mic() { return false; }
 unsigned upscalers_available() { return 1; }
 void mic_chosen() {}
 void samplers_changed() {}
+int temporal_resets = 0;
+void temporal_reset_failure() { ++temporal_resets; }
+void prompts_at_once(const Row&) {}
 // (set_row steps the Output row through vk_menu.cpp's step_output_choice (#1144): not what this checks)
 int step_output_choice(int id, int dir) { return id + dir; }
+// (the Aspect ratio row moves the Output resolution to one of its shape's sizes, output_for_aspect: not what this checks)
+int output_for_aspect(int) { return opts.output_res; }
 %(set_row)s
 /* (menu_tick's arrows: Left, Right, and Enter as Right; a click on the value's left or right half presses them) */
 void arrow(Row& r, bool right) { %(arrow)s }
@@ -116,6 +126,7 @@ int main() {
     CHECK(opts.rumble == 0);
     /* it is a control: the quality preset stays */
     CHECK(opts.preset == 3 && presets == 0 && saves > 0);
+    CHECK(temporal_resets == 0);
     /* an ini's value: on the steps, within the range */
     static const int in[] = {-10, 0, 12, 13, 60, 63, 100, 137, 138, 150, 151, 999};
     static const int out[] = {0, 0, 0, 25, 50, 75, 100, 125, 150, 150, 150, 150};

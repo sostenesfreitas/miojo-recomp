@@ -15,6 +15,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -116,7 +119,7 @@ def main():
         # (beside the stand-in hos.h: an include in quotes looks in the including file's folder first)
         (tmp / "nn_libc.c").write_text((ROOT / "host" / "nn_libc.c").read_text(encoding="utf-8"), encoding="utf-8")
         exe = tmp / "fixture"
-        subprocess.run([a.cc, "-std=gnu11", "-Wall", "-Wextra", "-I", str(tmp), str(tmp / "fixture.c"), "-o", str(exe)],
+        subprocess.run([a.cc, "-std=gnu11", "-include", ENV_ON_H, "-Wall", "-Wextra", "-I", str(tmp), str(tmp / "fixture.c"), "-o", str(exe)],
                        check=True)
         subprocess.run([str(exe)], check=True)
 

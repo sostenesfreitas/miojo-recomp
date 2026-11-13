@@ -14,12 +14,21 @@ python -I -B tests/test_amd_fragment_warp.py
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+def _with_cache(path):
+    """vk_shader.cpp with the program cache it held before (vk_progcache.cpp and .h beside it, outside the translator stamp): definitions first"""
+    parts = [path.read_text(encoding="utf-8")]
+    for name in ("vk_progcache.cpp", "vk_progcache.h"):
+        if (path.parent / name).exists():
+            parts.append((path.parent / name).read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
 VK = ROOT / "gpu" / "vk"
 SPIRV = VK / "eden" / "shader_recompiler" / "backend" / "spirv"
 
 
 def main():
-    shader = (VK / "vk_shader.cpp").read_text(encoding="utf-8")
+    shader = _with_cache(VK / "vk_shader.cpp")
     profile = shader[shader.index("Shader::Profile make_profile()"):shader.index("Shader::HostTranslateInfo host_info()")]
     for needle, why in (
         ("p.warp_size_potentially_larger_than_guest = dev.subgroup_max > 32",
@@ -53,7 +62,7 @@ def main():
                      ("VK_SHADER_STAGE_MESH_BIT_EXT", 1)):
         if shader.count("profile_graphics(%s)" % stage) != n:
             raise SystemExit("the %s programs do not take their stage's profile" % stage)
-    stamp = shader[shader.index("uint64_t disk_stamp()"):]
+    stamp = shader[shader.index("uint64_t translator_stamp()"):]
     if "profile().warp_size_potentially_larger_than_guest" not in stamp.split("return")[0]:
         raise SystemExit("programs translated for another GPU's warps are kept in the program cache")
     if "(uint32_t)dev.sg32_stages" not in stamp.split("return")[0]:

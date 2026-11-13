@@ -187,6 +187,13 @@
                 </ComboBox.FocusVisualStyle>
               </ComboBox>
             </StackPanel>
+            <!-- (the update track, Updater.cs: Release, Release candidate or Nightly; the builder updates from it, saved once chosen) -->
+            <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,12,0,0" VerticalAlignment="Center">
+              <TextBlock x:Name="TrackLabel" Style="{StaticResource Label}" Text="UPDATE TRACK" VerticalAlignment="Center" Margin="0,0,12,0"/>
+              <ComboBox x:Name="TrackBox" Width="180" Style="{StaticResource Choice}" IsEditable="False"
+                        AutomationProperties.Name="Update track" AutomationProperties.LabeledBy="{Binding ElementName=TrackLabel}"
+                        ToolTip="Release: the tested versions. Release candidate: the next version, to try before it is released. Nightly: the newest development build, updated with every change."/>
+            </StackPanel>
             <!-- (make_game.py's last step, the game's prepare-shaders run: unticked, the game prepares them at its first start) -->
             <CheckBox x:Name="PrepareTick" Grid.Row="1" Grid.Column="2" Grid.ColumnSpan="3" Style="{StaticResource Tick}" Content="Prepare shaders now"
                       IsChecked="True" Margin="0,12,0,0"
@@ -200,9 +207,10 @@
                       Content="NVIDIA DLSS (downloads NVIDIA's SDK under NVIDIA's license)"/>
             <TextBlock Style="{StaticResource Note}" FontSize="12" Margin="26,4,0,0" TextWrapping="Wrap"
                        Text="For NVIDIA RTX graphics cards. NVIDIA's files stay on this PC: never share a game folder built with them."/>
-            <!-- AMD FSR 4: off unless ticked. Nothing is downloaded: AMD's DLLs are put beside the game by hand (the readme) -->
-            <CheckBox x:Name="FsrTick" Style="{StaticResource Tick}" IsChecked="False" Margin="0,10,0,0"
-                      Content="AMD FSR 4 (AMD's files are not included: see the readme)"/>
+            <!-- AMD FSR 4: off unless ticked. Ticking it shows AMD's license; the build downloads AMD's runtime under it
+                 (make_game.py, scripts/ffx_sdk.py). Nothing of AMD's comes with the builder -->
+            <CheckBox x:Name="FsrTick" Style="{StaticResource Tick}" IsChecked="False" Margin="0,10,0,0" Click="FsrChanged"
+                      Content="AMD FSR 4 (downloads AMD's runtime under AMD's license)"/>
             <TextBlock Style="{StaticResource Note}" FontSize="12" Margin="26,4,0,0" TextWrapping="Wrap"
                        Text="For AMD Radeon graphics cards. It is chosen in the game's Insert menu, as the Upscaler."/>
           </StackPanel>
@@ -312,6 +320,11 @@
           </StackPanel>
           <Button x:Name="LaunchFolder" Style="{StaticResource LinkButton}" Foreground="{StaticResource InkFaint}" HorizontalAlignment="Center"
                   Margin="0,22,0,0" Content="Open the game folder" Click="LaunchFolderClick"/>
+          <!-- (Save my pipeline list: the zip for the "Submit your pipelines" issue, LaunchShareClick) -->
+          <Button x:Name="LaunchShare" Style="{StaticResource LinkButton}" Foreground="{StaticResource InkFaint}" HorizontalAlignment="Center"
+                  Margin="0,6,0,0" Content="Save my pipeline list (helps remove stutter)" Click="LaunchShareClick"/>
+          <TextBlock x:Name="LaunchShareStatus" FontSize="12" Foreground="{StaticResource InkSoft}" TextWrapping="Wrap" MaxWidth="560"
+                     TextAlignment="Center" HorizontalAlignment="Center" Margin="0,4,0,0" Visibility="Collapsed"/>
         </StackPanel>
 
         <!-- ===== when something goes wrong ===== -->

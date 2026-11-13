@@ -2,6 +2,7 @@
 // production helpers/present block at the markers below; no game content is used.
 #include <vulkan/vulkan.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,14 +15,20 @@ using namespace mkwvk;
 VkDevice device;
 VkPhysicalDevice physical;
 VkPhysicalDeviceMemoryProperties memory_props;
-struct { VkExtent2D swap_extent; } dev;
+struct { VkExtent2D swap_extent; bool hdr = false; } dev;
+std::atomic<bool> present_native_pq{false};
 float display_aspect;
 float get_aspect() { return display_aspect; }
 struct Host { float (*aspect_ratio)(); } host_object{get_aspect};
 Host* host = &host_object;
-VkImage framegen_scale(VkCommandBuffer,VkImageView,VkImage,uint32_t,uint32_t,const int*,uint32_t,uint32_t) {
+VkImage framegen_scale(VkCommandBuffer,VkImageView,VkImage,uint32_t,uint32_t,const int*,uint32_t,uint32_t,bool) {
     return VK_NULL_HANDLE; // This GPU fixture exercises direct blits; filtered routing is covered by L1.
 }
+// (SDR only here: the HDR pass and Native's routing are covered by test_present_aspect.py)
+VkImage framegen_hdr(VkCommandBuffer,VkImageView,uint32_t,uint32_t,const int*,uint32_t,uint32_t,bool) { return VK_NULL_HANDLE; }
+VkImageView framegen_scaled_view() { return VK_NULL_HANDLE; }
+void full_barrier(VkCommandBuffer) {}
+void logf(const char*,...) {}
 // @PRODUCTION_HELPERS@
 void record_actual(VkCommandBuffer command,VkImage src,uint32_t sw,uint32_t sh,const int* crop,VkImage dst) {
     struct { VkCommandBuffer cmd; } f{command};

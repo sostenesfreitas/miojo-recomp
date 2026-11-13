@@ -146,6 +146,10 @@ void TranslateF2I(TranslatorVisitor& v, u64 insn, const IR::F16F32F64& src_a) {
     }()};
     const bool is_signed{f2i.is_signed != 0};
     const auto [max_bound, min_bound] = ClampBounds(f2i.dest_format, is_signed);
+    // (Fritchii eba45b151, zortos293/Lichii#1051 by myshadowww) INT32_MAX rounds up to 2^31 as an F32 bound, so an input at or
+    // above it reached OpConvertFToS out of range, which is undefined. The clamp stops below 2^31 and the exact INT32_MAX is
+    // selected after the conversion
+    const bool signed_f32_i32{f2i.dest_format == DestFormat::I32 && f2i.src_format == SrcFormat::F32 && is_signed};
 
     IR::F16F32F64 intermediate;
     switch (f2i.src_format) {
@@ -156,7 +160,7 @@ void TranslateF2I(TranslatorVisitor& v, u64 insn, const IR::F16F32F64& src_a) {
         break;
     }
     case SrcFormat::F32: {
-        const IR::F32 max_val{v.ir.Imm32(static_cast<f32>(max_bound))};
+        const IR::F32 max_val{v.ir.Imm32(signed_f32_i32 ? 0x1.fffffep30f : static_cast<f32>(max_bound))};
         const IR::F32 min_val{v.ir.Imm32(static_cast<f32>(min_bound))};
         intermediate = v.ir.FPClamp(rounded_value, min_val, max_val);
         break;
@@ -173,6 +177,10 @@ void TranslateF2I(TranslatorVisitor& v, u64 insn, const IR::F16F32F64& src_a) {
 
     const size_t bitsize{std::max<size_t>(32, BitSize(f2i.dest_format))};
     IR::U16U32U64 result{v.ir.ConvertFToI(bitsize, is_signed, intermediate)};
+    if (signed_f32_i32) {
+        result = IR::U32{v.ir.Select(v.ir.FPGreaterThanEqual(op_a, v.ir.Imm32(0x1p31f)),
+                                     v.ir.Imm32(static_cast<u32>((std::numeric_limits<s32>::max)())), result)};
+    }
 
     bool handled_special_case = false;
     const bool special_nan_cases =

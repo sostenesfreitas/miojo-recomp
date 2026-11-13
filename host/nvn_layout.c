@@ -9,7 +9,6 @@
    layer-faces (a multiple of 6), and linear textures are sized in pixel rows, block-compressed ones too (MacNativeGames
    3c482a7, found against the original driver under emulation: nxnative PR 11). */
 #include "../gpu/render/rx_nvn.h"
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -88,16 +87,6 @@ static uint64_t level_offset(const nvn_texdesc *d, unsigned level, unsigned dpl,
     return off;
 }
 
-/* NVN v55 sdk+0x4429c8 compares the default footprint against one-GOB tiles
-   for MINIMAL_LAYOUT. Keep the default if equal; otherwise use tile H=D=0.
-   Packaged layouts override this choice. Layout cannot be switched on live
-   resources: the startup-only knob is a negative control for fresh sessions. */
-static int minimal_layout_on(void) {
-    static _Atomic int enabled = -1;
-    int value = atomic_load(&enabled);
-    if (value < 0) { const char *e = getenv("TOTK_MINIMAL_LAYOUT"); value = !(e && !strcmp(e, "0")); atomic_store(&enabled, value); }
-    return value;
-}
 static uint64_t layer_bytes(const nvn_texdesc *d, unsigned dpl, int layered,
                             uint32_t w, uint32_t h, uint32_t z, unsigned tileH, unsigned tileD, fmt_t t) {
     uint64_t ls = level_offset(d, d->levels ? d->levels : 1, dpl, w, h, z, tileH, tileD, t);
@@ -144,7 +133,9 @@ void nvn_tex_layout(const nvn_texdesc *d, nvn_texlayout *o) {
     }
     else if (dpl == 3) tileD = pick_tile(z + z / 2);
     uint64_t ls = layer_bytes(d, dpl, layered, w, h, z, tileH, tileD, t);
-    if ((d->flags & 0x200) && !d->pkg_block_h && minimal_layout_on()) {
+    /* NVN v55 sdk+0x4429c8 compares the default footprint against one-GOB tiles for MINIMAL_LAYOUT. Keep the default if
+       equal; otherwise use tile H=D=0. Packaged layouts override this choice */
+    if ((d->flags & 0x200) && !d->pkg_block_h) {
         uint64_t minimal = layer_bytes(d, dpl, layered, w, h, z, 0, 0, t);
         if (minimal != ls) { tileH = tileD = 0; ls = minimal; }
     }

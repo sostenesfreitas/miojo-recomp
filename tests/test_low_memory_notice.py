@@ -14,6 +14,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ["--cc", "gcc"]
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,7 +93,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="low-memory-") as tmp:
         c, exe = Path(tmp) / "fixture.c", Path(tmp) / "fixture"
         c.write_text(FIXTURE.replace("@@CODE@@", code), encoding="utf-8")
-        r = subprocess.run([args.cc, "-std=gnu11", "-O1", str(c), "-o", str(exe)], capture_output=True, text=True, timeout=120)
+        r = subprocess.run([args.cc, "-std=gnu11", "-include", ENV_ON_H, "-O1", str(c), "-o", str(exe)], capture_output=True, text=True, timeout=120)
         if r.returncode:
             print(r.stdout + r.stderr)
             raise SystemExit("the fixture did not build")

@@ -95,7 +95,7 @@ class CompileRetryJobsTests(unittest.TestCase):
                           OBJ_CACHE=str(self.cache), PLANNED={(job[1], job[2]): keys[job[2]] for job in jobs},
                           cache_put=lambda obj, key: cached.append((obj, key)), counted=counted,
                           expected={str(self.source): [11, 22]}, pending=[11, 22], eta_jobs=2,
-                          eta_left=lambda pending, jobs: sum(pending) / jobs)
+                          eta_left=lambda pending, jobs: sum(pending) / jobs, src_size=os.path.getsize)
         log = io.StringIO()
         with redirect_stdout(log):
             result = self.scope['run_compile_jobs']()

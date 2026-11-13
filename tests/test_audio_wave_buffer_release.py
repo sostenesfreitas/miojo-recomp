@@ -15,6 +15,9 @@ import subprocess
 import sys
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 ROOT = Path(__file__).resolve().parents[1]
 APPEND = "_ZN2nn5audio16AppendWaveBufferEPNS0_9VoiceTypeEPKNS0_10WaveBufferE"
 RELEASED = "_ZN2nn5audio21GetReleasedWaveBufferEPNS0_9VoiceTypeE"
@@ -33,7 +36,7 @@ def main():
     source = args.source.read_text(encoding="utf-8")
     constants = []
     for name in ("FRAME", "RATE", "AU_MAGIC", "MAX_VOICES", "MAX_MIXES", "MAX_SPLITTERS", "MAX_SPLIT_DESTS",
-                 "MAX_CH", "MAX_BUF", "MAX_WB", "MAX_REL"):
+                 "MAX_CH", "MAX_BUF", "MAX_WB", "MAX_REL", "MAX_EFFECTS"):
         matches = re.findall(r"^#define " + name + r"\s+[^\n]+", source, re.M)
         assert len(matches) == 1, name
         constants.extend(matches)
@@ -43,12 +46,18 @@ def main():
 static Voice voices[MAX_VOICES];
 static Mix mixes[MAX_MIXES];
 static Splitter splitters[MAX_SPLITTERS];
+static uint64_t split_bq_epoch;
 static int sink_mix = -1;
 /* (the samples are not looked at here: only which buffer the mixer is on) */
 static void source_frame(Voice *v, const WB *w, int64_t s, float *out) { (void)v; (void)w; (void)s; out[0] = 0; }
 static void adpcm_seek(Voice *v, const WB *w) { (void)v; (void)w; }
 static int16_t adpcm_sample(Voice *v, const WB *w, int64_t s) { (void)v; (void)w; (void)s; return 0; }
 """]
+    # The merged renderer's command application also owns Aux state. Include its
+    # production declarations/reset helpers without replacing the wave-buffer code.
+    aux_start = source.index("typedef struct {", source.index("/* ---- Aux:"))
+    actual.append(source[aux_start:source.index("static int aux_ring_read(", aux_start)])
+    actual.append(helper.block(source, "static void aux_reset("))
     actual.extend(helper.block(source, marker) for marker in (
         "static void put_handle(", "static int get_handle(", "static int voice_index(", "static Voice *voice_of(",
         "static WB read_wb(", "static void release_wb(", "static int next_source_frame("))
@@ -60,7 +69,7 @@ static int16_t adpcm_sample(Voice *v, const WB *w, int64_t s) { (void)v; (void)w
         folder = Path(temporary)
         (folder / "actual_audio_wave_buffers.inc").write_text("\n\n".join(actual), encoding="utf-8")
         executable = folder / "fixture.exe"
-        command = [args.cc, "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-I" + str(folder),
+        command = [args.cc, "-std=c11", "-include", ENV_ON_H, "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-I" + str(folder),
                    str(ROOT / "tests/audio_wave_buffer_release_test.c"), "-lm", "-o", str(executable)]
         for command in (command, [str(executable)]):
             result = subprocess.run(command, creationflags=flags, capture_output=True, text=True,

@@ -125,7 +125,12 @@ void main() {
     offset += (pos.x >> GOB_SIZE_X_SHIFT) << x_shift;
     offset += swizzle;
 
-    const uvec4 texel = ReadTexel(offset);
     const ivec3 coord = ivec3(gl_GlobalInvocationID) + destination;
+    // (Frizti/Fritchii f52631cf6) The workgroups (32x32) round the dispatch up past the level: a store outside the image is
+    // undefined, and on AMD it lands in other memory (see astc_decoder.comp)
+    if (any(greaterThanEqual(coord, imageSize(output_image)))) {
+        return;
+    }
+    const uvec4 texel = ReadTexel(offset);
     imageStore(output_image, coord, texel);
 }

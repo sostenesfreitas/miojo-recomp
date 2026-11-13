@@ -10,6 +10,21 @@ public partial class App : Application
     // Why it stopped is one "error <text>" line on stdout (the stream a launcher reads) and again on stderr
     protected override void OnStartup(StartupEventArgs e)
     {
+        try { _ = BuilderHome.Base; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            var why = "The Builder home could not be opened. " + error.Message;
+            if (e.Args.Length > 0 && e.Args[0] == "--cli")
+            {
+                using var output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true };
+                output.WriteLine("error " + why);
+                Console.Error.WriteLine("error " + why);
+            }
+            else MessageBox.Show(why, "Hookshot Builder", MessageBoxButton.OK, MessageBoxImage.Error);
+            // StartupUri is processed after this handler; a rejected home must never construct MainWindow.
+            Environment.Exit(1);
+            return;
+        }
         if (e.Args.Length > 0 && e.Args[0] == "--cli")
         {
             Environment.Exit(Cli(e.Args.Skip(1).ToList()));

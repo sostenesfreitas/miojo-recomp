@@ -6,6 +6,9 @@ import shutil
 import subprocess
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ["--cc", "gcc"]
 
 
@@ -42,7 +45,7 @@ def main():
         if Path(args.cc).name.lower() in ("cl", "cl.exe"):
             flags = ["/nologo", "/TC", "/W4", "/WX", f"/Fe:{executable}"]
         else:
-            flags = ["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-Wno-unknown-warning-option", "-Wno-unused-but-set-global",
+            flags = ["-std=c11", "-include", ENV_ON_H, "-O0", "-Wall", "-Wextra", "-Werror", "-Wno-unknown-warning-option", "-Wno-unused-but-set-global",
                      "-o", str(executable)]   # (newer clang: a fixture global set and never read)
         subprocess.run([args.cc, *flags, str(c_file)], cwd=temp, check=True)
         subprocess.run([str(executable)], check=True)

@@ -6,6 +6,9 @@
    initializers) is created on first use. Mutexes are always recursive: relocking a non-recursive nn::os mutex
    would be a game bug on hardware anyway. */
 #include "hos.h"
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 #include <stdlib.h>
 #include <stddef.h>
 #include <string.h>
@@ -90,7 +93,7 @@ static Obj *spares;
 
 static void bury_locked(Obj *o) {
     static int keep = -1;
-    if (keep < 0) keep = getenv("HOS_KEEP_DEAD_OBJECTS") != NULL;
+    if (keep < 0) keep = env_on("HOS_KEEP_DEAD_OBJECTS");
     if (keep) return;
     const int64_t now = hos_now_ns();
     while (grave_count && now - grave_times[grave_head] > 30000000000LL) {
@@ -204,7 +207,7 @@ static Obj *obj_nockpt(uint64_t key, int kind) {
        thread alone ran; each actor has its own mutexes) */
     static _Thread_local struct { uint64_t key; Obj *o; } cache[1024];
     static int off = -1;
-    if (off < 0) off = getenv("HOS_NO_OBJ_CACHE") != NULL;
+    if (off < 0) off = env_on("HOS_NO_OBJ_CACHE");
     if (!off) {
         const unsigned i = (unsigned)((key * 0x9E3779B97F4A7C15ULL) >> 54);
         Obj *o = cache[i].o;
@@ -220,7 +223,7 @@ static Obj *obj_nockpt(uint64_t key, int kind) {
 
 static Obj *obj_lookup(uint64_t key, int kind) {
     static int locked_reads = -1;
-    if (locked_reads < 0) locked_reads = getenv("HOS_SYNC_TABLE_LOCK") != NULL;
+    if (locked_reads < 0) locked_reads = env_on("HOS_SYNC_TABLE_LOCK");
     Obj *o;
     if (!locked_reads) {
         if ((o = find_unlocked(key, kind))) return o;
@@ -332,18 +335,10 @@ static void poke_multiwait(Obj *o) {
 
 #if (defined(__x86_64__) || defined(_M_X64)) && !defined(__EMSCRIPTEN__)
 #include <emmintrin.h>
-static int64_t spin_ns(void) {
-    static int64_t ns = -1;
-    if (ns < 0) {
-        const char *e = getenv("HOS_SPIN_US");
-        ns = (e ? atoll(e) : 20) * 1000;
-    }
-    return ns;
-}
 static int spin_begin(Obj *o, int *misses) {
-    if (spin_ns() <= 0) return 0;
+    if (hos_spin_ns() <= 0) return 0;
     static int adaptive = -1;
-    if (adaptive < 0) adaptive = getenv("HOS_SPIN_ALWAYS") == NULL;
+    if (adaptive < 0) adaptive = !env_on("HOS_SPIN_ALWAYS");
     *misses = __atomic_load_n(&o->spin_misses, __ATOMIC_RELAXED);
     return !(adaptive && *misses >= 4 && (__atomic_add_fetch(&o->spin_waits, 1, __ATOMIC_RELAXED) & 31));
 }
@@ -354,7 +349,7 @@ static void spin_end(Obj *o, int misses, int ok) {
 static void spin_until_set(Obj *o, volatile int *flag) {
     int misses;
     if (*flag > 0 || !spin_begin(o, &misses)) return;
-    const int64_t end = hos_now_ns() + spin_ns();
+    const int64_t end = hos_now_ns() + hos_spin_ns();
     for (;;) {
         for (int i = 0; i < 16; i++) {
             if (*flag > 0) {
@@ -372,7 +367,7 @@ static void spin_until_set(Obj *o, volatile int *flag) {
 static void spin_until_free(Obj *o) {
     int misses;
     if (!__atomic_load_n(&o->owner, __ATOMIC_RELAXED) || !spin_begin(o, &misses)) return;
-    const int64_t end = hos_now_ns() + spin_ns();
+    const int64_t end = hos_now_ns() + hos_spin_ns();
     for (;;) {
         for (int i = 0; i < 16; i++) {
             if (!__atomic_load_n(&o->owner, __ATOMIC_RELAXED)) {
@@ -418,6 +413,7 @@ static int mutex_take_owed(Obj *m, HosThread *self) {   /* (the woken waiter the
 static void mutex_give(Obj *m) {   /* (the owner's count already 0) */
     __atomic_exchange_n(&m->owner, (HosThread *)NULL, __ATOMIC_SEQ_CST);
     if (__atomic_load_n(&m->mwait, __ATOMIC_SEQ_CST)) {
+        HOS_CHAIN(HOS_CHAIN_SIGNAL, m->key);
         AcquireSRWLockExclusive(&m->lk);
         ReleaseSRWLockExclusive(&m->lk);
         /* (all of them while one is owed it: woken alone, another sleeper would fail its take and sleep again) */
@@ -431,16 +427,18 @@ static void mutex_lock_owed(Obj *m, uint64_t guest, int owed) {
     if (!owed) { mutex_lock(m, guest, NULL); return; }
     HosThread *self = hos_self();
     if (mutex_take_owed(m, self)) { m->count = 1; return; }
+    HOS_CHAIN(HOS_CHAIN_WAIT, m->key);
     AcquireSRWLockExclusive(&m->lk);
     __atomic_add_fetch(&m->mwait, 1, __ATOMIC_SEQ_CST);
     while (!mutex_take_owed(m, self)) hos_cv_sleep(&m->cv, &m->lk, 2000);
     __atomic_sub_fetch(&m->mwait, 1, __ATOMIC_SEQ_CST);
     ReleaseSRWLockExclusive(&m->lk);
+    HOS_CHAIN(HOS_CHAIN_WOKE, m->key);
     m->count = 1;
 }
 static int handoff_on(void) {   /* HOS_NO_HANDOFF=1: the old way (any thread may take a mutex a signal's waiter is owed) */
     static int v = -1;
-    if (v < 0) v = getenv("HOS_NO_HANDOFF") ? 0 : 1;
+    if (v < 0) v = env_on("HOS_NO_HANDOFF") ? 0 : 1;
     return v;
 }
 /* a waiter in: (cv->lk held) */
@@ -477,6 +475,8 @@ static void mutex_lock(Obj *m, uint64_t guest, Ctx *c) {
     if (trace_ms < 0) { const char *e = getenv("HOS_MUTEX_TRACE"); trace_ms = e ? atoi(e) : 0; }
     HosThread *holder = __atomic_load_n(&m->owner, __ATOMIC_RELAXED);
     const int64_t t0 = trace_ms && holder ? hos_now_ns() : 0;
+    const int chain = hos_chain_on;
+    if (chain) hos_chain_note(HOS_CHAIN_WAIT, m->key, c ? c->x[30] : 0);
     AcquireSRWLockExclusive(&m->lk);
     __atomic_add_fetch(&m->mwait, 1, __ATOMIC_SEQ_CST);
     {   /* (EvilOOT, 11-07: a wait of over 10 s says who holds the mutex, once per wait: the freeze after Load) */
@@ -493,6 +493,7 @@ static void mutex_lock(Obj *m, uint64_t guest, Ctx *c) {
     }
     __atomic_sub_fetch(&m->mwait, 1, __ATOMIC_SEQ_CST);
     ReleaseSRWLockExclusive(&m->lk);
+    if (chain) hos_chain_note(HOS_CHAIN_WOKE, m->key, c ? c->x[30] : 0);
     m->count = 1;
     if (t0) {
         const int64_t waited = hos_now_ns() - t0;
@@ -578,6 +579,7 @@ HLE(_ZN2nn2os25FinalizeConditionVariableEPNS0_21ConditionVariableTypeE) { drop(A
 HLE(_ZN2nn2os23SignalConditionVariableEPNS0_21ConditionVariableTypeE) {
     Obj *cv = obj(ARG(0), K_COND);
     if (watched_cv(ARG(0))) watch_log("signal", watch_mutex(), ARG(0), c, NULL);
+    HOS_CHAIN(HOS_CHAIN_SIGNAL, cv->key);
     AcquireSRWLockExclusive(&cv->lk);
     cv_reserve(cv);
     cv->gen++;
@@ -598,9 +600,11 @@ HLE(_ZN2nn2os21WaitConditionVariableEPNS0_21ConditionVariableTypeEPNS0_9MutexTyp
     cv_enter(cv, m);
     /* release the guest mutex fully while holding the condvar's lock: a signal cannot slip in between */
     const int count = mutex_release_all(m);
+    HOS_CHAIN(HOS_CHAIN_WAIT, cv->key);
     while (cv->gen == gen) hos_cv_sleep(&cv->cv, &cv->lk, INFINITE);
     const int owed = cv_leave(cv, m);
     ReleaseSRWLockExclusive(&cv->lk);
+    HOS_CHAIN(HOS_CHAIN_WOKE, cv->key);
     if (w) watch_log(owed ? "cv woken, owed the mutex" : "cv woken", ARG(1), ARG(0), c, m);
     mutex_lock_owed(m, ARG(1), owed);
     m->count = count;
@@ -614,6 +618,7 @@ static void event_init(uint64_t key, int signaled, int clear_mode) {
     e->autoclear = clear_mode == 1;   /* EventClearMode_AutoClear = 1, ManualClear = 0 */
 }
 static void event_signal(Obj *e) {
+    HOS_CHAIN(HOS_CHAIN_SIGNAL, e->key);
     AcquireSRWLockExclusive(&e->lk);
     e->signaled = 1;
     if (wake_lat_on()) e->sig_ns = hos_now_ns();
@@ -632,7 +637,7 @@ static void event_clear(Obj *e) {
    cost on the frame's chain of threads) */
 static int wake_lat_on(void) {
     static int on = -1;
-    if (on < 0) on = getenv("HOS_WAKE_LAT") != NULL;
+    if (on < 0) on = env_on("HOS_WAKE_LAT");
     return on;
 }
 static void wake_lat_note(int how, int64_t lat_ns) {   /* how: 0 ready, 1 spun, 2 slept */
@@ -667,6 +672,8 @@ static void wake_lat_note(int how, int64_t lat_ns) {   /* how: 0 ready, 1 spun, 
 static int event_wait(Obj *e, int64_t timeout_ns, int try_only) {
     int64_t deadline = timeout_ns > 0 ? hos_now_ns() + timeout_ns : 0;
     const int was_set = e->signaled > 0;
+    const int chain = !try_only && !was_set && hos_chain_on;
+    if (chain) hos_chain_note(HOS_CHAIN_WAIT, e->key, 0);
     if (!try_only) spin_until_set(e, &e->signaled);
     int slept = 0;
     AcquireSRWLockExclusive(&e->lk);
@@ -680,6 +687,7 @@ static int event_wait(Obj *e, int64_t timeout_ns, int try_only) {
     if (got && !try_only && wake_lat_on()) wake_lat_note(slept ? 2 : spun ? 1 : 0, slept ? hos_now_ns() - e->sig_ns : 0);
     if (got && e->autoclear) e->signaled = 0;
     ReleaseSRWLockExclusive(&e->lk);
+    if (chain) hos_chain_note(HOS_CHAIN_WOKE, e->key, 0);
     return got;
 }
 
@@ -705,10 +713,10 @@ HLE(_ZN2nn2os10ClearEventEPNS0_9EventTypeE) { event_clear(obj(ARG(0), K_EVENT));
    longest first: what a thread blocks on */
 static int logged_wait(Ctx *c, Obj *e, int64_t timeout_ns, int try_only, const char *what) {
     static int on = -1, long_waits = -1;
-    if (on < 0) on = getenv("HOS_WAIT_LOG") != NULL;
+    if (on < 0) on = env_on("HOS_WAIT_LOG");
     /* HOS_LONG_WAITS=1 (diagnostic): an untimed wait still blocked after 5 s is logged (thread, caller), then goes on:
        what a stuck game waits for */
-    if (long_waits < 0) long_waits = getenv("HOS_LONG_WAITS") != NULL;
+    if (long_waits < 0) long_waits = env_on("HOS_LONG_WAITS");
     if (long_waits && !try_only && timeout_ns == 0) {
         static int logged;
         if (event_wait(e, 5000000000LL, 0)) return 1;
@@ -889,13 +897,17 @@ static void sema_init(uint64_t key, int initial, int max) {
     s->sem_max = max;
 }
 static void sema_acquire(Obj *s) {
+    const int chain = s->sem <= 0 && hos_chain_on;
+    if (chain) hos_chain_note(HOS_CHAIN_WAIT, s->key, 0);
     spin_until_set(s, &s->sem);
     AcquireSRWLockExclusive(&s->lk);
     while (s->sem <= 0) hos_cv_sleep(&s->cv, &s->lk, INFINITE);
     s->sem--;
     ReleaseSRWLockExclusive(&s->lk);
+    if (chain) hos_chain_note(HOS_CHAIN_WOKE, s->key, 0);
 }
 static void sema_release(Obj *s, int n) {
+    HOS_CHAIN(HOS_CHAIN_SIGNAL, s->key);
     AcquireSRWLockExclusive(&s->lk);
     s->sem += n;
     if (s->sem_max && s->sem > s->sem_max) s->sem = s->sem_max;
@@ -925,7 +937,7 @@ static void queue_init(uint64_t key, int capacity) {
 static void queue_trace(Obj *q, uint64_t v, const char *what) {
     static int on = -1;
     static volatile LONG n;
-    if (on < 0) on = getenv("HOS_QUEUE_TRACE") != NULL;
+    if (on < 0) on = env_on("HOS_QUEUE_TRACE");
     if (on && InterlockedIncrement(&n) <= 400)
         hos_log("queue: %s %s %#llx value %#llx (len %d)", hos_thread_name(hos_self()), what, (unsigned long long)q->key,
                 (unsigned long long)v, q->qlen);
@@ -933,6 +945,7 @@ static void queue_trace(Obj *q, uint64_t v, const char *what) {
 /* mode: 0 send (back), 1 jam (front). try: do not block. Returns 1 if done. */
 static int queue_put(Obj *q, uint64_t v, int jam, int try_only) {
     queue_trace(q, v, jam ? "jam" : "send");
+    HOS_CHAIN(HOS_CHAIN_SIGNAL, q->key);
     AcquireSRWLockExclusive(&q->lk);
     while (q->qlen == q->qcap) {
         if (try_only) { ReleaseSRWLockExclusive(&q->lk); return 0; }
@@ -955,12 +968,18 @@ static int queue_put(Obj *q, uint64_t v, int jam, int try_only) {
 static int queue_get(Obj *q, uint64_t *out, int take, int64_t timeout_ns) {
     int64_t deadline = timeout_ns > 0 ? hos_now_ns() + timeout_ns : 0;
     const int was_set = q->qlen > 0;
+    const int chain = timeout_ns != 0 && !was_set && hos_chain_on;
+    if (chain) hos_chain_note(HOS_CHAIN_WAIT, q->key, 0);
     if (timeout_ns != 0) spin_until_set(q, &q->qlen);
     int slept = 0;
     AcquireSRWLockExclusive(&q->lk);
     const int spun = !was_set && q->qlen;
     while (!q->qlen) {
-        if (timeout_ns == 0 || (timeout_ns > 0 && !wait_until(q, deadline))) { ReleaseSRWLockExclusive(&q->lk); return 0; }
+        if (timeout_ns == 0 || (timeout_ns > 0 && !wait_until(q, deadline))) {
+            ReleaseSRWLockExclusive(&q->lk);
+            if (chain) hos_chain_note(HOS_CHAIN_WOKE, q->key, 0);
+            return 0;
+        }
         if (timeout_ns < 0) hos_cv_sleep(&q->cv, &q->lk, INFINITE);
         slept = 1;
     }
@@ -971,6 +990,7 @@ static int queue_get(Obj *q, uint64_t *out, int take, int64_t timeout_ns) {
         q->qlen--;
     }
     ReleaseSRWLockExclusive(&q->lk);
+    if (chain) hos_chain_note(HOS_CHAIN_WOKE, q->key, 0);
     if (take) {
         WakeAllConditionVariable(&q->cv);
         poke_multiwait(q);
@@ -1136,13 +1156,15 @@ HLE(_ZN2nn2os21UnlinkMultiWaitHolderEPNS0_19MultiWaitHolderTypeE) {
 static uint64_t wait_any(uint64_t multiwait, int64_t timeout_ns) {
     Obj *mw = obj(multiwait, K_MULTIWAIT);
     int64_t deadline = timeout_ns > 0 ? hos_now_ns() + timeout_ns : 0;
+    const int chain = timeout_ns != 0 && hos_chain_on;   /* (outside mw_lock: the scan's region calls nothing else) */
+    if (chain) hos_chain_note(HOS_CHAIN_WAIT, multiwait, 0);
     AcquireSRWLockExclusive(&mw_lock);
     InterlockedIncrement(&mw_waiting);
-    uint64_t found = 0;
+    uint64_t found = 0, found_watch = 0;
     for (;;) {
         int64_t wake = deadline ? deadline : INT64_MAX;
         for (int i = 0; i < mw->nlinks && !found; i++) {
-            if (holder_ready(mw->links[i])) found = mw->links[i]->key;
+            if (holder_ready(mw->links[i])) found = mw->links[i]->key, found_watch = holder_watch(mw->links[i]);
             else if (mw->links[i]->sem_max == H_TIMER) {
                 const int64_t due = obj_nockpt(mw->links[i]->event, K_TIMER)->due_ns;
                 if (due && due < wake) wake = due;
@@ -1156,6 +1178,7 @@ static uint64_t wait_any(uint64_t multiwait, int64_t timeout_ns) {
     }
     InterlockedDecrement(&mw_waiting);
     ReleaseSRWLockExclusive(&mw_lock);
+    if (chain) hos_chain_note(HOS_CHAIN_WOKE, found_watch ? found_watch : multiwait, 0);   /* (the object that ended it) */
     return found;
 }
 HLE(_ZN2nn2os7WaitAnyEPNS0_13MultiWaitTypeE) { RET(wait_any(ARG(0), -1)); }
@@ -1230,11 +1253,13 @@ HLE(_ZN2nn2os26TimedWaitConditionVariableEPNS0_21ConditionVariableTypeEPNS0_9Mut
     cv_enter(cv, m);
     const int count = mutex_release_all(m);
     int signaled = 1;
+    HOS_CHAIN(HOS_CHAIN_WAIT, cv->key);
     while (cv->gen == gen) {
         if (!wait_until(cv, deadline) || hos_now_ns() >= deadline) { signaled = cv->gen != gen; break; }
     }
     const int owed = cv_leave(cv, m);
     ReleaseSRWLockExclusive(&cv->lk);
+    HOS_CHAIN(HOS_CHAIN_WOKE, cv->key);
     mutex_lock_owed(m, ARG(1), owed);
     m->count = count;
     RET(signaled);

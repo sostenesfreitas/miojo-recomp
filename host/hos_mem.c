@@ -1,6 +1,9 @@
 /* Guest memory map: the system region (our own objects), the heap, address regions.
    The whole 4 GB window is committed up front (hos_main.c), so "mapping" here is only bookkeeping and zeroing. */
 #include "hos.h"
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +56,25 @@ void hos_mem_init(uint64_t image_end) {
 }
 
 uint64_t hos_region_floor(void) { return region_floor; }
+
+/* (hookshot, the control bridge: host/control.c) Whether [addr, addr + size) is wholly inside memory the runtime has
+   mapped for the game: the image, the system region in use (our own objects), the heap, or an address region. A read or
+   write outside it is refused, never faulted. The classes it may fall in (0 none): */
+enum { HOS_MEM_IMAGE = 1, HOS_MEM_SYSTEM, HOS_MEM_HEAP, HOS_MEM_REGION };
+int hos_mem_region(uint64_t addr, uint64_t size) {
+    uint64_t end;
+    if (!size || __builtin_add_overflow(addr, size, &end) || !hos_guest_range(addr, size)) return 0;   /* (the window first) */
+    if (addr >= hos_image_base && end <= hos_image_end) return HOS_MEM_IMAGE;
+    int cls = 0;
+    LOCK();
+    if (addr >= HOS_SYSTEM_BASE && end <= sys_next) cls = HOS_MEM_SYSTEM;
+    else if (addr >= HOS_HEAP_BASE && end <= HOS_HEAP_BASE + hos_heap_size) cls = HOS_MEM_HEAP;
+    else
+        for (int i = 0; i < nregions && !cls; i++)
+            if (addr >= regions[i].addr && end <= regions[i].addr + regions[i].size) cls = HOS_MEM_REGION;
+    UNLOCK();
+    return cls;
+}
 
 uint64_t hos_sys_alloc(uint64_t size, uint64_t align) {
     LOCK();
@@ -127,7 +149,7 @@ static void discard_pages(uint64_t addr, uint64_t size) {
     if (!hos_guest_range(addr, size)) return;   /* (hookshot: guest pages only; Linux's discard zeroes what it is given) */
     const uint64_t lo = (addr + 0xFFF) & ~0xFFFULL, hi = (addr + size) & ~0xFFFULL;
     static int keep = -1;
-    if (keep < 0) keep = getenv("HOS_KEEP_FREED_PAGES") != NULL;
+    if (keep < 0) keep = env_on("HOS_KEEP_FREED_PAGES");
     if (hi <= lo || keep) return;
 #if defined(_WIN32) && !defined(__EMSCRIPTEN__)
     extern int hos_large_pages;   /* (hos_main.c: large pages cannot be discarded) */
@@ -149,6 +171,16 @@ static void discard_pages(uint64_t addr, uint64_t size) {
     if (rx_guest_imported(lo, hi)) memset(GP(lo), 0, (size_t)(hi - lo));
     else hos_posix_guest_discard(GP(lo), (size_t)(hi - lo));
 #endif
+}
+
+/* (hookshot) the address regions (hos_region_alloc's), at most cap of them into out ({start, end}); how many there are. For
+   host/prompts.c: where the game keeps its resources */
+int hos_regions(uint64_t (*out)[2], int cap) {
+    LOCK();
+    const int n = nregions;
+    for (int i = 0; i < n && i < cap; i++) out[i][0] = regions[i].addr, out[i][1] = regions[i].addr + regions[i].size;
+    UNLOCK();
+    return n;
 }
 
 void hos_region_free(uint64_t addr) {
@@ -202,7 +234,7 @@ HLE(_ZN2nn2os17SetMemoryHeapSizeEm) {
     }
     /* HOS_PREFAULT=1 (experiment): the new heap pages touched now (a zero written to fresh, zero memory), so that the
        game's first touches while streaming are not page faults (which may hold up the renderer's write-watch scans) */
-    if (size > hos_heap_size && getenv("HOS_PREFAULT")) {
+    if (size > hos_heap_size && env_on("HOS_PREFAULT")) {
         const int64_t t0 = hos_now_ns();
         for (uint64_t a = HOS_HEAP_BASE + hos_heap_size; a < HOS_HEAP_BASE + size; a += 4096) *(volatile uint8_t *)GP(a) = 0;
         hos_log("heap: %llu MB prefaulted in %.0f ms", (unsigned long long)((size - hos_heap_size) >> 20), (hos_now_ns() - t0) / 1e6);
@@ -255,7 +287,7 @@ HLE(_ZN2nn2os19AllocateMemoryPagesEmm) {
         return;
     }
     static int zero_all = -1;
-    if (zero_all < 0) zero_all = getenv("HOS_ZERO_ALL_PAGES") != NULL;
+    if (zero_all < 0) zero_all = env_on("HOS_ZERO_ALL_PAGES");
     if (end > (1ULL << 32) && !zero_all) {
         /* (mkw-recomp) above 4 GB the used-page bitmap does not reach, and zeroing the whole range wiped live data
            when the game mapped pages over memory it already used (a heap's list lost its links). Horizon's rule

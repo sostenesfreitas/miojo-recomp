@@ -36,8 +36,8 @@ def main():
     template = (ROOT / "tests/display_pointer_test.cpp").read_text(encoding="utf-8")
     template = template.replace("/* ACTUAL_SDL_ADAPTER */", function(adapter, "void hos_sdl_mouse_position("))
     for name, source, signatures in (
-        ("WINDOWS", win, ("int hos_mouse_pointer(", "static void pointer_publish_at(", "static void pointer_update(", "static void mouse_capture(", "int hos_mouse_game_pointer(", "static void game_menu_press(", "static void menu_press(", "static void menus_mouse(")),
-        ("SDL", sdl, ("int hos_mouse_pointer(", "static void pointer_publish_at(", "static void pointer_update(", "static void drawable_size(", "static uint32_t sdl_button_bit(")),
+        ("WINDOWS", win, ("int hos_mouse_pointer(", "static void pointer_publish_at(", "static void pointer_update(", "static void mouse_capture(", "int hos_mouse_game_pointer(", "static void game_menu_press(", "static void menu_press(", "static void menus_mouse(", "static void menu_mouse(")),
+        ("SDL", sdl, ("int hos_mouse_pointer(", "static void pointer_publish_at(", "static void pointer_update(", "static void drawable_size(", "static uint32_t sdl_button_bit(", "void hos_posix_post_message(", "static void menu_mouse(")),
     ):
         # The current baseline lacks pointer_update: retain its actual consumer for the causal comparison.
         functions = [function(source, sig) for sig in signatures if sig in source]

@@ -37,7 +37,7 @@ def main():
                 included.add(dep)
                 todo.append(dep)
     copied_render = "cp -a gpu/render/*.h" in script
-    copied_vk_loop = "grep -rhoE 'gpu/vk/[A-Za-z0-9_]+[.]h' host" in script
+    copied_vk_loop = "grep -rhoE 'gpu/vk/[A-Za-z0-9_/]+[.]h' host" in script   # (with the folders below gpu/vk: compat/)
     missing = []
     for rel in sorted(included):
         if rel.startswith("render/") and rel.endswith(".h") and copied_render:

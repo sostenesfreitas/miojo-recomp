@@ -12,6 +12,7 @@
 
 #include <spirv/unified1/spirv.hpp>
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
+#include "shader_recompiler/backend/spirv/mma_layout.h"
 #include "shader_recompiler/exception.h"
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/ir_emitter.h"
@@ -800,6 +801,44 @@ static void check_vertex_load_controls(bool inline_128, const char* name) {
     std::printf("PASS: %s\n", name);
 }
 
+// (mma_layout.h global_table_loop, RX_VK_GM_LOOP=1) a global load whose only storage buffer is a table of 16 entries, searched in
+// the loop: CI validates the module, the return inside the loop's body with it
+static void check_table_loop() {
+    ObjectPool<IR::Inst> inst_pool;
+    IR::Block block{inst_pool};
+    IR::Program program;
+    program.stage = Stage::Compute;
+    program.workgroup_size = {1, 1, 1};
+    program.blocks.push_back(&block);
+    program.post_order_blocks.push_back(&block);
+    IR::AbstractSyntaxNode node{};
+    node.type = IR::AbstractSyntaxNode::Type::Block;
+    node.data.block = &block;
+    program.syntax_list.push_back(node);
+    program.syntax_list.push_back({.type = IR::AbstractSyntaxNode::Type::Return});
+    IR::IREmitter ir{block};
+    (void)ir.LoadGlobal32(ir.Imm64(u64{0x0000000100001000}));
+    ir.Epilogue();
+    TestEnvironment env;
+    Optimization::CollectShaderInfoPass(env, program);
+    program.info.constant_buffer_descriptors.push_back({0, 1});
+    program.info.storage_buffers_descriptors.push_back({0, 0x40, 16, false});
+    program.info.used_constant_buffer_types |= IR::Type::U32 | IR::Type::U32x2;
+    Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    profile.support_int64 = true;
+    profile.support_descriptor_aliasing = true;
+    profile.min_ssbo_alignment = 16;
+    Shader::Backend::SPIRV::global_table_loop = true;
+    const auto module = inspect(save_module("ssbo-table-loop", EmitSPIRV(profile, program)));
+    Shader::Backend::SPIRV::global_table_loop = false;
+    bool loop = false;
+    for (const auto& inst : module.instructions)
+        if (inst.op == spv::Op::OpLoopMerge && inst.words[2] == spv::LoopControlDontUnrollMask) loop = true;
+    if (!loop) fail("the storage buffer table was not searched in a DontUnroll loop");
+    std::printf("PASS: storage buffer table searched in a loop\n");
+}
+
 int main(int argc, char** argv) {
     if (argc == 3 && std::string(argv[1]) == "--cas-loops") {
         output_dir = argv[2];
@@ -841,4 +880,5 @@ int main(int argc, char** argv) {
     check_unsupported_profile();
     check_vertex_load_controls(false, "vertex-global-load-default");
     check_vertex_load_controls(true, "vertex-global-load-inline128");
+    check_table_loop();
 }

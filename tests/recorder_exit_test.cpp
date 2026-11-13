@@ -3,10 +3,10 @@
 // Built twice: with RX_EXIT_DLL, a DLL holding the real vk_work.h / vk_recorder.h (as hookshot_vk.dll does) and a fake vkCmdDraw;
 // without, an exe that loads it, has the recorder parked in idle() holding sleep_mu (the test hook RX_REC_TEST_HOOKS), and calls
 // ExitProcess, as the window's close (host/display.c) and svcExitProcess do. Windows ends the recorder thread first, then runs the
-// DLL's global destructors. A destructor that takes sleep_mu, now owned by a dead thread, either hangs or (Windows 11, this
-// toolchain's static CRT: measured) has the process ended on the spot, the DLL's other destructors skipped. So: the exe must end
-// with code 0 within the watchdog's 20 s (it ends only this child), and the sentinel below, destroyed after the recorder's global,
-// must print its line.
+// DLL's global destructors. A destructor that takes sleep_mu, now owned by a dead thread, either hangs (MinGW-w64 GCC and
+// clang with libstdc++; measured on Windows 11) or has the process ended on the spot, the DLL's other destructors skipped
+// (llvm-mingw's libc++, clang for the MSVC target). So: the exe must end with code 0 within the watchdog's 20 s (it ends only
+// this child), and the sentinel below, destroyed after the recorder's global, must print its line.
 #ifdef RX_EXIT_DLL
 #define RX_REC_TEST_HOOKS 1
 #include <atomic>
@@ -18,14 +18,18 @@
 
 extern "C" __declspec(dllimport) void* __stdcall GetStdHandle(unsigned long);
 extern "C" __declspec(dllimport) int __stdcall WriteFile(void*, const void*, unsigned long, unsigned long*, void*);
-/// (made before the recorder's global, so destroyed after it: its line shows the DLL's destructors all ran)
-static struct Sentinel {
+/// (made before the recorder's global, so destroyed after it: its line shows the DLL's destructors all ran. The recorder's
+/// global is an inline variable, whose dynamic initialization is only partially ordered against this file's statics: with
+/// llvm-mingw it was made first, so this line printed before the old destructor ended the process and the broken variant
+/// passed. init_priority makes this object first on every compiler that builds the test)
+struct Sentinel {
     ~Sentinel() {
         static const char line[] = "DLL detach: the global destructors ran to the end\n";
         unsigned long n;
         WriteFile(GetStdHandle((unsigned long)-11), line, sizeof line - 1, &n, nullptr);
     }
-} g_sentinel;
+};
+static Sentinel g_sentinel __attribute__((init_priority(101)));
 
 #include "vk_work.h"
 

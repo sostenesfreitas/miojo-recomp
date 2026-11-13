@@ -11,6 +11,9 @@
 #include <direct.h>
 
 #include "vk_dump.h"
+#ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
+#include "hookshot_env.h"
+#endif
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 
 namespace mkwvk {
@@ -224,7 +227,7 @@ void write_item(Item& it) {
         }
     }
     logf("%s", line);
-    static const bool no_png = getenv("RX_VK_DUMP_NOPNG") != nullptr;   // (statistics only)
+    static const bool no_png = env_on("RX_VK_DUMP_NOPNG");   // (statistics only)
     if (no_png) return;
     // (RX_VK_DUMP_RAW: float pictures also as raw RGBA32F)
     char path[1024];
@@ -232,7 +235,7 @@ void write_item(Item& it) {
     for (char* c = path + dir.size() + 1; *c; c++)
         if (*c == ' ' || *c == ':' || *c == '/' || *c == '\\') *c = '_';
     write_png(path, rgba.data(), it.w, it.h);
-    static const bool raw = getenv("RX_VK_DUMP_RAW") != nullptr;
+    static const bool raw = env_on("RX_VK_DUMP_RAW");
     if (raw && it.kind == KIND_FLOAT) {
         std::string rp(path);
         rp.replace(rp.size() - 4, 4, ".f32");
@@ -315,7 +318,7 @@ void dump_image(VkCommandBuffer cmd, Texture* tex, uint32_t level, uint32_t laye
     if (!armed || !tex || !tex->image || tex->samples != VK_SAMPLE_COUNT_1_BIT) return;
     if (!step_wanted(seq, what)) return void(seq++);
     // (RX_VK_DUMP_DEPTH_ONLY=1: the passes' colour targets left out, depth only (per-draw dumps of big targets fit))
-    static const bool depth_only = getenv("RX_VK_DUMP_DEPTH_ONLY") != nullptr;
+    static const bool depth_only = env_on("RX_VK_DUMP_DEPTH_ONLY");
     if (depth_only && (tex->aspect & VK_IMAGE_ASPECT_COLOR_BIT) && std::strncmp(what, "pass", 4) == 0) return void(seq++);
     // (RX_VK_DUMP_ONLY_W=<width>[,<width>...]: only targets that wide (the minimap's 468: its per-draw dumps alone,
     // small; the scene's and the output's: 2048,3840)
@@ -332,7 +335,7 @@ void dump_image(VkCommandBuffer cmd, Texture* tex, uint32_t level, uint32_t laye
     if (!only_w.empty() && std::find(only_w.begin(), only_w.end(), std::max(1u, tex->width >> std::min(level, tex->levels - 1))) ==
                                only_w.end())
         return void(seq++);
-    static const bool as_9e5 = getenv("RX_VK_DUMP_9E5") != nullptr;
+    static const bool as_9e5 = env_on("RX_VK_DUMP_9E5");
     const bool raw_9e5 = as_9e5 && tex->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32;
     if (!(tex->aspect & VK_IMAGE_ASPECT_COLOR_BIT) || raw_9e5) {
         if (!(tex->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && !raw_9e5) return;

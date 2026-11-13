@@ -18,7 +18,7 @@ add_executable(f2i_immediate
     "${SHADER}/frontend/maxwell/decode.cpp"
     "${SHADER}/frontend/maxwell/opcodes.cpp" "${IMPL}/common_funcs.cpp"
     "${IMPL}/impl.cpp" "${IMPL}/register_map_nx2.cpp" "${IMPL}/move_register.cpp"
-    "${IMPL}/floating_point_conversion_integer.cpp"
+    "${IMPL}/floating_point_conversion_integer.cpp" "${IMPL}/integer_floating_point_conversion.cpp"
     "${IMPL}/floating_point_compare_and_set.cpp" "${IMPL}/floating_point_min_max.cpp"
     "${IMPL}/logic_operation.cpp"
     ${BACKEND_SOURCES} ${IR_SOURCES} ${OPTIMIZATION_SOURCES} ${SIRIT_SOURCES})

@@ -35,6 +35,95 @@ static class Updater
         UpdateFolder(w, folder, tag, fetched);
     }
 
+    // ---- the update tracks (the Track menu; by default the track of these tools). host/hos_update.c and
+    // builder/linux/linux_update.py have the same rules ----
+    public const string Release = "release", Candidate = "rc", Nightly = "nightly";
+    const string Releases = "https://api.github.com/repos/NotRexed/Hookshot/releases";
+    static readonly System.Text.RegularExpressions.Regex NightlyName = new(@"-\d+-g[0-9a-f]+(-dirty)?$");
+    static readonly System.Text.RegularExpressions.Regex ReleaseName = new(@"^v(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$");
+
+    /// A build's track from its version: git describe --long's v2.1.0-rc.1-3-g1a2b3c4 is the nightly, v2.1.0-rc.1 a release
+    /// candidate, anything else a release
+    public static string TrackOf(string? version) =>
+        version == null ? Release : NightlyName.IsMatch(version) ? Nightly : ReleaseName.IsMatch(version) && version.Contains('-') ? Candidate : Release;
+
+    /// The release that holds a version's files: the nightly's are on the rolling nightly release
+    static string ReleaseOf(string tag) => TrackOf(tag) == Nightly ? Nightly : tag;
+
+    /// a newer than b, both vX.Y.Z[-rc.N] in semver order (v2.1.0-rc.1 < v2.1.0-rc.2 < v2.1.0); a nightly counts as just after
+    /// the version it names; false when either is not a version
+    public static bool Newer(string? a, string? b)
+    {
+        static long[]? Key(string? v)
+        {
+            if (v == null) return null;
+            var after = NightlyName.Match(v);
+            var m = ReleaseName.Match(after.Success ? v[..after.Index] : v);
+            if (!m.Success) return null;
+            return new[] { long.Parse(m.Groups[1].Value), long.Parse(m.Groups[2].Value), long.Parse(m.Groups[3].Value),
+                           m.Groups[4].Success ? long.Parse(m.Groups[4].Value) : long.MaxValue, after.Success ? 1 : 0 };
+        }
+        var x = Key(a);
+        var y = Key(b);
+        if (x == null || y == null) return false;
+        for (var i = 0; i < x.Length; i++)
+            if (x[i] != y[i]) return x[i] > y[i];
+        return false;
+    }
+
+    /// What to update to: the track's newest (latest) for a release as before, a nightly, or after a switch of track (even
+    /// an older version); for a release candidate only when it is newer, so it is never taken back to an older release
+    public static string? Target(string? latest, string? tools, string track)
+    {
+        if (latest == null) return tools;
+        if (tools == null || track != Candidate || TrackOf(tools) != Candidate) return latest;
+        return Newer(latest, tools) ? latest : tools;
+    }
+
+    /// The newest build of a track, quietly (null: GitHub did not answer). release: the latest release, as before; rc: the
+    /// newest of the release candidates and releases, else the latest release; nightly: the nightly's setup list's tag
+    public static async Task<string?> LatestTag(string track)
+    {
+        if (track == Release) return await LatestTag();
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(8) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("HookshotBuilder");
+        if (track == Nightly)
+        {
+            for (var attempt = 0; attempt < 2; attempt++)
+            {
+                try
+                {
+                    var list = await http.GetStringAsync("https://github.com/NotRexed/Hookshot/releases/download/nightly/" + SetupList);
+                    foreach (var line in list.Split('\n'))
+                        if (line.StartsWith("tag ")) return line[4..].Trim();
+                }
+                catch (Exception) { }
+                await Task.Delay(TimeSpan.FromSeconds(2));
+            }
+            return null;
+        }
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, Releases + "?per_page=20");
+            request.Headers.Accept.ParseAdd("application/vnd.github+json");
+            using var response = await http.SendAsync(request);
+            if (response.IsSuccessStatusCode)
+            {
+                using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                string? newest = null;
+                foreach (var r in doc.RootElement.EnumerateArray())
+                    if (r.GetProperty("tag_name").GetString() is { } t && ReleaseName.IsMatch(t) && (newest == null || Newer(t, newest)))
+                        newest = t;
+                if (newest != null) return newest;
+            }
+        }
+        catch (Exception) { }
+        return await LatestTag();
+    }
+
+    /// The API address of the release a target is on: the latest release for a release (as before), else that tag's
+    static string ReleaseApi(string? tag) => tag == null || TrackOf(tag) == Release ? Latest : Releases + "/tags/" + ReleaseOf(tag);
+
     /// The latest release's tag, quietly (null: GitHub did not answer); a few tries, 20 s at most
     public static async Task<string?> LatestTag()
     {
@@ -74,16 +163,20 @@ static class Updater
     }
 
     /// The latest release's setup (HookshotBuilder.exe) downloaded and started with args: it installs the new builder (only the
-    /// parts that changed) and starts it with the same args; this one closes. (no args: the new builder opens as it does)
-    public static async Task RunLatestSetup(MainWindow w, IEnumerable<string> args)
+    /// parts that changed) and starts it with the same args; this one closes. (no args: the new builder opens as it does) A tag of
+    /// another track (or a release asked for by a switch of track): that release's setup, told to install it (--tag)
+    public static async Task RunLatestSetup(MainWindow w, IEnumerable<string> args, string? tag = null, bool named = false)
     {
+        if (tag != null && (named || TrackOf(tag) != Release)) args = args.Concat(new[] { "--tag", tag });
+        else tag = null;
         var token = w.DownloadToken;
         using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
         http.DefaultRequestHeaders.UserAgent.ParseAdd("HookshotBuilder");
         w.Note("Asking GitHub for the latest release");
         string? setupUrl = null, setupApiUrl = null, setupDigest = null;
         long setupSize = 0;
-        using (var response = await GetWithRetries(w, http, Latest, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
+        using (var response = await GetWithRetries(w, http, tag == null ? Latest : Releases + "/tags/" + ReleaseOf(tag), token,
+                                                   "application/vnd.github+json", TimeSpan.FromSeconds(30)))
         using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
             foreach (var asset in doc.RootElement.GetProperty("assets").EnumerateArray())
                 if (asset.GetProperty("name").GetString() == SetupAsset)
@@ -94,20 +187,21 @@ static class Updater
                     setupDigest = DigestText(asset);
                 }
         if (setupUrl == null) throw new InvalidOperationException("The latest release has no " + SetupAsset + ".");
-        var cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HookshotBuilder", "update");
+        var cache = Path.Combine(BuilderHome.Base, "update");
         Directory.CreateDirectory(cache);
         var setup = Path.Combine(cache, SetupAsset);
         w.Note("Downloading the new Hookshot Builder");
         await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, setupDigest, token);
         var si = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
         foreach (var arg in args) si.ArgumentList.Add(arg);
+        BuilderHome.PassTo(si);
         Process.Start(si);
         Application.Current.Shutdown();
     }
 
     /// The game in folder built again with the latest release: here when these tools are it (or fetched), else after the setup
     /// installed it (it starts the new builder with --update folder --tag t --fetched)
-    public static async void UpdateFolder(MainWindow w, string folder, string? tag, bool fetched)
+    public static async void UpdateFolder(MainWindow w, string folder, string? tag, bool fetched, bool named = false)
     {
         w.BeginUpdate(folder, tag);
         var tools = Tools.Find();
@@ -140,10 +234,13 @@ static class Updater
             string? digest = null, setupDigest = null;
             long size = 0, setupSize = 0;
             var hasList = false;
-            using (var response = await GetWithRetries(w, http, Latest, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
+            // (another track's build, or one a switch of track asked for: that release; the nightly's is named by its list's tag)
+            var api = named && tag != null ? Releases + "/tags/" + ReleaseOf(tag) : ReleaseApi(tag);
+            using (var response = await GetWithRetries(w, http, api, token, "application/vnd.github+json", TimeSpan.FromSeconds(30)))
             using (var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(token)))
             {
                 newTag = doc.RootElement.GetProperty("tag_name").GetString();
+                if (newTag == Nightly && tag != null && TrackOf(tag) == Nightly) newTag = tag;
                 foreach (var asset in doc.RootElement.GetProperty("assets").EnumerateArray())
                 {
                     var assetName = asset.GetProperty("name").GetString();
@@ -175,7 +272,7 @@ static class Updater
             // would be the HookshotBuilder folder itself or not a version (the same rule as the setup's and Linux's lists)
             if (name.Length == 0 || name.Length > 128 || name[0] == '.')
                 throw new InvalidOperationException("The latest release's tag is not a version name.");
-            var cache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HookshotBuilder", "update");
+            var cache = Path.Combine(BuilderHome.Base, "update");
             Directory.CreateDirectory(cache);
             // (a release with the setup and its list: the setup downloads only the parts that changed since the version installed (a few MB
             // when only the builder's code did), checks them and starts the new builder with these arguments. The whole zip is the fallback)
@@ -186,6 +283,7 @@ static class Updater
                 await DownloadWithRetries(w, http, setupUrl, setupApiUrl, setup, setupSize, setupDigest, token);
                 var ssi = new ProcessStartInfo(setup) { UseShellExecute = false, WorkingDirectory = cache };
                 foreach (var arg in new[] { "--update", folder, "--tag", newTag, "--fetched" }) ssi.ArgumentList.Add(arg);
+                BuilderHome.PassTo(ssi);
                 Process.Start(ssi);
                 Application.Current.Shutdown();
                 return;
@@ -198,7 +296,11 @@ static class Updater
             // (beside this app when that folder takes writing, else in the app data folder)
             var parent = Directory.GetParent(AppContext.BaseDirectory.TrimEnd('\\', '/'))!.FullName;
             string target;
-            try
+            if (BuilderHome.Portable)
+            {
+                target = await Task.Run(() => PortableArchive.Install(zip, BuilderHome.Base, newTag));
+            }
+            else try
             {
                 target = await Unpack(zip, Path.Combine(parent, "HookshotBuilder " + name));
             }
@@ -211,6 +313,7 @@ static class Updater
             if (!File.Exists(exe)) throw new FileNotFoundException("The download has no HookshotBuilder.exe (your antivirus may have removed it).");
             var si = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = target };
             foreach (var arg in new[] { "--update", folder, "--tag", newTag, "--fetched" }) si.ArgumentList.Add(arg);
+            BuilderHome.PassTo(si);
             Process.Start(si);
             Application.Current.Shutdown();
         }

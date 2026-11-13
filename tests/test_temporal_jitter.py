@@ -57,7 +57,7 @@ def main():
         includes = ["-I" + str(a.source), "-I" + str(ROOT)]
         subprocess.run([a.cxx, "-std=c++20", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers",
                         "-pthread", *includes, str(cpp), "-o", str(exe)], check=True)
-        for args in ([], ["off"], ["parallel-host"], ["late-host"]):
+        for args in ([], ["off"], ["fsr-jitter-off"], ["parallel-host"], ["late-host"]):
             subprocess.run([str(exe), *args], check=True, timeout=30)
 
 

@@ -90,7 +90,7 @@ def code_key(control: bytes, area: bytes) -> int:
 def translator_stamp(vk_dir: str = None) -> str:
     """Mirror of the HOOKSHOT_SHADER_STAMP block (nx2/build.py:693-699)."""
     vk = vk_dir or os.path.join(ROOT, "gpu", "vk")
-    stamp = hashlib.sha1()
+    stamp = hashlib.sha1(usedforsecurity=False)
     translator = [os.path.join(d, f) for top in ("eden", "sirit", "compat")
                   for d, _, fs in os.walk(os.path.join(vk, top)) for f in fs]
     names = sorted(translator) + [os.path.join(vk, n) for n in
@@ -221,7 +221,7 @@ def bake_seed(seed_path: str, bank_dir: str, max_pipelines: int = 8,
     os.makedirs(bank_dir, exist_ok=True)
     stages, programs = parse_seed(seed_path)
     with open(seed_path, "rb") as f:
-        seed_sha = hashlib.sha1(f.read()).hexdigest()
+        seed_sha = hashlib.sha1(f.read(), usedforsecurity=False).hexdigest()
     stamp = translator_stamp()
     manifest_path = os.path.join(bank_dir, "bake_bank.json")
     done = set()
@@ -369,7 +369,7 @@ def verify_bank(bank_dir: str, strict: bool = False):
         # else fall back to presence of the recorded sha.
         if seed and os.path.isfile(seed):
             with open(seed, "rb") as f:
-                summary["seed_ok"] = hashlib.sha1(f.read()).hexdigest() == \
+                summary["seed_ok"] = hashlib.sha1(f.read(), usedforsecurity=False).hexdigest() == \
                     manifest.get("seed_sha")
         else:
             summary["seed_ok"] = bool(manifest.get("seed_sha"))

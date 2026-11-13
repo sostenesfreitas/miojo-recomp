@@ -10,6 +10,7 @@ own release carries hookshot-linux.txt, which names them.
 The list is not inside a zip (it names the zips' checksums).
 """
 import argparse
+import concurrent.futures
 import hashlib
 import os
 import sys
@@ -97,9 +98,18 @@ def main():
     for dest, files in PARTS:
         if not os.path.isdir(os.path.join(root, dest)):
             sys.exit("the AppDir has no %s" % dest)
+
+    def zip_part(part):
+        dest, files = part
+        path = os.path.join(args.out, "HookshotLinux-%s.zip" % dest.replace("/", "-"))
+        return write_zip(path, root, dest, files)
+    # (the parts zipped at once, one thread each: zlib lets go of the GIL while it compresses, and each zip is the same bytes
+    # as when they are made one after the other. The list keeps PARTS' order)
+    with concurrent.futures.ThreadPoolExecutor(min(len(PARTS), os.cpu_count() or 1)) as pool:
+        zipped = list(pool.map(zip_part, PARTS))
+    for (dest, files), (digest, size) in zip(PARTS, zipped):
         leaf = dest.replace("/", "-")
         path = os.path.join(args.out, "HookshotLinux-%s.zip" % leaf)
-        digest, size = write_zip(path, root, dest, files)
         named = os.path.join(args.out, "HookshotLinux-%s-%s.zip" % (leaf, digest[:12]))
         os.replace(path, named)
         lines.append("part %s %d %s %s/%s" % (digest, size, dest, base, os.path.basename(named)))

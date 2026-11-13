@@ -645,4 +645,7 @@ Id EmitDPdyFine(EmitContext& ctx, Id op_a);
 Id EmitDPdxCoarse(EmitContext& ctx, Id op_a);
 Id EmitDPdyCoarse(EmitContext& ctx, Id op_a);
 
+// (hookshot) Helpers the emitters share, not IR instructions
+Id IsNan(EmitContext& ctx, Id value, u32 bits);   // (OpIsNan, or a test of the bits: mma_layout.h nan_bits)
+
 } // namespace Shader::Backend::SPIRV

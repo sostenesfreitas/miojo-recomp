@@ -119,7 +119,20 @@ static void mouse_capture(int on){mouse_captured=on;}
 [[maybe_unused]] static void hos_sdl_window_size(void*, int* w, int* h) { ui_only(); *w = ww, *h = wh; }
 [[maybe_unused]] static void hos_sdl_pixel_size(void*, int* w, int* h) { ui_only(); *w = pw, *h = ph; }
 [[maybe_unused]] static void hos_sdl_mouse_position(float* a, float* b) { ui_only(); *a = x, *b = y; }
+static int esc_had_capture, captured_before_menu;
+static int fullscreen_asked=-1, menu_asked=-1, restart_asked, close_asked;
+#ifndef WM_APP
+constexpr uint32_t WM_APP=0x8000;
+#endif
+#ifndef WM_CLOSE
+constexpr uint32_t WM_CLOSE=0x0010;
+#endif
 /* ACTUAL_SDL */
+static void request_menu(bool open, bool escape) {
+    hos_posix_post_message(WM_APP+8,open,escape);
+    const int request=__atomic_exchange_n(&menu_asked,-1,__ATOMIC_ACQ_REL);
+    if (request>=0) menu_mouse(request);
+}
 /* ACTUAL_DOWN */
 }
 
@@ -241,6 +254,24 @@ int main() {
     CHECK(!win::hos_mouse_game_pointer(&gx,&gy,&gw,&gh,&pressed,&wheel) && !pressed && !wheel);
     win::mouse_capture(win::hwnd,0);win::menus_mouse(win::hwnd,1,0);
 
+    // Escape can release capture without opening the menu. A later F1 must not restore it.
+    win::menu_mouse(win::hwnd,0,0);
+    win::esc_had_capture=1;
+    win::menu_mouse(win::hwnd,1,0);
+    win::menu_mouse(win::hwnd,0,0);
+    CHECK(!win::mouse_captured);
+    // The opt-in Escape shortcut restores the capture released by that key.
+    win::esc_had_capture=1;
+    win::menu_mouse(win::hwnd,1,1);
+    CHECK(!win::mouse_captured);
+    win::menu_mouse(win::hwnd,0,0);
+    CHECK(win::mouse_captured);
+    // F1 also restores ordinary capture when it was active on entry.
+    win::menu_mouse(win::hwnd,1,0);
+    CHECK(!win::mouse_captured);
+    win::menu_mouse(win::hwnd,0,0);
+    CHECK(win::mouse_captured);
+
     // A click keeps its event position even if SDL's current cursor and geometry advance before a take.
     hos_pointer_reset(&sdl::pointer);sdl::ww=1280;sdl::wh=720;sdl::pw=2560;sdl::ph=1440;
     sdl::x=900;sdl::y=600;sdl::down(101.75f,203.75f);
@@ -255,6 +286,20 @@ int main() {
     CHECK(sdl::hos_mouse_pointer(&out) && out.pressed==(HOS_MOUSE_LEFT|HOS_MOUSE_RIGHT) && out.wheel==1);
     CHECK(out.x==26 && out.y==40 && out.width==3440);
     CHECK(sdl::hos_mouse_pointer(&out) && !out.pressed && !out.wheel && out.x==2418);
+    sdl::request_menu(false,false);
+    sdl::esc_had_capture=1;
+    sdl::request_menu(true,false);
+    sdl::request_menu(false,false);
+    CHECK(!sdl::mouse_captured);
+    sdl::esc_had_capture=1;
+    sdl::request_menu(true,true);
+    CHECK(!sdl::mouse_captured);
+    sdl::request_menu(false,false);
+    CHECK(sdl::mouse_captured);
+    sdl::request_menu(true,false);
+    CHECK(!sdl::mouse_captured);
+    sdl::request_menu(false,false);
+    CHECK(sdl::mouse_captured);
     // Concurrent resize/scale samples are never torn. All button edges and wheel steps are drained once.
     HosPointer state = HOS_POINTER_INIT;
     std::atomic<bool> done{false}; std::atomic<int> reads{0};

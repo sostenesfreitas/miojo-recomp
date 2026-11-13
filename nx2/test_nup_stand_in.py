@@ -1,11 +1,15 @@
 """Damaged .zs files in an unpacked romfs and their stand-ins: python -I -B nx2/test_nup_stand_in.py
 
-No game bytes: small made-up files in a temporary folder. Standard library only.
+No game bytes: small made-up files in a temporary folder. Requires zstandard.
 """
 import importlib.util
 import os
 import sys
 import tempfile
+
+import zstandard
+
+RUN_ALL_MODULES = ["zstandard"]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("tested_nup", os.path.join(HERE, "nup.py"))
@@ -41,19 +45,35 @@ with tempfile.TemporaryDirectory() as romfs:
     write(os.path.join(romfs, "Lonely", "Only_One_Nrm.bntx.zs"), bytes(16))             # nothing of its kind beside it
     write(os.path.join(romfs, "Other", "plain.txt"), bytes(16))                         # not a .zs: not looked at
     write(os.path.join(romfs, "Other", "Skip_A.bntx.zs"), b"\x5a\x2a\x4d\x18" + bytes(8) + ZSTD)  # a skippable frame first
+    # (#2361: still in the .nup's frame, as builders before #456 wrote them: content as large as the file, then other bytes)
+    def wrapped(content):
+        frame = zstandard.ZstdCompressor().compress(content)
+        return frame + b"x" * (len(content) - len(frame))
+    zeros = wrapped(bytes(1000))
+    header = zstandard.frame_header_size(zeros)
+    healthy = zstandard.ZstdCompressor().compress(b"BNTX" + b"wall" * 500)
+    write(os.path.join(tex, "Wall_Gate_M_01_Nrm.bntx.zs"), zeros)
+    write(os.path.join(tex, "Wall_Gate_M_02_Nrm.bntx.zs"), zeros[:header] + b"\xff" * (1000 - header))  # does not decompress
+    write(os.path.join(tex, "Wall_Gate_P_01_Nrm.bntx.zs"), healthy)
+    write(os.path.join(tex, "Wall_Gate_W_01_Alb.bntx.zs"), wrapped(b"BNTX" * 250))     # not zeros: left as it is
 
     damaged = sorted(os.path.relpath(p, romfs) for p in nup.damaged_game_files(romfs))
     check("damaged", damaged, sorted(os.path.join(*p) for p in (
         ("Lonely", "Only_One_Nrm.bntx.zs"), ("Tex", "Bake_Stage_G_2_1_d0_t0.bntx.zs"),
-        ("Tex", "Rock_Temple_Gate_M_01_Nrm.bntx.zs"), ("Tex", "Rock_Temple_Gate_M_02_Nrm.bntx.zs"))))
+        ("Tex", "Rock_Temple_Gate_M_01_Nrm.bntx.zs"), ("Tex", "Rock_Temple_Gate_M_02_Nrm.bntx.zs"),
+        ("Tex", "Wall_Gate_M_01_Nrm.bntx.zs"), ("Tex", "Wall_Gate_M_02_Nrm.bntx.zs"))))
 
     done = {os.path.relpath(p, romfs): o and os.path.basename(o) for p, o in nup.stand_in_damaged(romfs)}
     check("normal map", done.get(os.path.join("Tex", "Rock_Temple_Gate_M_01_Nrm.bntx.zs")), "Rock_Temple_Gate_P_01_Nrm.bntx.zs")
     check("second normal map", done.get(os.path.join("Tex", "Rock_Temple_Gate_M_02_Nrm.bntx.zs")), "Rock_Temple_Gate_P_01_Nrm.bntx.zs")
     check("bake", done.get(os.path.join("Tex", "Bake_Stage_G_2_1_d0_t0.bntx.zs")), "Bake_Stage_G_2_2_d0_t0.bntx.zs")
     check("alone", done.get(os.path.join("Lonely", "Only_One_Nrm.bntx.zs"), "missing"), None)
+    check("wrapped zeros", done.get(os.path.join("Tex", "Wall_Gate_M_01_Nrm.bntx.zs")), "Wall_Gate_P_01_Nrm.bntx.zs")
+    check("wrapped, not decompressing", done.get(os.path.join("Tex", "Wall_Gate_M_02_Nrm.bntx.zs")), "Wall_Gate_P_01_Nrm.bntx.zs")
     with open(os.path.join(tex, "Rock_Temple_Gate_M_01_Nrm.bntx.zs"), "rb") as f:
         check("replaced bytes", f.read(), ZSTD + b"P" * 500)
+    with open(os.path.join(tex, "Wall_Gate_M_01_Nrm.bntx.zs"), "rb") as f:
+        check("replaced wrapped bytes", f.read(), healthy)
     check("no .part left", [n for _, _, fs in os.walk(romfs) for n in fs if n.endswith(".part")], [])
     check("a second pass", [os.path.relpath(p, romfs) for p, _ in nup.stand_in_damaged(romfs)],
           [os.path.join("Lonely", "Only_One_Nrm.bntx.zs")])
@@ -83,7 +103,14 @@ with tempfile.TemporaryDirectory() as out:
         f.write("unpacked by this builder: other.nup 2\n")
     make_game.stand_in_damaged_files(out, romfs)
     check("checked again for another unpack", calls, [romfs, romfs])
-    check("each check reports its progress", reported, [True, True])
+    with open(os.path.join(out, ".hookshot_romfs"), "rb") as f:
+        stamp = f.read()
+    with open(os.path.join(out, ".hookshot_romfs_checked"), "wb") as f:
+        f.write(b"resolved-v1\n" + stamp)   # (as builders before #2361 wrote it)
+    make_game.stand_in_damaged_files(out, romfs)
+    make_game.stand_in_damaged_files(out, romfs)
+    check("an older check: checked again, once", calls, [romfs, romfs, romfs])
+    check("each check reports its progress", reported, [True, True, True])
 
 if failures:
     print("\n".join(failures))

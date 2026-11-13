@@ -53,6 +53,12 @@ Id Module::OpAtomicIAdd(Id result_type, Id pointer, Id memory, Id semantics, Id 
                  << value << EndOp{};
 }
 
+Id Module::OpAtomicFAddEXT(Id result_type, Id pointer, Id memory, Id semantics, Id value) {   // (hookshot)
+    code->Reserve(7);
+    return *code << OpId{spv::Op::OpAtomicFAddEXT, result_type} << pointer << memory << semantics
+                 << value << EndOp{};
+}
+
 Id Module::OpAtomicISub(Id result_type, Id pointer, Id memory, Id semantics, Id value) {
     code->Reserve(7);
     return *code << OpId{spv::Op::OpAtomicISub, result_type} << pointer << memory << semantics

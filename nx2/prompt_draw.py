@@ -16,6 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import prompt_assets as P  # noqa: E402
 from prompt_faces import FACES  # noqa: E402
+import prompt_keys  # noqa: E402
 
 BODY, PART, INK, EDGE = (51, 51, 51, 255), (100, 100, 100, 255), (205, 205, 205, 255), (0, 0, 0, 255)
 # the Pro Controller's stick and d-pad (centre, half size in its picture's pixels) and the box the body is fitted in
@@ -137,6 +138,186 @@ def picture(face, pro, game_icons):
                 mark = holes if full else ic.masks(what, int(n * (.7 if kind == "face" else .85)))[0]
                 im.paste(INK, (round(x) - mark.width // 2, round(y) - mark.height // 2), mark)
     return im.resize(pro.size, Image.BOX)
+
+
+
+# ---- the keyboard face's keys (nx2/prompt_keys.py: which key shows which icon), into the game's font: Kenney's Keyboard & Mouse
+# keys (third_party/kenney_input_keyboard), and the keys drawn here: the keys whose names are words as wider keys with the word
+# cut out, in the game's own bold font; the mouse's three buttons as a key with a mouse cut out of it and that button left white.
+# Every contour is apart from the others or inside one (none cross), so the icons fill the same by either winding rule.
+MOST = 2.2   # (how much wider than the game's icon a word key may be)
+K = 0.5523   # (a quarter circle's control points, as a fraction of its radius)
+
+
+def _area(record):
+    from fontTools.pens.areaPen import AreaPen
+    p = AreaPen()
+    record.replay(p)
+    return p.value
+
+
+def _contour(pen, sign, draw):
+    """draw(pen) one closed contour, turned to go counter-clockwise (y up) for sign 1, clockwise for -1"""
+    from fontTools.pens.recordingPen import RecordingPen
+    from fontTools.pens.reverseContourPen import ReverseContourPen
+    rec = RecordingPen()
+    draw(rec)
+    rec.replay(pen if (_area(rec) > 0) == (sign > 0) else ReverseContourPen(pen))
+
+
+def _rrect(x0, y0, x1, y1, r):
+    r = min(r, (x1 - x0) / 2, (y1 - y0) / 2)
+    k = K * r
+
+    def draw(pen):
+        pen.moveTo((x0 + r, y0))
+        pen.lineTo((x1 - r, y0))
+        pen.curveTo((x1 - r + k, y0), (x1, y0 + r - k), (x1, y0 + r))
+        pen.lineTo((x1, y1 - r))
+        pen.curveTo((x1, y1 - r + k), (x1 - r + k, y1), (x1 - r, y1))
+        pen.lineTo((x0 + r, y1))
+        pen.curveTo((x0 + r - k, y1), (x0, y1 - r + k), (x0, y1 - r))
+        pen.lineTo((x0, y0 + r))
+        pen.curveTo((x0, y0 + r - k), (x0 + r - k, y0), (x0 + r, y0))
+        pen.closePath()
+    return draw
+
+
+def _button(a, b, y0, top, y1, ry, left):
+    """a mouse button's area: x a..b, from y0 up to top, then a quarter ellipse up to (the inner side, y1) on the outer side (left:
+    at a), ry high and b - a wide"""
+    rx = b - a
+
+    def draw(pen):
+        pen.moveTo((a, y0))
+        pen.lineTo((b, y0))
+        if left:
+            pen.lineTo((b, y1))
+            pen.curveTo((b - K * rx, y1), (a, top + K * ry), (a, top))
+        else:
+            pen.lineTo((b, top))
+            pen.curveTo((b, top + K * ry), (a + K * rx, y1), (a, y1))
+        pen.closePath()
+    return draw
+
+
+def _box(box):
+    gx0, gy0, gx1, gy1 = box
+    return max(gx1 - gx0, gy1 - gy0), (gx0 + gx1) / 2, (gy0 + gy1) / 2
+
+
+def word_key(pen, label, box, lset, lcmap):
+    """a key as high as the game's icon (box: that glyph's bounds) and as wide as the word needs, the word cut out of it, in the
+    label font (lset, lcmap: its glyph set and cmap): how much wider than the icon it is"""
+    from fontTools.pens.boundsPen import BoundsPen
+    from fontTools.pens.transformPen import TransformPen
+    side, cx, cy = _box(box)
+    names = [lcmap[ord(c)] for c in label]
+    adv = sum(lset[n].width for n in names)
+    bp = BoundsPen(lset)
+    lset[lcmap[ord("H")]].draw(bp)
+    caph = bp.bounds[3]
+    s = side * 0.48 / caph   # (the capitals about half the key's height)
+    pad = side * 0.20
+    w = max(side, adv * s + 2 * pad)
+    if w > side * MOST:
+        s *= (side * MOST - 2 * pad) / (adv * s)
+        w = side * MOST
+    x0, y0 = cx - side / 2, cy - side / 2
+    _contour(pen, -1 if _letters_ccw(lset, lcmap) else 1, _rrect(x0, y0, x0 + w, y0 + side, side * 0.2))   # (the letters' outer contours go the other way)
+    x, ty = x0 + (w - adv * s) / 2, cy - caph * s / 2
+    for n in names:
+        lset[n].draw(TransformPen(pen, (s, 0, 0, s, x, ty)))
+        x += lset[n].width * s
+    return w - side
+
+
+def _letters_ccw(lset, lcmap):
+    from fontTools.pens.recordingPen import RecordingPen
+    rec = RecordingPen()
+    lset[lcmap[ord("I")]].draw(rec)
+    return _area(rec) > 0
+
+
+def mouse(pen, which, box, sign=1):
+    """a key (as the others) with a mouse cut out of it, the button `which` (left, right; middle: the wheel) left white in the
+    mouse. sign: the white contours' direction"""
+    side, cx, cy = _box(box)
+    x0, y0 = cx - side / 2, cy - side / 2
+    _contour(pen, sign, _rrect(x0, y0, x0 + side, y0 + side, side * 0.2))   # the key
+    mw, mh = side * 0.52, side * 0.76
+    mx0, my0, mx1, my1 = cx - mw / 2, cy - mh / 2, cx + mw / 2, cy + mh / 2
+    _contour(pen, -sign, _rrect(mx0, my0, mx1, my1, mw / 2))   # the mouse, cut out
+    g = side * 0.06   # (the dark line round the white button, and between the buttons)
+    ix0, ix1, iy1, ri = mx0 + g, mx1 - g, my1 - g, mw / 2 - g
+    by = cy + side * 0.02   # (the buttons' lower edge)
+    top = iy1 - ri
+    if which in ("left", "right"):
+        left = which == "left"
+        a, b = (ix0, cx - g / 2) if left else (cx + g / 2, ix1)
+        _contour(pen, sign, _button(a, b, by, top, iy1, ri, left))
+    else:   # the wheel
+        ww = side * 0.13
+        _contour(pen, sign, _rrect(cx - ww / 2, by, cx + ww / 2, iy1 - side * 0.02, ww / 2))
+
+
+def keyboard_glyphs(add, gset, cmap, chars, hmtx, label_otf, kset, draw):
+    """the keyboard face's glyphs into the game's font (add(name, charstring, width): faces_font's; kset: Kenney's font's glyphs;
+    draw(target, Kenney name, scale): that glyph in the box of the game's glyph target, its charstring and width; label_otf: the
+    game's bold font, for the keys whose names are words): {code point: glyph name} for every key at KEY_BASE + its code and
+    the sticks at STICK_KEYS.. (nx2/prompt_keys.py), and each key's advance by its code (256 of them: 0 none)"""
+    import io
+    from fontTools.pens.boundsPen import BoundsPen
+    from fontTools.pens.recordingPen import RecordingPen
+    from fontTools.pens.t2CharStringPen import T2CharStringPen
+    from fontTools.ttLib import TTFont
+    lfont = TTFont(io.BytesIO(label_otf)) if label_otf else None
+    lset, lcmap = (lfont.getGlyphSet(), lfont.getBestCmap()) if lfont else (None, None)
+    target = cmap[0xE040]   # (each key in the box of the game's A)
+    bp = BoundsPen(gset)
+    gset[target].draw(bp)
+    box, cs, width0 = bp.bounds, chars[target], hmtx[target][0]
+
+    def drawn(name, rec, over):
+        pen = T2CharStringPen(width0 + round(over), gset)
+        rec.replay(pen)
+        return add(name, pen.getCharString(private=cs.private, globalSubrs=cs.globalSubrs), width0 + round(over))
+
+    placed, widths = {}, [0] * 256
+    for code in range(1, 256):
+        name = f"key_{code:02x}"
+        if code in prompt_keys.MICE:
+            rec = RecordingPen()
+            mouse(rec, prompt_keys.MICE[code], box)
+            placed[prompt_keys.KEY_BASE + code] = drawn(name, rec, 0)
+        elif lfont and code in prompt_keys.LABELS:
+            rec = RecordingPen()
+            placed[prompt_keys.KEY_BASE + code] = drawn(name, rec, word_key(rec, prompt_keys.LABELS[code], box, lset, lcmap))
+        elif prompt_keys.kenney_name(code) in kset and code in prompt_keys.KEYS:
+            placed[prompt_keys.KEY_BASE + code] = add(name, *draw(target, prompt_keys.kenney_name(code)))
+        else:
+            continue
+        widths[code] = hmtx[placed[prompt_keys.KEY_BASE + code]][0]
+    made = {}
+    for i, (code, stick, ways) in enumerate(prompt_keys.STICKS):
+        placed[prompt_keys.STICK_GAME + i] = cmap[code]
+        if stick == "cam":   # (the mouse moving, those ways; the arrows round it take room: a little larger than a key)
+            kn = "mouse_move" if len(ways) == 4 else "mouse_horizontal" if ways[0] in "lr" else "mouse_vertical"
+            if kn not in made:
+                c, w = draw(target, kn, 1.2)
+                made[kn] = add(f"stick_{kn}", c, w)
+            placed[prompt_keys.STICK_KEYS + i] = made[kn]
+        elif len(ways) == 1:
+            placed[prompt_keys.STICK_KEYS + i] = placed[prompt_keys.KEY_BASE + prompt_keys.MOVE[ways]]
+        elif lfont:
+            label = "".join(chr(prompt_keys.MOVE[w]) for w in ways)
+            if label not in made:
+                rec = RecordingPen()
+                made[label] = drawn(f"stick_{label.lower()}", rec, word_key(rec, label, box, lset, lcmap))
+            placed[prompt_keys.STICK_KEYS + i] = made[label]
+        else:
+            placed[prompt_keys.STICK_KEYS + i] = cmap[code]
+    return placed, widths
 
 
 def main():

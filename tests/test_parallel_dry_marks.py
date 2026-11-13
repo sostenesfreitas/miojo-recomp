@@ -28,7 +28,7 @@ def main():
             raise SystemExit("vk_replay.cpp: the dry pass no longer marks the targets of " + op)
         if "!dry" not in part:
             raise SystemExit("vk_replay.cpp: " + op + " is no longer left out of the dry pass itself")
-    if 'getenv("RX_VK_NO_DRY_CLEARS")' not in replay:
+    if 'env_on("RX_VK_NO_DRY_CLEARS")' not in replay:
         raise SystemExit("vk_replay.cpp: the switch RX_VK_NO_DRY_CLEARS is gone")
     # (a worker counts a uniform update by the same test the dry pass appends it by)
     part = body(replay, "case NOP_UPDATE_UB:", "case NOP_SET_RT:")

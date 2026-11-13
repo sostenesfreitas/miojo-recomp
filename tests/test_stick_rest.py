@@ -24,14 +24,20 @@ def main():
     p.add_argument("--cc", default="gcc")
     a = p.parse_args()
     src = (ROOT / "host/pad_sdl.c").read_text(encoding="utf-8")
+    hid = (ROOT / "host/nn_hid.c").read_text(encoding="utf-8")
+    start = hid.index("void hos_filter_stick(")
+    filter_fn = hid[start:hid.index("\n}\n", start) + 3]   # the dead zone the loop judges rest by
     start = src.index("            /* (a worn stick resting just past a small dead zone")
     end = src.index("if (!(pads[i].rested >> k & 1)) v[k] = 0;", start)
     end = src.index("}", end) + 1
     block = src[start:end]
-    fixture = r'''#include <stdio.h>
+    fixture = r'''#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 static struct { unsigned rested; signed char held[4]; } pads[1];
+''' + filter_fn + r'''
 static void step(int i, int v[4]) {
+    const int z = 0;   /* (Default: 7849) */
 ''' + block + r'''
 }
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); return 1; } } while (0)

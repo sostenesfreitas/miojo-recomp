@@ -21,7 +21,7 @@ BUILD_SCRIPT = ROOT / "nx2" / "build.py"
 
 def production_code(path):
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    names = {"tree_headers", "vk_sources", "flag_text", "object_key"}
+    names = {"tree_headers", "vk_sources", "flag_text", "object_key", "zstd_jobs"}
     functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     assert {n.name for n in functions} == names
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
@@ -82,6 +82,9 @@ class ShaderStampCacheTests(unittest.TestCase):
             "third_party/zstd/lib/decompress/zstd_ddict.c": "int z8;\n",
             "third_party/zstd/lib/decompress/zstd_decompress.c": "int z9;\n",
             "third_party/zstd/lib/decompress/zstd_decompress_block.c": "int z10;\n",
+            "third_party/zbic/zstd.c": "int zstd_zbic;\n",
+            "third_party/zbic/zstd.h": "int zstd_zbic_h;\n",
+            "third_party/zbic/zstd_errors.h": "int zstd_zbic_errors;\n",
         }
         for name, text in self.files.items():
             path = self.root / name
@@ -101,7 +104,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "spirv_headers": str(self.root / "deps/spirv-headers"),
             "vk_headers": str(self.root / "deps/vulkanheaders"),
             "vma_headers": str(self.root / "deps/vulkanmemoryallocator"),
-            "obj_dir": str(self.root / "obj"), "cc": "clang", "jobs": [],
+            "obj_dir": str(self.root / "obj"), "cc": "clang", "jobs": [], "ZSTD": str(self.root / "third_party/zstd/lib"),
             "stamp_def": '-DHOOKSHOT_VERSION="%s"' % version, "logo_text": b"", "gen_dir": str(self.root / "gen"),
             "fonts_cpp": str(self.root / "gen/ui_fonts.cpp"),
             # (the back end's branch makes its logo header and fonts file itself since #1567: no files written here)
@@ -161,7 +164,7 @@ class ShaderStampCacheTests(unittest.TestCase):
                 before = self.jobs(linux)
                 path.write_bytes(b"struct IR { int changed; };\n")
                 # (Dear ImGui's objects and zstd's see only their own headers; the fonts' file none)
-                expected = {name for name in before if not name.startswith(("host/posix/", "third_party/imgui/", "third_party/zstd/", "gen/"))}
+                expected = {name for name in before if not name.startswith(("host/posix/", "third_party/imgui/", "third_party/zstd/", "third_party/zbic/", "gen/"))}
                 self.assertEqual(self.changed(before, self.jobs(linux)), expected)
 
     def test_stamp_line_ending_normalization_is_unchanged(self):
@@ -182,7 +185,7 @@ class ShaderStampCacheTests(unittest.TestCase):
                     version = [f for f in job["flags"] if f.startswith("-DHOOKSHOT_VERSION=")]
                     self.assertEqual(len(shader), int(name == "gpu/vk/vk_shader.cpp"))
                     self.assertEqual(len(version), int(name == "gpu/vk/vk_menu.cpp"))
-                    if not name.startswith(("host/posix/", "third_party/zstd/", "gen/")):   # (plain C libraries, the fonts' bytes)
+                    if not name.startswith(("host/posix/", "third_party/zstd/", "third_party/zbic/", "gen/")):   # (plain C libraries, the fonts' bytes)
                         self.assertIn("-DHOOKSHOT_RELEASE", job["flags"])
                 self.assertEqual(self.changed(before, self.jobs(linux, version="new", release=True)),
                                  {"gpu/vk/vk_menu.cpp"})

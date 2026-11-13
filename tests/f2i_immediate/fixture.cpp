@@ -1,6 +1,8 @@
 // Authored instructions only. No dump, native program, GPU or game is read.
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -62,12 +64,14 @@ static void translate(Maxwell::TranslatorVisitor& visitor, u64 word) {
     case Maxwell::Opcode::FSET_reg: visitor.FSET_reg(word); break;
     case Maxwell::Opcode::FMNMX_reg: visitor.FMNMX_reg(word); break;
     case Maxwell::Opcode::LOP_reg: visitor.LOP_reg(word); break;
+    case Maxwell::Opcode::I2F_reg: visitor.I2F_reg(word); break;
     case Maxwell::Opcode::EXIT: break;
     default: CHECK(false);
     }
 }
 
 static unsigned modules = 0;
+static unsigned value_failures = 0;
 static void check_pipeline(const std::filesystem::path& output, u32 literal, bool sign,
                            u32 rounding, bool ftz, u32 dst_width = 2) {
     constexpr u32 dest = 13;
@@ -160,6 +164,138 @@ static void check_pipeline(const std::filesystem::path& output, u32 literal, boo
     CHECK(stream.good());
 }
 
+// A small evaluator of the 32-bit IR the conversions leave after the production passes, for literal sources: the stored
+// value, as the GPU would compute it if each instruction did what SPIR-V defines. A conversion given a value it cannot
+// represent (OpConvertFToS/U out of range: undefined) is reported in `undefined` instead of being guessed
+static std::optional<u32> evaluate(const IR::Value& value, bool& undefined) {
+    if (value.IsImmediate()) return value.Type() == IR::Type::U1 ? u32{value.U1()} : value.U32();
+    const IR::Inst& inst = *value.InstRecursive();
+    const auto arg = [&](size_t i) { return evaluate(inst.Arg(i), undefined); };
+    const auto f = [](u32 bits) { return std::bit_cast<f32>(bits); };
+    const auto b = [](f32 x) { return std::bit_cast<u32>(x); };
+    std::array<u32, 3> a{};
+    for (size_t i = 0; i < inst.NumArgs() && i < 3; ++i) {
+        const auto v = arg(i);
+        if (!v) return std::nullopt;
+        a[i] = *v;
+    }
+    switch (inst.GetOpcode()) {
+    case IR::Opcode::Identity: return a[0];
+    case IR::Opcode::SelectU32: case IR::Opcode::SelectF32: return a[0] ? a[1] : a[2];
+    case IR::Opcode::IEqual: return u32{a[0] == a[1]};
+    case IR::Opcode::INotEqual: return u32{a[0] != a[1]};
+    case IR::Opcode::UGreaterThan: return u32{a[0] > a[1]};
+    case IR::Opcode::SGreaterThan: return u32{s32(a[0]) > s32(a[1])};
+    case IR::Opcode::FindUMsb32: return a[0] ? u32(31 - std::countl_zero(a[0])) : ~0U;
+    case IR::Opcode::UMax32: return std::max(a[0], a[1]);
+    case IR::Opcode::IAdd32: return a[0] + a[1];
+    case IR::Opcode::ISub32: return a[0] - a[1];
+    case IR::Opcode::ShiftLeftLogical32: return a[1] < 32 ? a[0] << a[1] : 0U;
+    case IR::Opcode::ShiftRightLogical32: return a[1] < 32 ? a[0] >> a[1] : 0U;
+    case IR::Opcode::BitwiseAnd32: return a[0] & a[1];
+    case IR::Opcode::BitwiseOr32: return a[0] | a[1];
+    case IR::Opcode::BitCastF32U32: case IR::Opcode::BitCastU32F32: return a[0];
+    case IR::Opcode::ConvertF32U32: {   // (exact below 2^24: the only inputs the RZ path hands it)
+        if (a[0] >= (1U << 24)) undefined = true;
+        return b(f32(a[0]));
+    }
+    case IR::Opcode::FPIsNan32: return u32{std::isnan(f(a[0]))};
+    case IR::Opcode::FPOrdGreaterThanEqual32: return u32{f(a[0]) >= f(a[1])};
+    case IR::Opcode::FPTrunc32: return b(std::trunc(f(a[0])));
+    case IR::Opcode::FPRoundEven32: return b(std::nearbyint(f(a[0])));
+    case IR::Opcode::FPFloor32: return b(std::floor(f(a[0])));
+    case IR::Opcode::FPCeil32: return b(std::ceil(f(a[0])));
+    case IR::Opcode::FPAbs32: return a[0] & 0x7fffffffU;
+    case IR::Opcode::FPNeg32: return a[0] ^ 0x80000000U;
+    case IR::Opcode::FPClamp32:   // (OpNClamp: a NaN gives the other operand)
+        return b(std::fmin(std::fmax(f(a[0]), f(a[1])), f(a[2])));
+    case IR::Opcode::ConvertS32F32: {
+        const f32 x = f(a[0]);
+        if (!(x >= -2147483648.0f && x < 2147483648.0f)) { undefined = true; return 0U; }
+        return u32(s32(x));
+    }
+    case IR::Opcode::ConvertU32F32: {
+        const f32 x = f(a[0]);
+        if (!(x >= 0.0f && x < 4294967296.0f)) { undefined = true; return 0U; }
+        return u32(x);
+    }
+    default:
+        std::fprintf(stderr, "evaluate: no %.*s\n", int(IR::NameOf(inst.GetOpcode()).size()), IR::NameOf(inst.GetOpcode()).data());
+        return std::nullopt;
+    }
+}
+
+static std::optional<u32> stored_value(const IR::Block& block, bool& undefined) {
+    for (const IR::Inst& inst : block.Instructions())
+        if (inst.GetOpcode() == IR::Opcode::WriteSharedU32) return evaluate(inst.Arg(1), undefined);
+    return std::nullopt;
+}
+
+// A native instruction through the lowering, the Maxwell translation and the production passes, its result evaluated
+// (above): source, when given, is a Maxwell MOV32I of a literal into R19 first
+static void check_value(const std::filesystem::path& output, const char* what, Native native, std::optional<u32> source,
+                        u32 expected) {
+    constexpr u32 dest = 13;
+    const std::array code{native, instruction(0x94d, 0, 0, 0x03800000)};
+    const auto lowered = Ampere::LowerToMaxwell(code);
+    CHECK(lowered);
+    ObjectPool<IR::Inst> pool;
+    IR::Block block{pool};
+    IR::Program program;
+    program.stage = Stage::Compute;
+    program.workgroup_size = {1, 1, 1};
+    program.shared_memory_size = 4;
+    program.blocks.push_back(&block);
+    program.post_order_blocks.push_back(&block);
+    IR::AbstractSyntaxNode node{};
+    node.type = IR::AbstractSyntaxNode::Type::Block;
+    node.data.block = &block;
+    program.syntax_list.push_back(node);
+    IR::AbstractSyntaxNode ret{};
+    ret.type = IR::AbstractSyntaxNode::Type::Return;
+    program.syntax_list.push_back(ret);
+    FixtureEnvironment env;
+    Maxwell::TranslatorVisitor visitor{env, block};
+    if (source) translate(visitor, (u64{0x010} << 52) | (u64{*source} << 20) | (u64{0xf} << 12) | 19);   // MOV32I R19
+    for (u64 word : lowered.instructions) translate(visitor, word);
+    visitor.ir.WriteShared(32, visitor.ir.Imm32(0), visitor.X(static_cast<IR::Reg>(dest)));
+    visitor.ir.Epilogue();
+    Optimization::SsaRewritePass(program);
+    Optimization::ConstantPropagationPass(env, program);
+    Optimization::DeadCodeEliminationPass(program);
+    Optimization::IdentityRemovalPass(program);
+    bool undefined = false;
+    const auto stored = stored_value(block, undefined);
+    CHECK(stored.has_value());
+    const u32 input = source ? *source : native.words[1];
+    if (*stored != expected || undefined)
+        std::fprintf(stderr, "%s %08x: %08x%s, expected %08x\n", what, input, *stored,
+                     undefined ? " (a conversion out of its range)" : "", expected);
+    if (*stored != expected || undefined) value_failures++;   // (counted: every case is reported before the exit status)
+    Optimization::CollectShaderInfoPass(env, program);
+    Profile profile{};
+    profile.supported_spirv = 0x00010600;
+    const auto spv = Backend::SPIRV::EmitSPIRV(profile, program);
+    CHECK(spv.size() > 5);
+    const auto path = output / ("case-" + std::to_string(modules++) + ".spv");
+    std::ofstream stream(path, std::ios::binary);
+    stream.write(reinterpret_cast<const char*>(spv.data()), spv.size() * sizeof(u32));
+    CHECK(stream.good());
+    std::printf("%s %08x -> %08x\n", what, input, *stored);
+}
+
+// F2I.S32 from F32, toward zero (Fritchii eba45b151): INT32_MAX is 2^31 as an F32, so the clamp let 2^31 and above through
+// to OpConvertFToS, out of its range (undefined); they saturate to INT32_MAX
+static void check_f2i_saturation(const std::filesystem::path& output, u32 literal, u32 expected) {
+    check_value(output, "F2I.S32.TRUNC", instruction(0x905, 13, literal, mode(true, 3, false)), std::nullopt, expected);
+}
+
+// I2FP.F32.U32.RZ (Ampere 0x245, rounding in bits 78-79): OpConvertUToF rounds to nearest, so the RZ conversion is made
+// from the top 24 significant bits (Fritchii f6a8f5132)
+static void check_i2f_rz(const std::filesystem::path& output, u32 literal, u32 expected) {
+    check_value(output, "I2F.F32.U32.RZ", Native{{{0x245U | (7U << 12) | (13U << 16), 19, 0x0020d000U, 0}}}, literal, expected);
+}
+
 static void check_source_controls() {
     // Existing source forms remain accepted with their original source handling.
     for (u32 op : {0x305U, 0xb05U, 0xd05U}) {
@@ -223,5 +359,23 @@ int main(int argc, char** argv) {
     for (u32 literal : literals) check_pipeline(output, literal, true, 3, true);
     check_pipeline(output, std::bit_cast<u32>(32768.5f), false, 0, true, 1);
     check_controls();
+    check_f2i_saturation(output, 0x4f000000U, 0x7fffffffU);   // 2^31
+    check_f2i_saturation(output, 0x4f800000U, 0x7fffffffU);   // 2^32
+    check_f2i_saturation(output, 0x7f7fffffU, 0x7fffffffU);   // the largest float
+    check_f2i_saturation(output, 0x7f800000U, 0x7fffffffU);   // +inf
+    check_f2i_saturation(output, 0x4effffffU, 0x7fffff80U);   // the largest float below 2^31: exact
+    check_f2i_saturation(output, 0xcf000000U, 0x80000000U);   // -2^31: exact
+    check_f2i_saturation(output, 0xff800000U, 0x80000000U);   // -inf
+    check_f2i_saturation(output, 0x7fc00000U, 0U);            // NaN
+    check_f2i_saturation(output, std::bit_cast<u32>(-13.75f), u32(-13));
+    // U32 -> F32 toward zero: the largest values stay below 2^32, ties and the bits under the 24 kept drop, small values exact
+    check_i2f_rz(output, 0xffffffffU, 0x4f7fffffU);
+    check_i2f_rz(output, 0xffffff80U, 0x4f7fffffU);
+    check_i2f_rz(output, 0x01000001U, 0x4b800000U);
+    check_i2f_rz(output, 0x00ffffffU, 0x4b7fffffU);
+    check_i2f_rz(output, 0x80000000U, 0x4f000000U);
+    check_i2f_rz(output, 0U, 0U);
+    check_i2f_rz(output, 1U, 0x3f800000U);
+    CHECK(value_failures == 0);
     std::printf("PASS: %u authored native F2I immediate -> Maxwell -> IR -> SPIR-V cases; source/mode/predicate controls pass\n", modules);
 }

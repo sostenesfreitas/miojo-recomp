@@ -1,17 +1,19 @@
 #version 450
 // (hookshot) NVIDIA DLSS's picture into OoT's gameplay upscale's output (vk_dlss.cpp): what the network's own output
 // does, the square of its perceptual encoding (linear colour again). DLAA's picture is at the render size: scaled up to the
-// output's with the sampler's linear filter.
+// output's with the sampler's linear filter. kSquare (constant 0) off: the engine was given linear light already (the game's
+// native HDR, dlss_prep.comp's kSquare), and its picture is written as it is.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D src;
 layout(binding = 1, r11f_g11f_b10f) uniform writeonly image2D dst;
 layout(push_constant) uniform P { ivec2 size; } pc;
+layout(constant_id = 0) const bool kSquare = true;   // (the square-root encoded picture made linear: off when it is linear)
 void main() {
     const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(g, pc.size))) return;
     vec3 c = all(equal(textureSize(src, 0), pc.size)) ? texelFetch(src, g, 0).rgb
                                                      : textureLod(src, (vec2(g) + 0.5) / vec2(pc.size), 0.0).rgb;
     c = max(c, vec3(0.0));
-    c *= c;
+    if (kSquare) c *= c;
     imageStore(dst, g, vec4(c, 1.0));
 }

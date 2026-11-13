@@ -114,6 +114,7 @@ void descriptors_disturbed() {}
 std::unordered_map<int, int>& handle_hits() { static thread_local std::unordered_map<int, int> h; return h; }
 struct Program {};
 constexpr int kNvnStages = 8;
+int desc_reuse_level() { return 2; }   // (vk_draw.cpp: RX_VK_DESC_REUSE and the Descriptor reuse row; the banks are kept)
 /* BANK_CACHE */
 std::array<std::array<BankCache, kNvnStages>, 2>& bank_cache() { static thread_local std::array<std::array<BankCache, kNvnStages>, 2> b; return b; }
 void make_dummies() {}

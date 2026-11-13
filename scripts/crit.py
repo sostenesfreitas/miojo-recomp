@@ -3,9 +3,9 @@ and renderer thread, "<ms> <name>|<frames>" (module+offset, leaf first).
 
     python -I scripts/crit.py work/runs/<run>_all.txt [top]
 
-A thread is running at an instant when its leaf is in hookshot.exe or hookshot_vk.dll (on Linux hookshot or
-hookshot_vk.so: game code, the runtime, the renderer), blocked otherwise (the leaf in ntdll, win32u, KERNELBASE, libc,
-the driver). RX_MAPS=<folder>: another build's linker maps, or on Linux the game folder (its binaries' symbols). Prints each thread's running share;
+A thread is blocked at an instant when its leaf is outside hookshot.exe / hookshot_vk.dll (on Linux hookshot /
+hookshot_vk.so) and the innermost frame of Hookshot's under it is a wait (prof.WAIT_FRAMES: a condition variable, a
+sleep, a fence, the present); running otherwise, libc's copies and the driver's own work included. RX_MAPS=<folder>: another build's linker maps, or on Linux the game folder (its binaries' symbols). Prints each thread's running share;
 then for the instants when no game thread runs (the frame waits on something outside the game's CPU work): what each
 thread waits in and what the renderer's threads do; then for the instants when the main thread is blocked: how many
 game threads run and the functions they are in.
@@ -46,7 +46,8 @@ def main():
             continue
         frames = stack.split(";")
         leafmod = frames[0].rpartition("+")[0]
-        ticks[int(ms)][thread] = (leafmod in RUN_MODS, [name(f) for f in frames])
+        named = [name(f) for f in frames]
+        ticks[int(ms)][thread] = (not prof.waiting(leafmod, named), named)
     n = len(ticks)
     print("%d instants" % n)
     running = collections.Counter()

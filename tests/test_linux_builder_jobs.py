@@ -43,7 +43,8 @@ class BuildHarness:
         self.gui = SimpleNamespace(
             out=value(str(folder / "out")), kind=value(kind), nup=value(str(nup)),
             romfs=value(str(romfs)), exefs=value(str(exefs)), language=value("English (US)"), prepare=value(True),
-            cfg={"previous": "kept"}, show_progress=lambda: self.events.append(("progress",)), read=lambda proc: None)
+            cfg={"previous": "kept"}, show_progress=lambda: self.events.append(("progress",)), read=lambda proc: None,
+            tick=lambda: self.events.append(("tick",)))
 
         def start_process(command, **kwargs):
             self.events.append(("process",))
@@ -82,7 +83,7 @@ class BuilderBuildJobsTests(unittest.TestCase):
         self.folder = Path(self.temporary.name)
 
     def assert_started(self, harness, jobs=None):
-        self.assertEqual([event[0] for event in harness.events], ["save", "progress", "process", "thread", "start"])
+        self.assertEqual([event[0] for event in harness.events], ["save", "progress", "process", "thread", "start", "tick"])
         gui = harness.gui
         source = ["--nup", gui.nup.get()] if gui.kind.get() == "nup" else ["--romfs", gui.romfs.get(), "--exefs", gui.exefs.get()]
         expected = [sys.executable, "-I", str(ROOT / "nx2" / "make_game.py")] + source + [

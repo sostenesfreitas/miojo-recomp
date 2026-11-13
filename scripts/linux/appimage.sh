@@ -15,7 +15,9 @@ ROOT=$PWD
 B=$ROOT/build-linux
 DEPS=${DEPS:-$B/deps}
 APPDIR=$B/AppDir
-VERSION=${HOOKSHOT_VERSION:-$(git describe --tags --always --match "v[0-9]*" 2>/dev/null || echo dev)}
+# (--long: a nightly built on a tagged commit is v2.1.0-rc.1-0-g1a2b3c4, so the updaters know it is the nightly:
+# builder/linux/linux_update.py track_of)
+VERSION=${HOOKSHOT_VERSION:-$(git describe --tags --long --always --match "v[0-9]*" 2>/dev/null || echo dev)}
 export EMSDK=$DEPS/emsdk RX_CPM=$DEPS/cpm
 PY=$DEPS/python/bin/python3
 
@@ -49,9 +51,10 @@ cp -a builder/linux "$T/builder/"
 cp -a gpu/render/*.h "$T/gpu/render/"
 # (every gpu/vk header the host's sources include: v2.0.6 shipped without oot_cheat_items.h and no Linux build finished, issue 990.
 # tests/test_appimage_headers.py checks that this covers what host/ includes)
-for h in $(grep -rhoE 'gpu/vk/[A-Za-z0-9_]+[.]h' host | sort -u); do if [ -f "$h" ]; then cp -a "$h" "$T/gpu/vk/"; fi; done
+for h in $(grep -rhoE 'gpu/vk/[A-Za-z0-9_/]+[.]h' host | sort -u); do if [ -f "$h" ]; then mkdir -p "$T/$(dirname "$h")" && cp -a "$h" "$T/$h"; fi; done
 cp -a third_party/opus "$T/third_party/"
 cp -a third_party/kenney_input "$T/third_party/"
+cp -a third_party/kenney_input_keyboard "$T/third_party/"
 # (NVIDIA DLSS, when ticked in the builder: scripts/ngx_sdk.py and the Vulkan back end's sources, compiled with HOOKSHOT_NGX_SDK)
 mkdir -p "$T/scripts"
 cp scripts/ngx_sdk.py "$T/scripts/"

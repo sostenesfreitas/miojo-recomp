@@ -9,6 +9,19 @@ using HookshotBuilder;
 
 namespace DigestFixture
 {
+    // This suite varies the standard-home boundary per case. Portable root/archive algorithms
+    // execute separately in test_portable_builder_home.py and test_portable_archive.py.
+    static class FakeBuilderHome
+    {
+        public static string Base => Path.Combine(State.Current.Root, "HookshotBuilder");
+        public static bool Portable => false;
+        public static void PassTo(ProcessStartInfo info) => info.Environment["HOOKSHOT_SETUP_BASE"] = Base;
+    }
+    static class UnusedPortableArchive
+    {
+        public static string Install(string zip, string home, string tag) =>
+            throw new InvalidOperationException("A standard update unexpectedly selected the portable archive route.");
+    }
     static class FakeEnvironment
     {
         public enum SpecialFolder { LocalApplicationData }

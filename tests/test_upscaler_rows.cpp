@@ -1,5 +1,6 @@
 #include "../gpu/vk/upscaler_rows.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
@@ -77,8 +78,12 @@ int main() {
                                                           ur::upscaler_shown(ur::bit(GAME) | ur::fsr4_bits(true)));
         CHECK("FSR 3.1's modes are DLSS's shares", ur::scales_by_mode(ur::FSR3) && ur::scales_by_mode(DLSS) &&
                                                      !ur::scales_by_mode(DLAA) && !ur::scales_by_mode(GAME));
-        CHECK("FSR 3.1 steps as DLSS does", ur::step(ur::FSR3, 0, 1) == 3 && ur::step(ur::FSR3, 3, 1) == 5 &&
-                                              ur::step(ur::FSR3, 6, 1) == 0 && ur::snap(ur::FSR3, 2) == 3);
+        // (FSR 3.1: Auto, 100 % (its native AA), 92 % to 75 %, then AMD's modes)
+        CHECK("FSR 3.1 steps: above Quality too", ur::step(ur::FSR3, 0, 1) == 1 && ur::step(ur::FSR3, 1, 1) == 9 &&
+                                                    ur::step(ur::FSR3, 9, 1) == 8 && ur::step(ur::FSR3, 8, 1) == 2 &&
+                                                    ur::step(ur::FSR3, 2, 1) == 3 && ur::step(ur::FSR3, 3, 1) == 5 &&
+                                                    ur::step(ur::FSR3, 6, 1) == 0 && ur::step(ur::FSR3, 0, -1) == 6 &&
+                                                    ur::snap(ur::FSR3, 2) == 2 && ur::snap(ur::FSR3, 7) == 4);
         CHECK("the model row waits with FSR 3.1", ur::model_fixed(ur::FSR3, false) && !ur::model_fixed(DLSS, false) &&
                                                     !ur::model_fixed(DLAA, false));
         CHECK("FSR 3.1 has a Render resolution", !ur::resolution_fixed(ur::FSR3));
@@ -90,7 +95,7 @@ int main() {
         using ur::FSR4_AA;
         const unsigned every = ur::bit(GAME) | ur::dlss_bits(true) | ur::bit(FSR3) | ur::fsr4_bits(true);
         const unsigned fsr4 = ur::bit(GAME) | ur::fsr4_bits(true);
-        CHECK("FSR 4 after FSR 3.1", FSR4 == 4 && FSR4_AA == 5 && ur::kUpscalers == 6);
+        CHECK("FSR 4 after FSR 3.1", FSR4 == 4 && FSR4_AA == 5);
         CHECK("upscaler steps through all six", ur::step_upscaler(FSR3, 1, every) == FSR4 &&
                                                   ur::step_upscaler(FSR4, 1, every) == FSR4_AA &&
                                                   ur::step_upscaler(FSR4_AA, 1, every) == GAME &&
@@ -112,6 +117,44 @@ int main() {
                 CHECK("FSR 4 steps as DLSS", ur::step(FSR4, v, dir) == ur::step(DLSS, v, dir) && ur::snap(FSR4, v) == ur::snap(DLSS, v));
         CHECK("FSR 4's native AA does not step", ur::step(FSR4_AA, 3, 1) == 3 && ur::snap(FSR4_AA, 5) == 5);
         CHECK("the model row waits with FSR 4", ur::model_fixed(FSR4, false) && ur::model_fixed(FSR4_AA, false));
+    }
+    // Off (no upscaler, the game's network left out too): after FSR 4's native AA (saved values keep their meaning), on every
+    // PC (the menu's mask always has it), with its own Render resolution steps
+    {
+        using ur::OFF;
+        const unsigned menu_min = ur::bit(GAME) | ur::bit(OFF);   // (the menu's mask on a PC with nothing else)
+        const unsigned every = menu_min | ur::dlss_bits(true) | ur::bit(ur::FSR3) | ur::fsr4_bits(true);
+        CHECK("Off is the last value", OFF == 6 && ur::kUpscalers == 7);
+        CHECK("Off steps after FSR 4's native AA and wraps to the game's own",
+              ur::step_upscaler(ur::FSR4_AA, 1, every) == OFF && ur::step_upscaler(OFF, 1, every) == GAME &&
+              ur::step_upscaler(GAME, -1, every) == OFF && ur::step_upscaler(OFF, -1, every) == ur::FSR4_AA);
+        CHECK("Off with the game's own alone", ur::step_upscaler(GAME, 1, menu_min) == OFF &&
+                                                  ur::step_upscaler(OFF, 1, menu_min) == GAME &&
+                                                  ur::step_upscaler(GAME, -1, menu_min) == OFF);
+        CHECK("a saved DLSS where it cannot run steps as the game's own, to Off", ur::step_upscaler(DLSS, 1, menu_min) == OFF);
+        CHECK("the row is shown everywhere Off is", ur::upscaler_shown(menu_min) && !ur::upscaler_fixed(menu_min));
+        CHECK("Off is not an engine", !ur::is_dlss(OFF) && !ur::is_fsr4(OFF) && !ur::full_scale(OFF) && !ur::scales_by_mode(OFF));
+        CHECK("Off has a Render resolution", !ur::resolution_fixed(OFF));
+        CHECK("the model row waits with Off", ur::model_fixed(OFF, false));
+        // its steps: Auto, 100, 75, 67, 50, 33
+        CHECK("off: Right", ur::step(OFF, 0, 1) == 1 && ur::step(OFF, 1, 1) == 2 && ur::step(OFF, 2, 1) == 3 &&
+                                ur::step(OFF, 3, 1) == 4 && ur::step(OFF, 4, 1) == 6 && ur::step(OFF, 6, 1) == 0);
+        CHECK("off: Left", ur::step(OFF, 0, -1) == 6 && ur::step(OFF, 6, -1) == 4 && ur::step(OFF, 1, -1) == 0);
+        CHECK("off from 58%", ur::step(OFF, 5, 1) == 4 && ur::step(OFF, 5, -1) == 3);
+        CHECK("snap to Off", ur::snap(OFF, 0) == 0 && ur::snap(OFF, 1) == 1 && ur::snap(OFF, 2) == 2 && ur::snap(OFF, 6) == 6 &&
+                                 ur::snap(OFF, 5) == 4 && ur::snap(OFF, 9) == 1 && ur::snap(OFF, 12) == 0);
+        CHECK("DLSS's Ultra Performance kept by Off, the game's own takes 50%", ur::snap(OFF, 6) == 6 && ur::snap(GAME, 6) == 4);
+        CHECK("Off's 33% to DLSS stays Ultra Performance", ur::snap(DLSS, ur::step(OFF, 4, 1)) == 6);
+        // the row by engine (step_engine): Off after FSR 4, and back to the game's own; from DLAA (DLSS's Native) too
+        CHECK("Off by engine", ur::step_engine(ur::FSR4, 1, every) == OFF && ur::step_engine(ur::FSR4_AA, 1, every) == OFF &&
+                                   ur::step_engine(OFF, 1, every) == GAME && ur::step_engine(GAME, -1, every) == OFF &&
+                                   ur::step_engine(OFF, -1, every) == ur::FSR4 && ur::step_engine(GAME, 1, menu_min) == OFF &&
+                                   ur::step_engine(OFF, 1, menu_min) == GAME);
+        CHECK("Off is its own engine, without a Native", ur::engine(OFF) == OFF && ur::native_of(OFF) < 0 && !ur::render_fixed(OFF));
+        int up = 0, res = 0;
+        ur::step_render(OFF, 2, 1, &up, &res);
+        CHECK("Off's Render resolution steps its own way", up == OFF && res == 3 && ur::snap_render(OFF, 6) == 6 &&
+                                                              ur::snap_render(OFF, 8) == 2);
     }
     CHECK("upscaler fixed where DLSS cannot run", ur::upscaler_fixed(false) && !ur::upscaler_fixed(true));
     CHECK("render resolution fixed at full scale only", ur::resolution_fixed(DLAA) && ur::resolution_fixed(ur::FSR4_AA) &&
@@ -191,11 +234,36 @@ int main() {
         CHECK("snap_render: engines without a Native as snap", ur::snap_render(GAME, 5) == ur::snap(GAME, 5) &&
                                                                    ur::snap_render(ur::FSR3, 2) == ur::snap(ur::FSR3, 2));
         ur::step_render(FSR3, 0, 1, &up, &res);
-        CHECK("render: FSR 3.1 has no Native", up == FSR3 && res == 3);
+        CHECK("render: FSR 3.1 has no Native: its 100 % is its native AA", up == FSR3 && res == 1);
         ur::step_render(GAME, 0, 1, &up, &res);
         CHECK("render: the game's own as before", up == GAME && res == 1);
         CHECK("render row never fixed", !ur::render_fixed(DLAA) && !ur::render_fixed(FSR4_AA) && !ur::render_fixed(DLSS) &&
                                             !ur::render_fixed(GAME) && !ur::render_fixed(FSR3));
+    }
+    {   // the texture LOD bias added to the game's -0.5 (its materials' bias for its own 3/4): NVIDIA's guide for DLSS
+        // (native bias + log2(render / output) - 1), the output's mips for FSR, nothing for the rest
+        const auto near = [](float a, float b) { return std::fabs(a - b) < 1e-3f; };
+        const auto total = [&](int up, int share) { return -0.5f + ur::upscale_lod_bias_for(up, share, -1.0f); };
+        const auto nvidia = [](float r) { return -0.5f - std::log2(0.75f) + std::log2(r) - 1.0f; };   // (native bias ~ -0.085)
+        for (int share : {3333, 5000, 5833, 6667, 7500, 9167})
+            CHECK("DLSS: NVIDIA's mip bias at each fixed share", near(total(DLSS, share), nvidia(share / 10000.0f)));
+        CHECK("DLSS Quality: 1.17 more", near(ur::upscale_lod_bias_for(DLSS, 6667, -1.0f), -1.1699f));
+        CHECK("DLSS Performance: 1.58 more", near(ur::upscale_lod_bias_for(DLSS, 5000, -1.0f), -1.585f));
+        CHECK("DLAA: the output's own size, -1 in all", near(total(DLAA, 0), nvidia(1.0f)) && near(total(DLAA, 6667), nvidia(1.0f)));
+        CHECK("DLSS at Auto: the game's 3/4", near(total(DLSS, 0), nvidia(0.75f)));
+        CHECK("every DLSS bias is negative and lower at smaller shares",
+              ur::upscale_lod_bias_for(DLSS, 3333, -1.0f) < ur::upscale_lod_bias_for(DLSS, 5000, -1.0f) &&
+                  ur::upscale_lod_bias_for(DLSS, 5000, -1.0f) < ur::upscale_lod_bias_for(DLSS, 6667, -1.0f) &&
+                  ur::upscale_lod_bias_for(DLAA, 0, -1.0f) < 0.0f);
+        CHECK("offset 0: the render size's own detail (as before)", near(ur::upscale_lod_bias_for(DLSS, 6667, 0.0f), std::log2(6667 / 7500.0f)) &&
+                                                                      ur::upscale_lod_bias_for(DLSS, 0, 0.0f) == 0.0f &&
+                                                                      ur::upscale_lod_bias_for(DLAA, 0, 0.0f) == 0.0f);
+        CHECK("FSR: the output's mips below 3/4 only", near(ur::upscale_lod_bias_for(ur::FSR3, 5000, -1.0f), std::log2(5000 / 7500.0f)) &&
+                                                         ur::upscale_lod_bias_for(ur::FSR4, 0, -1.0f) == 0.0f &&
+                                                         ur::upscale_lod_bias_for(ur::FSR3, 10000, -1.0f) == 0.0f);
+        CHECK("no bias for the game's own, Off and FSR 4's native AA",
+              ur::upscale_lod_bias_for(GAME, 6667, -1.0f) == 0.0f && ur::upscale_lod_bias_for(ur::OFF, 5000, -1.0f) == 0.0f &&
+                  ur::upscale_lod_bias_for(ur::FSR4_AA, 0, -1.0f) == 0.0f);
     }
     std::puts("upscaler rows: all checks passed");
 }

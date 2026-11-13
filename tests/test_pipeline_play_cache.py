@@ -23,7 +23,7 @@ import tempfile
 RUN_ALL_ARGS = ["--cxx", "{cxx}"]
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ["route", "save", "retry", "users", "merge", "compact", "compact-failed", "off", "no-control"]
+CASES = ["route", "save", "retry", "users", "merge", "merge-read-failed", "merge-create-failed", "compact", "compact-failed", "off", "no-control"]
 
 
 def play_block(source):
@@ -44,7 +44,7 @@ def main():
         temp = Path(temp)
         (temp / "pipeline_play_cache.inc").write_text(play_block(a.source.read_text(encoding="utf-8")), encoding="utf-8")
         exe = temp / "check.exe"
-        cmd = [a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Werror", "-pthread", "-I" + str(temp),
+        cmd = [a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Werror", "-pthread", "-I" + str(temp), "-I" + str(ROOT / "gpu/vk"),
                str(ROOT / "tests/pipeline_play_cache_test.cpp"), "-o", str(exe)]
         if os.name == "nt":
             cmd += ["-D_CRT_SECURE_NO_WARNINGS"]

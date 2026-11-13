@@ -1,5 +1,5 @@
 """Compile and run the VRAM compaction's rules (gpu/vk/vram_compact.h; no game/GPU required), and check that vk_texture.cpp and
-vk_vma.cpp still use them: the textures in a pool of their own only with RX_VK_COMPACT, nothing of that pool freed while a pass is
+vk_vma.cpp still use them: the textures in a pool of their own unless RX_VK_COMPACT=0, nothing of that pool freed while a pass is
 open, and the budget holding the driver's count with the textures' free space alone taken off.
 
 python -I -B tests/test_vram_compact.py [--cxx g++]
@@ -33,8 +33,8 @@ def need(where, text, needles):
 def check_source():
     tex = (ROOT / "gpu/vk/vk_texture.cpp").read_text(encoding="utf-8")
     vma = (ROOT / "gpu/vk/vk_vma.cpp").read_text(encoding="utf-8")
-    # (the compaction is opt-in)
-    need("vk_texture.cpp: compact_on()", block(tex, "bool compact_on()"), ['getenv("RX_VK_COMPACT")'])
+    # (the compaction is on unless RX_VK_COMPACT=0: the rule is vram_compact::enabled, run below)
+    need("vk_texture.cpp: compact_on()", block(tex, "bool compact_on()"), ['vram_compact::enabled(getenv("RX_VK_COMPACT"))'])
     # (a texture that is not a render target's goes to the textures' pool only when they are compacted, in a branch before the
     # render targets' pool and blocks, which stay as they are)
     make = block(tex, "Texture* create(const Key& key")
@@ -52,8 +52,28 @@ def check_source():
          ["vram_compact::reclaimable(block_free, pool_free)", "vram_compact::pressed(used, allowed)",
           "vram_compact::held_budget(budget, total_bytes, used, reclaim, allowed, pct)", 'getenv("RX_VK_COMPACT_PCT")',
           # (the hold lets go of the excess alone, not of an eighth of the cache; the driver's limit still asks for 7/8)
-          "if (held < budget) budget = evict_to = held;", "if (budget < evict_to) evict_to = 0;",
-          "total_bytes - pending_bytes <= (evict_to ? evict_to : budget / 8 * 7)"])
+          "if (held < budget) budget = evict_to = held;",
+          # (the hold's pass: every dead render target, and live textures only for the excess left and only long unused ones;
+          # it does not stop at the first texture past the excess, which kept it from the dead targets, the youngest)
+          "const bool by_hold = evict_to != 0 && !sweep;",
+          "if (shifted || drawn_over(tex)) hold_dead += tex->bytes + tex->pad;",
+          "if ((!sweep && !by_hold && (pending_bytes >= total_bytes || total_bytes - pending_bytes <= budget / 8 * 7)) ||",
+          "const uint64_t to = vram_compact::hold_target(frame_no - last, need_unused, rule_to, hold_to, evict_to);",
+          # (and what the other rules ask on their own is kept from before the hold's lines, the 97% rule's with it, for the
+          # pass's third tier: a texture unused for the eviction's own time goes for that part)
+          "uint64_t rule_budget = budget;", "rule_budget = std::min(rule_budget, total_bytes > over ? total_bytes - over : 0);",
+          "const uint64_t size_budget = budget;", 'getenv("RX_VK_EVICT_EXCESS")',
+          "const uint64_t rule_to = excess_only ? vram_compact::rule_target(total_bytes, size_budget, rule_budget)",
+          ": vram_compact::rule_target(total_bytes, rule_budget);",
+          "if (to == UINT64_MAX || vram_compact::hold_met(total_bytes, hold_live, hold_dead, to)) continue;",
+          # (the reserve: a lower line that sets the budget too, the hold's own line kept for the textures not long unused;
+          # the driver's limit, when it asks for more, clears both)
+          "hold_to = evict_to;", "vram_compact::reserve_pct(pct));", "if (reserve < budget) budget = evict_to = reserve;",
+          "if (budget < evict_to) evict_to = hold_to = 0;",
+          "if (by_hold && !overwritten) hold_live += tex->bytes + tex->pad;"])
+    # (and a live texture is judged by the hold only once it is known whether a render target drew over it)
+    if not frame.index("const bool overwritten = shifted || drawn_over(tex);") < frame.index("vram_compact::hold_target(frame_no - last"):
+        raise SystemExit("vk_texture.cpp: the hold's pass judges a texture before it knows whether it is a dead render target")
     need("vk_texture.cpp: compact_step()", block(tex, "void compact_step(uint64_t completed)"),
          ["if (!compact_on()) return;", "vram_compact::run_from(min_free, compact.pressed)", "vram_compact::rest(compact.pressed)",
           "t != present_source", "image_compact_ignore(i);", "destroy_gen++;"])

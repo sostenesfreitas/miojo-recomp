@@ -1,0 +1,187 @@
+{
+ "_about": "Work that could be removed, merged or done more cheaply. scripts/cpu_report.py prices each from the capture: cost = on-CPU samples with a frame matching 'match' anywhere in the stack (once a sample); 'gain' is the share of that cost the fix is expected to remove, always an estimate; 'evidence' names a measurement that supports the estimate, if there is one. 'game_own' rows are the game's own large costs, listed for scale. Keys are frame keys as the report prints them.",
+ "candidates": [
+  {
+   "id": "scan-written-pages",
+   "title": "The scan for written pages at every submission",
+   "match": "^collect_in$",
+   "what": "Reads and clears the lifted code's write marks over every GPU-visible range, 32 pages at a time, at every submission; its cost follows the pools' size, not what was written.",
+   "fix": "A summary level over the marks (one bit for a few hundred pages, set where the mark is set) so clean spans cost nothing.",
+   "gain": [
+    0.5,
+    0.75
+   ],
+   "risk": "medium: a missed page is stale data on the GPU; needs the capture tests and Codex's content check",
+   "evidence": "-"
+  },
+  {
+   "id": "copy-recordings",
+   "title": "Each recorded command buffer copied when its recording ends",
+   "match": "^n_nvnCommandBufferEndRecording$",
+   "what": "nvnCommandBufferEndRecording copies the recorded commands into a pooled block that becomes the handle.",
+   "fix": "Hand the recorded segment over as the handle and give the command buffer a fresh segment.",
+   "gain": [
+    0.6,
+    0.75
+   ],
+   "risk": "medium: recording memory ownership; the renderer's correctness gate",
+   "evidence": "-"
+  },
+  {
+   "id": "copy-called-recordings",
+   "title": "A recording copied again when it is called, under a shared lock",
+   "match": "^(n_nvnCommandBufferCallCommands|inline_recording|check_handle)$",
+   "what": "nvnCommandBufferCallCommands inlines the called recording by copying it and checks the handle under a shared lock.",
+   "fix": "Reference the called recording instead of copying it; check the handle without the lock.",
+   "gain": [
+    0.4,
+    0.6
+   ],
+   "risk": "medium: a called recording freed while referenced",
+   "evidence": "-"
+  },
+  {
+   "id": "replay-pin",
+   "title": "The submitting thread moved onto the reserved core and back for every replay",
+   "match": "^SetThreadAffinityMask \\(",
+   "what": "ReplayPin sets the submitting thread's affinity to the core reserved for the replay before each submission's replay and restores the old mask after it (two SetThreadAffinityMask calls a submission); game threads' own mask leaves that core out.",
+   "fix": "Keep the thread on the reserved core across back-to-back submissions and restore the mask once, or skip the pair when the replay is too short to gain from the core.",
+   "gain": [
+    0.3,
+    0.7
+   ],
+   "risk": "medium: the game thread runs on the reserved core longer; the replay's own core use changes",
+   "evidence": "stacks: about two thirds of the calls are on the Presentation Thread and a third on the main thread; each moves to the reserved core and back for every replay"
+  },
+  {
+   "id": "idle-worker-sleeps",
+   "title": "Idle job workers' 20 us sleeps answered by a busy loop",
+   "match": "^imp__ZN2nn2os11SleepThread",
+   "what": "The game's idle job workers sleep 20 us at a time, very often; under 1 ms the host yields in a loop until the time, keeping a processor busy.",
+   "fix": "The short-sleep timer on PCs with few logical processors (PR 2263, measured with its own code: fps up 9.2 % on 4 logical processors); a cheaper wait elsewhere.",
+   "gain": [
+    0.3,
+    0.6
+   ],
+   "risk": "low to medium: a longer sleep delays a job's start",
+   "evidence": "measured with PR 2263's own code: on 4 logical processors fps +9.2 % (47.0 to 51.3) and no frame over 250 ms (2 of 4 runs had one before); on 6, CPU a frame -9 % at the same fps. On 16 the timer for every short sleep saved 5 to 13 % of the process's CPU at the same fps and is not proposed there (3 of 32 runs with a 250 ms frame against 0 of 38)"
+  },
+  {
+   "id": "event-spin",
+   "title": "The 20 us spin before an event or queue wait sleeps",
+   "match": "^spin_until_set$",
+   "what": "Each light-event or queue wait spins up to 20 us before sleeping; three of four waits end inside the spin.",
+   "fix": "A 5 us spin (HOS_SPIN_US=5), or an adaptive one.",
+   "gain": [
+    0.25,
+    0.4
+   ],
+   "risk": "low: wake latency; measured fps unchanged",
+   "evidence": "measured: process CPU -3 % on 16 threads at the same fps"
+  },
+  {
+   "id": "mutex-fast-path",
+   "title": "Every mutex lock and unlock through the host's object table",
+   "match": "^imp__ZN2nn2os\\d+(Lock|Unlock|TryLock)Mutex",
+   "what": "Each lock and unlock finds the host object of the guest mutex.",
+   "fix": "An uncontended fast path in the guest's own mutex memory, as the SDK does it.",
+   "gain": [
+    0.3,
+    0.6
+   ],
+   "risk": "high: guest-visible layout, condition-variable hand-off, virtual cores",
+   "evidence": "-"
+  },
+  {
+   "id": "exact-float-helpers",
+   "title": "Exact floating-point helpers in vector code",
+   "match": "^(a64_v?fpx|recomp_fpe|recomp_fp_estimate)",
+   "what": "Bit-exact ARM floating-point results for operations x86 rounds differently; the game's vector code needs them often.",
+   "fix": "More per-helper fast paths that stay bit-exact.",
+   "gain": [
+    0.1,
+    0.4
+   ],
+   "risk": "high: one wrong bit changes game behaviour; needs exhaustive stubs",
+   "evidence": "-"
+  },
+  {
+   "id": "guest-ranges-sort",
+   "title": "The GPU-visible ranges re-sorted at every submission while mappings change",
+   "match": "^hos_gpu_guest_ranges$",
+   "what": "qsort of the GPU-visible ranges at each submission when a mapping changed since the last one (often, while streaming).",
+   "fix": "Keep the list sorted on insert and removal.",
+   "gain": [
+    0.7,
+    0.9
+   ],
+   "risk": "low",
+   "evidence": "-"
+  },
+  {
+   "id": "getenv-hot",
+   "title": "getenv on hot paths",
+   "match": "getenv",
+   "what": "Environment switches read with getenv at every present (menu_vsync), every dispatch (taau_stand_in) and every file open; only the getenv calls are counted.",
+   "fix": "Read each switch once into a static.",
+   "gain": [
+    0.6,
+    0.95
+   ],
+   "risk": "low",
+   "evidence": "-"
+  },
+  {
+   "id": "stat-volume",
+   "title": "The C runtime's stat opens the volume on every call",
+   "match": "GetDriveTypeW",
+   "what": "stat on the loading threads asks for the drive type each time, which opens the volume.",
+   "fix": "A stat that does not ask for the drive type (GetFileAttributesEx).",
+   "gain": [
+    0.8,
+    0.95
+   ],
+   "risk": "low",
+   "evidence": "-"
+  },
+  {
+   "id": "thread-priority",
+   "title": "GetThreadPriority under a shared lock",
+   "match": "^imp__ZN2nn2os\\d+GetThreadPriority",
+   "what": "Called many times a frame from the game's worker loops.",
+   "fix": "Read the priority without the lock.",
+   "gain": [
+    0.5,
+    0.7
+   ],
+   "risk": "low",
+   "evidence": "-"
+  },
+  {
+   "id": "signal-no-waiter",
+   "title": "SignalConditionVariable with nobody waiting",
+   "match": "^imp__ZN2nn2os\\d+(Signal|Broadcast)ConditionVariable",
+   "what": "Signals take a lock pair and make a wake call even when nobody waits.",
+   "fix": "Return early when the waiter count is 0, with the ordering argument written down.",
+   "gain": [
+    0.5,
+    0.8
+   ],
+   "risk": "low to medium: a missed wake is a hang",
+   "evidence": "-"
+  },
+  {
+   "id": "trivial-hle",
+   "title": "Trivial OS calls made through the full call path",
+   "match": "^imp__ZN2nn2os\\d+(GetTlsValue|GetCurrentThread)",
+   "what": "GetTlsValue and GetCurrentThread.",
+   "fix": "Answer them in the lifted code with a field read.",
+   "gain": [
+    0.5,
+    0.8
+   ],
+   "risk": "low (a lift change for little)",
+   "evidence": "-"
+  }
+ ]
+}

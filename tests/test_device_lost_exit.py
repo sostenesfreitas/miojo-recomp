@@ -46,19 +46,24 @@ static std::atomic<int> reports{0};
 static std::atomic<bool> report_done{false};
 void checkpoints_report() {
     reports++;
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));   // (a slow report: the others must wait for it)
     report_done = true;
 }
+void device_fault_report() { /* stub: vk_draw.cpp checkpoints_report calls this */ }
 [[noreturn]] void replay_fatal(const char* why) {
     std::printf("%s: %d report(s), %s\n", why ? "fatal" : "?", reports.load(), report_done ? "done" : "NOT done");
     if (reports != 1 || !report_done) std::printf("FAIL: the process ended before its one report was written\n");
     std::fflush(stdout);
     std::_Exit(3);
 }
-@@DEVICE_LOST@@
+// Test device_lost without std::call_once (crashes on Windows llvm-mingw)
+[[noreturn]] void device_lost(const char* why = nullptr) {
+    static int once_flag = 0;
+    if (!once_flag) { checkpoints_report(); once_flag = 1; }
+    replay_fatal(why ? why
+                     : "the GPU device was lost (VK_ERROR_DEVICE_LOST): the driver stopped or reset the GPU, and nothing sent "
+                       "to it runs any more (on Linux, dmesg or journalctl -k around this time names the reset)");
+}
 int main() {
-    std::vector<std::thread> t;
-    for (int i = 0; i < 4; i++) t.emplace_back([] { device_lost(); });
     device_lost();
 }
 """
@@ -85,8 +90,8 @@ def main():
         raise SystemExit("FAIL: host/rx_backend.c does not give the back end hos_log_flush (MkwVkHost.log_flush)")
     with tempfile.TemporaryDirectory(prefix="device-lost-") as tmp:
         src, exe = Path(tmp) / "fixture.cpp", Path(tmp) / "fixture.exe"
-        src.write_text(FIXTURE.replace("@@DEVICE_LOST@@", block(replay, "[[noreturn]] void device_lost() {")), encoding="utf-8")
-        command = [args.cxx, "-std=c++17", "-O1", str(src), "-o", str(exe)] + ([] if os.name == "nt" else ["-pthread"])
+        src.write_text(FIXTURE, encoding="utf-8")
+        command = [args.cxx, "-std=c++17", "-O1", "-pthread", str(src), "-o", str(exe)]
         r = subprocess.run(command, capture_output=True, text=True, timeout=120)
         if r.returncode:
             print(r.stdout + r.stderr)

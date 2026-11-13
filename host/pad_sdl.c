@@ -5,7 +5,7 @@
    A thread of its own (on Linux the window's, which runs SDL there too) opens every controller SDL knows (and ones
    plugged in later), polls them every 4 ms and keeps
    the merged state; nn_hid.c ORs it into the input with XInput, keyboard and mouse. Without SDL nothing
-   changes. HOS_NO_SDL=1 leaves SDL out. The inputs go by position (HOS_PAD_*, SDL's own order: the bottom face button
+   changes. HOS_NO_SDL=1 leaves SDL out. The inputs go by position (HOS_PAD_*: the bottom face button
    first, cross on a DualSense, A on an Xbox pad); nn_hid.c's controls make them the Switch's buttons.
 
    (hookshot) Motion: with the Insert menu's Motion controls on (the default), the open pad with a gyroscope and an
@@ -22,13 +22,18 @@
 #include "hos_sdl.h"
 #include "hd_rumble.h"
 #include "hos_motion.h"
+#include "steam_pads.h"
 #include "../gpu/vk/vk_api.h"   /* (HOS_PAD_*) */
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 
 void hos_host_thread_register_self(const char *name);   /* hos_prof.c */
 
 /* (BTN_A ... BTN_RIGHT are HOS_PAD_SOUTH ... HOS_PAD_RIGHT) */
 enum { BTN_A, BTN_B, BTN_X, BTN_Y, BTN_BACK, BTN_GUIDE, BTN_START, BTN_LSTICK, BTN_RSTICK, BTN_LSHOULDER, BTN_RSHOULDER,
-       BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_MISC1, BTN_TOUCHPAD = 20, BTN_N = 21 };
+       BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT, BTN_MISC1, BTN_RPADDLE1, BTN_LPADDLE1, BTN_RPADDLE2, BTN_LPADDLE2,
+       BTN_TOUCHPAD = 20, BTN_N = 21 };
 enum { AX_LX, AX_LY, AX_RX, AX_RY, AX_LT, AX_RT };
 
 #define MAX_PADS 8
@@ -51,6 +56,9 @@ static struct {
     uint32_t serial;
     float bias[3], bias_t;
     int has_bias;
+    uint16_t vendor;      /* (hookshot) its USB vendor, and its Steam Input handle: not 0 for a Steam stand-in pad */
+    uint64_t steam;
+    int motion_only;      /* (host/steam_pads.h) a real Valve pad while a Steam stand-in pad is open: motion, no input */
 } pads[MAX_PADS];
 static uint32_t pads_opened;
 static SRWLOCK state_lock = SRWLOCK_INIT;
@@ -74,12 +82,7 @@ static HosMotionSample motion_hist[HOS_MOTION_HISTORY];
 static int motion_head, motion_count, motion_live;
 static volatile LONG gyro_status;   /* 0 no controller, 1 controllers but none with a gyro, 2 one with a gyro */
 
-int32_t hos_stick_axis(int16_t v, int zone);   /* nn_hid.c: the menu's Stick dead zone, as XInput's pads */
-
-static int32_t stick_value(int16_t v, int flip, int zone) {
-    const int32_t a = hos_stick_axis(v, zone);
-    return flip ? -a : a;
-}
+void hos_filter_stick(int16_t x, int16_t y, int zone, int32_t out[2]);   /* nn_hid.c */
 
 /* SDL's controller support started; 0 when it could not be */
 static int pads_start(void) {
@@ -94,7 +97,18 @@ static int pads_start(void) {
     hos_sdl_hint("SDL_GAMECONTROLLER_USE_BUTTON_LABELS", "0");
     /* (with no window nothing reads SDL's quit event: SDL's own SIGINT/SIGTERM handlers turned a timeout's or a service
        manager's SIGTERM into that event, and the run went on until SIGKILL. Without them the signals end it as usual) */
-    if (getenv("HOS_HEADLESS")) hos_sdl_hint("SDL_NO_SIGNAL_HANDLERS", "1");
+    if (env_on("HOS_HEADLESS")) hos_sdl_hint("SDL_NO_SIGNAL_HANDLERS", "1");
+    /* (hookshot) Valve's own pads taken out of the ignore list Steam sets for the games it starts, so that their motion
+       sensors are read (host/steam_pads.h, #1897). Only with an SDL that tells Steam's stand-in pads apart: without
+       that, a real pad and its stand-in would both play. A list emptied or unset in Steam's launch options is left as
+       it is */
+    {
+        const char *list = getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES");
+        char kept[4096];
+        if (list && *list && hos_sdl_knows_steam_pads() && steam_pads_without_valve(list, kept, sizeof kept) > 0 &&
+            hos_sdl_hint_override("SDL_GAMECONTROLLER_IGNORE_DEVICES", kept))
+            hos_log("hid: Valve's controllers (not the Steam Deck's) taken out of Steam's ignore list, for their motion sensors");
+    }
     if (!hos_sdl_init(HOS_SDL_GAMEPAD)) {
         hos_log("hid: SDL could not start its controller support: %s", hos_sdl_error());
         return 0;
@@ -179,7 +193,7 @@ static int hd_poll(int i, const uint8_t side[3][4], long long now) {
 static void motion_poll(int64_t now, int count) {
     int rx_option(int id, int otherwise);
     static int debug = -1;   /* (HOS_MOTION_DEBUG, read once) */
-    if (debug < 0) debug = getenv("HOS_MOTION_DEBUG") != NULL;
+    if (debug < 0) debug = env_on("HOS_MOTION_DEBUG");
     const int want = rx_option(HOS_OPT_GYRO, 1) != 0;
     int pick = -1, any = 0;
     for (int i = 0; i < MAX_PADS; i++) {
@@ -208,6 +222,27 @@ static void motion_poll(int64_t now, int count) {
     float a[3], g[3];
     const int read = pick >= 0 && hos_sdl_pad_sensor(pads[pick].gc, HOS_SDL_SENSOR_ACCEL, a, 3) &&
                      hos_sdl_pad_sensor(pads[pick].gc, HOS_SDL_SENSOR_GYRO, g, 3);
+    /* (a gyroscope reading the very same values for over a second has stopped: a real one always moves a little. Seen with a
+       Steam Controller under Steam after Alt+Tab, when Steam's layout switch left its sensors off while SDL still had them on.
+       Off and on again, as the menu's Motion controls row does, brings it back) */
+    {
+        static float last_g[3];
+        static int64_t same_since, rearm_ns;
+        if (read && !memcmp(g, last_g, sizeof g)) {
+            if (!same_since) same_since = now;
+            else if (now - same_since > 1200000000LL && now >= rearm_ns) {
+                hos_sdl_pad_sensor_enable(pads[pick].gc, HOS_SDL_SENSOR_ACCEL, 0);
+                hos_sdl_pad_sensor_enable(pads[pick].gc, HOS_SDL_SENSOR_GYRO, 0);
+                pads[pick].motion_on = 0;   /* (turned on again by the loop above on the next poll) */
+                hos_log("hid: \"%s\": its gyroscope stopped changing: motion sensors turned off and on again",
+                        hos_sdl_pad_name(pads[pick].gc));
+                same_since = 0, rearm_ns = now + 3000000000LL;
+            }
+        } else {
+            if (read) memcpy(last_g, g, sizeof g);
+            same_since = 0;
+        }
+    }
     /* (the pad that had motion keeps what its filter learned of its gyroscope's bias, for when it has motion again) */
     if (motion_pad >= 0 && (!read || pick != motion_pad) && pads[motion_pad].gc && pads[motion_pad].serial == motion_serial &&
         motion.learned_t > 0) {
@@ -274,6 +309,21 @@ static void motion_poll(int64_t now, int count) {
     ReleaseSRWLockExclusive(&state_lock);
 }
 
+/* (hookshot) a motion-only pad's own presses (host/steam_pads.h): they are not the game's input, but they still mark it
+   the pad used last, which motion_poll reads motion from */
+static void motion_only_used(int i, int64_t now) {
+    int rx_option(int id, int otherwise);
+    const int z = rx_option(11, 0);   /* (the menu's Stick dead zone) */
+    uint64_t sig = 0;
+    for (int k = BTN_A; k <= BTN_RIGHT; k++)
+        if (hos_sdl_pad_button(pads[i].gc, k)) sig |= 1ULL << k;
+    int32_t v[4];
+    hos_filter_stick(hos_sdl_pad_axis(pads[i].gc, AX_LX), hos_sdl_pad_axis(pads[i].gc, AX_LY), z, v);
+    hos_filter_stick(hos_sdl_pad_axis(pads[i].gc, AX_RX), hos_sdl_pad_axis(pads[i].gc, AX_RY), z, v + 2);
+    for (int k = 0; k < 4; k++) sig |= (uint64_t)(v[k] > 0 ? 1 : v[k] < 0 ? 2 : 0) << (32 + 2 * k);
+    if (sig != pads[i].input_sig) pads[i].input_sig = sig, pads[i].used_ns = now;
+}
+
 /* one poll: controllers plugged in or gone (each second), then every open one's buttons, sticks and rumble */
 static void pads_poll(void) {
     static int64_t next_scan = 0;
@@ -316,8 +366,10 @@ static void pads_poll(void) {
                 memset(pads[slot].held, 0, sizeof pads[slot].held);
                 pads[slot].serial = ++pads_opened;
                 pads[slot].has_bias = 0;
-                hos_log("hid: controller \"%s\" connected (SDL)%s", hos_sdl_pad_name(gc),
-                        pads[slot].motion ? ", with a gyroscope" : "");
+                pads[slot].vendor = hos_sdl_pad_vendor(gc);
+                pads[slot].steam = hos_sdl_pad_steam_handle(gc);
+                pads[slot].motion_only = 0;   /* (the poll below decides, and says so) */
+                hos_sdl_pad_log_connection(gc, pads[slot].motion, pads[slot].steam != 0);
             }
         }
         uint64_t b = 0;
@@ -341,12 +393,39 @@ static void pads_poll(void) {
             hd_rumble_merge(felt[0], felt[1], felt[2]);
             hd_rumble_encode(felt[2], strength, side[2]);
         }
+        int stand_in = 0;   /* (hookshot) a Steam stand-in pad open (host/steam_pads.h) */
+        for (int i = 0; i < MAX_PADS; i++) stand_in |= pads[i].gc && pads[i].steam;
         for (int i = 0; i < MAX_PADS; i++) {
             void *gc = pads[i].gc;
             if (!gc) continue;
+            /* (hookshot) a real Valve pad beside its Steam stand-in: its motion is read (motion_poll), its buttons and
+               sticks come through the stand-in as the player's Steam layout maps them, so they are not merged twice,
+               and its rumble goes through Steam too. Its own presses still mark it the pad used last, for motion */
+            const int motion_only = steam_pads_motion_only(pads[i].vendor, pads[i].steam, stand_in);
+            if (motion_only != pads[i].motion_only) {
+                pads[i].motion_only = motion_only;
+                /* (a real Valve pad this SDL opens with no gyroscope: an SDL with no driver for it, so the loosened
+                   list gives no motion, said once so the next person with #1897 sees why) */
+                if (motion_only && !pads[i].motion)
+                    hos_log("hid: \"%s\": no motion sensors through this SDL, so Motion controls can't read it; "
+                            "its buttons come through Steam Input's pad", hos_sdl_pad_name(gc));
+                else
+                    hos_log(motion_only ? "hid: \"%s\": motion only, its buttons come through Steam Input's pad"
+                                        : "hid: \"%s\": its buttons count again (no Steam Input pad is open)",
+                            hos_sdl_pad_name(gc));
+            }
+            if (motion_only) {
+                motion_only_used(i, now);
+                continue;
+            }
             count++;
+            uint64_t sig = 0;
             for (int k = BTN_A; k <= BTN_RIGHT; k++)   /* (SDL3's gamepad buttons are in SDL2's order) */
-                if (hos_sdl_pad_button(gc, k)) b |= 1ULL << k;
+                if (hos_sdl_pad_button(gc, k)) sig |= 1ULL << k;
+            /* The paddle buttons follow MISC1 in SDL, and the triggers in HOS_PAD_*. */
+            for (int k = BTN_RPADDLE1; k <= BTN_LPADDLE2; k++)
+                if (hos_sdl_pad_button(gc, k)) sig |= 1ULL << (HOS_PAD_RPADDLE1 + k - BTN_RPADDLE1);
+            b |= sig;
             /* (hookshot) a DualShock 4's or DualSense's touchpad click: it opens the Insert menu as F1 does (vk_menu.cpp).
                SDL numbers it 20, past the buttons above; an SDL without it answers 0 */
             if (hos_sdl_pad_button(gc, BTN_TOUCHPAD)) b |= 1ULL << HOS_PAD_TOUCHPAD;
@@ -354,28 +433,38 @@ static void pads_poll(void) {
             if (hos_sdl_pad_axis(gc, AX_RT) > 8000) b |= 1ULL << HOS_PAD_RTRIGGER;
             const int inv_x = rx_option(16, 0);
             const int inv_y = rx_option(17, 0);
-            const int z = rx_option(11, 0);   /* (the menu's Stick dead zone: nn_hid.c's hos_stick_axis) */
-            int32_t v[4] = {stick_value(hos_sdl_pad_axis(gc, AX_LX), 0, z),
-                            stick_value(hos_sdl_pad_axis(gc, AX_LY), 1, z),
-                            stick_value(hos_sdl_pad_axis(gc, AX_RX), inv_x, z),
-                            stick_value(hos_sdl_pad_axis(gc, AX_RY), inv_y ? 0 : 1, z)};
+            const int z = rx_option(11, 0);   /* (the menu's Stick dead zone) */
+            int32_t v[4];
+            hos_filter_stick(hos_sdl_pad_axis(gc, AX_LX), hos_sdl_pad_axis(gc, AX_LY), z, v);
+            hos_filter_stick(hos_sdl_pad_axis(gc, AX_RX), hos_sdl_pad_axis(gc, AX_RY), z, v + 2);
+            v[1] = -v[1];   /* SDL's Y axes point down */
+            v[3] = -v[3];
             /* (hookshot) An axis steers once it has been seen at rest (inside the dead zone) since the pad was opened. The sticks are
                the strongest of all the pads', so a device whose axis reads held for good (a mapping that puts a trigger or an
                unused axis on a stick, a second virtual pad) turned the camera or walked Link in circles on its own, with the
                player's pad at rest (#1673: Xbox 360 pad, CachyOS; #1661: GameSir 2 Lite, wired). A real stick rests at the start. */
             /* (a worn stick resting just past a small dead zone counts once it is pushed the other way: it went past its rest) */
+            /* Rest is judged per axis, as before the circle: a phantom axis held past the dead zone keeps its partner
+               outside the circle, and the partner must still rest at its own center. */
             for (int k = 0; k < 4; k++) {
-                const signed char way = (signed char)(v[k] > 0 ? 1 : v[k] < 0 ? -1 : 0);
+                int32_t alone[2];
+                hos_filter_stick((int16_t)v[k], 0, z, alone);
+                const signed char way = (signed char)(alone[0] > 0 ? 1 : alone[0] < 0 ? -1 : 0);
                 if (!way || (pads[i].held[k] && way != pads[i].held[k])) pads[i].rested |= 1u << k;
                 pads[i].held[k] = way;
                 if (!(pads[i].rested >> k & 1)) v[k] = 0;
             }
+            /* An axis held back above no longer counts toward its stick's circle, so its partner's drift stays inside
+               the dead zone. Values are already clamped and the circle keeps them, so this changes nothing otherwise. */
+            hos_filter_stick((int16_t)v[0], (int16_t)v[1], z, v);
+            hos_filter_stick((int16_t)v[2], (int16_t)v[3], z, v + 2);
+            /* Camera inversion changes output, not whether the physical stick crossed its rest position. Otherwise
+               toggling the setting admits a held phantom axis, which stays admitted after the setting is restored (#2273). */
+            if (inv_x) v[2] = -v[2];
+            if (inv_y) v[3] = -v[3];
             for (int k = 0; k < 4; k++)
                 if ((v[k] < 0 ? -v[k] : v[k]) > (s[k] < 0 ? -s[k] : s[k])) s[k] = v[k];
             {   /* (motion: the pad last used; a stick counts by which way it is pushed, not by how far) */
-                uint64_t sig = 0;
-                for (int k = BTN_A; k <= BTN_RIGHT; k++)
-                    if (hos_sdl_pad_button(gc, k)) sig |= 1ULL << k;
                 for (int k = 0; k < 4; k++) sig |= (uint64_t)(v[k] > 0 ? 1 : v[k] < 0 ? 2 : 0) << (32 + 2 * k);
                 if (sig != pads[i].input_sig) pads[i].input_sig = sig, pads[i].used_ns = now;
             }
@@ -394,7 +483,7 @@ static void pads_poll(void) {
         state_count = count;
         state_name[0] = 0;
         for (int i = 0; i < MAX_PADS; i++)
-            if (pads[i].gc) {
+            if (pads[i].gc && !pads[i].motion_only) {   /* (the stand-in's name, not its motion-only pad's) */
                 const char *name = hos_sdl_pad_name(pads[i].gc);
                 snprintf(state_name, sizeof state_name, "%s", name ? name : "");
                 break;
@@ -429,7 +518,7 @@ void hos_sdl_pads_pump(void) {
 int hos_sdl_pads(uint64_t *buttons, int32_t stick[4]) {
     static volatile LONG started;
     if (!started && !InterlockedExchange(&started, 1)) {
-        if (getenv("HOS_NO_SDL")) return 0;
+        if (env_on("HOS_NO_SDL")) return 0;
         if (!hos_sdl_load()) {
             hos_log("hid: no SDL beside the exe or on the system: only XInput controllers (Xbox pads) work");
             return 0;

@@ -24,6 +24,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 uint64_t hos_hostcall(const char *name, void (*fn)(Ctx *, void *), void *user);   /* hos_hostcall.c */
 void hos_gpu_track(uint64_t guest, uint64_t size, int on);                          /* nvdrv.c */
 
@@ -61,7 +64,7 @@ static uint64_t h2g(const void *p) { return p ? (uint64_t)((const uint8_t *)p - 
 static void *g2h(uint64_t a) { return a ? gw(a, NVN_OBJ_MIN) : NULL; }
 #define RETP(p) RET(h2g(p))
 
-static int nvn_log_on(void) { static int v = -1; if (v < 0) v = getenv("HOS_NVN_LOG_OBJECTS") != NULL; return v; }
+static int nvn_log_on(void) { static int v = -1; if (v < 0) v = env_on("HOS_NVN_LOG_OBJECTS"); return v; }
 #define OLOG(...) do { if (nvn_log_on()) hos_log("nvn: " __VA_ARGS__); } while (0)
 static void die(const char *fmt, ...) {
     char b[512];
@@ -219,7 +222,7 @@ NV(nvnDeviceGetInteger) {
     const unsigned w = U32(1);
     if (w >= sizeof devinfo / sizeof *devinfo) die("device property %#x", w);
     static int devinfo_log = -1;
-    if (devinfo_log < 0) devinfo_log = getenv("HOS_NVN_DEVINFO_LOG") != NULL;
+    if (devinfo_log < 0) devinfo_log = env_on("HOS_NVN_DEVINFO_LOG");
     if (devinfo_log) hos_log("nvn: nvnDeviceGetInteger(%u) -> %d", w, devinfo[w]);
     *(int *)P(2) = devinfo[w];
 }
@@ -307,6 +310,8 @@ NV(nvnMemoryPoolInitialize) {
     o->gpu = b->mem;
     hos_gpu_track(o->gpu, o->size, 1);   /* (the CPU's writes to it reach the renderer through write watch) */
     rx_nvn_pool_created(o->gpu, o->size);
+    void hos_prompts_pool(uint64_t mem, uint64_t size);   /* (hookshot, prompts.c: the button prompts' textures, changed in place) */
+    hos_prompts_pool(o->mem, o->size);
     OLOG("pool %#llx size %#llx flags %#x", (unsigned long long)o->gpu, (unsigned long long)o->size, o->flags);
     RET(1);
 }
@@ -344,6 +349,8 @@ NV(nvnMemoryPoolFinalize) {
         ReleaseSRWLockExclusive(&vmap_lock);
     } else if (o->mem) {
         hos_gpu_track(o->gpu, o->size, 0);
+        void hos_prompts_pool_gone(uint64_t mem);   /* (hookshot, prompts.c: the prompts' textures no longer written there) */
+        hos_prompts_pool_gone(o->mem);
     }
     o->magic = 0;
 }
@@ -566,7 +573,7 @@ NV(nvnTextureBuilderSetSize2D) {
     {   /* (hookshot) HOS_SIZE_TRACE=1: who asks for the picture's sizes (the output and the scene: for wider screens) */
         static int on = -1;
         static volatile LONG left = 24;
-        if (on < 0) on = getenv("HOS_SIZE_TRACE") != NULL;
+        if (on < 0) on = env_on("HOS_SIZE_TRACE");
         const uint32_t w = U32(1);
         if (on && (w == 2560 || w == 2048 || w == 1536 || w == 3840 || w == 1920) && InterlockedDecrement(&left) >= 0) {
             void hos_backtrace(void);
@@ -817,7 +824,7 @@ static LONG CALLBACK wts_handler(EXCEPTION_POINTERS *e) {
             static ULONGLONG after = ~0ull;   /* RX_NVN_WATCH_AFTER=<seconds>: only writes after that are reported */
             if (after == ~0ull) after = GetTickCount64() + (getenv("RX_NVN_WATCH_AFTER") ? (ULONGLONG)atoi(getenv("RX_NVN_WATCH_AFTER")) * 1000 : 0);
             static int all_threads = -1;   /* RX_NVN_WATCH_ALL=1: the Resource Memory thread's writes too */
-            if (all_threads < 0) all_threads = getenv("RX_NVN_WATCH_ALL") != NULL;
+            if (all_threads < 0) all_threads = env_on("RX_NVN_WATCH_ALL");
             if ((all_threads || strcmp(tn, "Resource Memory")) && GetTickCount64() >= after && InterlockedIncrement(&wts_reports) <= 12) {   /* (not the allocation's zero fill) */
                 hos_log("nvn: write to a WriteTexels source at guest %#llx by %s (host pc exe+%#llx)", (unsigned long long)(a - (uintptr_t)GP(0)), tn,
                         (unsigned long long)((uintptr_t)e->ExceptionRecord->ExceptionAddress - (uintptr_t)GetModuleHandleA(NULL)));
@@ -905,7 +912,7 @@ static void texels(Ctx *c, int write, int strided) {
     const unsigned level = v && v->set_levels ? v->base_level : 0, layer0 = v && v->set_layers ? v->min_layer : 0;
     if (v && v->set_format && v->format != t->d.format) die("%sTexels through a format view", write ? "Write" : "Read");
     static int texels_log = -1;
-    if (texels_log < 0) texels_log = getenv("RX_NVN_TEXELS_LOG") != NULL;
+    if (texels_log < 0) texels_log = env_on("RX_NVN_TEXELS_LOG");
     if (texels_log) {   /* (debugging: who, from where, and how much of the data is not zero) */
         size_t nz = 0;
         for (uint64_t i = 0; data && i < extent && i < (64u << 20); i++) nz += data[i] != 0;
@@ -1021,6 +1028,7 @@ static int set_shaders(nvn_prog *o, int n, const uint8_t *sd, int stride) {
         }
     }
     o->serial = new_serial();
+    rx_nvn_program_created(o);   /* (the stages are in memory now: the back end loads what it kept ready for them) */
     return 1;
 }
 NV(nvnProgramSetShaders) { RET(set_shaders((nvn_prog *)P(0), I(1), (const uint8_t *)P(2), 16)); }
@@ -1103,7 +1111,7 @@ NV(nvnSyncWait) {
     if (s->fenced == 1 && s->fence > rx_nvn_fence()) held_flush();   /* (a wait flushes what it waits for) */
     if (rx_nvn_wait(s->fence, 0)) { RET(NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED); return; }
     static int block = -1;   /* HOS_NVN_SYNC_BLOCK=1 (experiment): a poll waits for the GPU */
-    if (block < 0) block = getenv("HOS_NVN_SYNC_BLOCK") != NULL;
+    if (block < 0) block = env_on("HOS_NVN_SYNC_BLOCK");
     const int away = hos_vcore_away();
     const int64_t t0 = hos_now_ns();
     const int ok = rx_nvn_wait(s->fence, block ? ~0ull >> 1 : U64(1));
@@ -1205,7 +1213,7 @@ static void *pool_head[POOL_MAX + 1];
 static uint64_t pool_bytes[POOL_MAX + 1];
 static int pool_off(void) {
     static int off = -1;
-    if (off < 0) off = getenv("NVN_NO_POOL") != NULL;
+    if (off < 0) off = env_on("NVN_NO_POOL");
     return off;
 }
 static unsigned pool_class(size_t n) {
@@ -1493,7 +1501,7 @@ static void release_copies(uint64_t lo, uint64_t hi) {
 #define COPY_MARK 0x4b52414d59504f43ull   /* "COPYMARK" */
 static void sweep_overwritten_copies(void) {   /* (copy_lock held) */
     static int off = -1;
-    if (off < 0) off = getenv("HOS_NVN_NO_SWEEP") != NULL;
+    if (off < 0) off = env_on("HOS_NVN_NO_SWEEP");
     if (off || !rec_buckets) return;
     free_dead_copies();
     const uint64_t after = rx_nvn_pushed() + held_count();
@@ -2155,7 +2163,7 @@ NV(nvnCommandBufferCopyBufferToTexture) {
     r->flags = I(5);
     {   /* (hookshot, RX_VK_LOG_B2T=1) who records the big copies: the caller's chain, each new source once */
         static int on = -1;
-        if (on < 0) on = getenv("RX_VK_LOG_B2T") != NULL;
+        if (on < 0) on = env_on("RX_VK_LOG_B2T");
         static uint64_t seen[16];
         static volatile LONG nseen;
         int k;
@@ -2269,7 +2277,7 @@ NV(nvnColorStateSetAlphaTest) { ST(nvn_color_st, P(0))->alpha_func = U32(1); }
 NV(nvnChannelMaskStateSetDefaults) { ST(nvn_chmask_st, P(0))->mask = 0xffffffffu; }
 NV(nvnChannelMaskStateSetChannelMask) {
     static int chmask_log = -1;   /* (asked once: getenv on every call was 15% of the render thread) */
-    if (chmask_log < 0) chmask_log = getenv("HOS_NVN_CHMASK_LOG") != NULL;
+    if (chmask_log < 0) chmask_log = env_on("HOS_NVN_CHMASK_LOG");
     if (chmask_log) {   /* (debugging: NVN2's arguments) */
         static volatile LONG n;
         if (InterlockedIncrement(&n) <= 40)
@@ -2398,7 +2406,8 @@ static const nvn_tex *win_tex(const nvn_win *o, int i) {
     return (const nvn_tex *)gw(o->tex[i], sizeof(nvn_tex));
 }
 void hos_vi_native_acquire(int active);
-void hos_vi_native_presented(void);
+int hos_vi_present_trace_enabled(void);
+void hos_vi_native_presented(const int64_t phases[4]);
 NV(nvnWindowBuilderSetDefaults) {
     nvn_win_builder *b = WB(P(0));
     void *dev = b->dev;
@@ -2486,16 +2495,23 @@ NV(nvnQueuePresentTexture) {
     nvn_win *o = (nvn_win *)P(1);
     const int i = I(2);
     if (i < 0 || i >= o->ntex) die("present of window texture %d", i);
+    HOS_CHAIN(HOS_CHAIN_PRESENT, (uint64_t)i);
+    const int trace = hos_vi_present_trace_enabled();
+    int64_t phases[4] = {0};
+    if (trace) phases[0] = hos_now_ns();
     held_flush();   /* (a present flushes the queue) */
     {
         const int away = hos_vcore_away();
+        if (trace) phases[1] = hos_now_ns();
         rx_nvn_present(win_tex(o, i), o->crop);
+        if (trace) phases[2] = hos_now_ns();
         if (away) hos_vcore_back();
+        if (trace) phases[3] = hos_now_ns();
     }
     o->presents++;
     extern volatile LONG64 hos_present_count;   /* display.c */
     InterlockedIncrement64(&hos_present_count);
-    hos_vi_native_presented();
+    hos_vi_native_presented(phases);
 }
 
 /* ---- NVN2 (mkw-recomp): what the Switch 2's NVN adds, as MKW uses it ---- */
@@ -3119,7 +3135,7 @@ static const nvn_impl impls[] = {
    so the game goes on and the log lists what is left. HOS_NVN_STRICT=1: it stops the game, as in TOTKPort. */
 static void unimplemented(Ctx *c, void *name) {
     static int strict = -1;
-    if (strict < 0) strict = getenv("HOS_NVN_STRICT") != NULL;
+    if (strict < 0) strict = env_on("HOS_NVN_STRICT");
     if (strict)
         die("NVN %s is not implemented (x0 %#llx x1 %#llx x2 %#llx)", (const char *)name, (unsigned long long)c->x[0],
             (unsigned long long)c->x[1], (unsigned long long)c->x[2]);

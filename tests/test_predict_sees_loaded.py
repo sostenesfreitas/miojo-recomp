@@ -12,6 +12,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+def _with_cache(path):
+    """vk_shader.cpp with the program cache it held before (vk_progcache.cpp and .h beside it, outside the translator stamp): definitions first"""
+    parts = [path.read_text(encoding="utf-8")]
+    for name in ("vk_progcache.cpp", "vk_progcache.h"):
+        if (path.parent / name).exists():
+            parts.append((path.parent / name).read_text(encoding="utf-8"))
+    return "\n".join(parts)
+
+
 
 def body(text, marker):
     start = text.index(marker)
@@ -24,7 +33,7 @@ def body(text, marker):
 
 
 def main():
-    src = (ROOT / "gpu" / "vk" / "vk_shader.cpp").read_text(encoding="utf-8")
+    src = _with_cache(ROOT / "gpu" / "vk" / "vk_shader.cpp")
     load = body(src, "void program_cache_load(uint64_t key,")
     some = body(src, "size_t program_cache_load_some(")
     each = body(src, "void program_cache_each(")

@@ -2,7 +2,8 @@
 
 A scripted or A/B test run brings its own switches this way, and the player's hookshot_env.txt is neither read nor
 changed. Unset or empty, the game reads hookshot_env.txt as before. A named file that does not exist sets nothing: the
-run does not fall back to the player's switches.
+run does not fall back to the player's switches. A switch already in the environment the game was started with goes over
+the file's line for it.
 
 python -I -B tests/test_env_file.py [--cc gcc]
 """
@@ -46,6 +47,8 @@ def main():
             "HOS_INPUT_SCRIPT=1:A,2:A\nRX_VK_MENU_SCRIPT=1:INS\n", encoding="utf-8")
         (tmp / "test_env.txt").write_text("# a test run's own switches\nHOS_T_OTHER=1\nHOS_T_SHARED=other\n"
                                           "VK_T_LAYER=/y\n", encoding="utf-8")
+        (tmp / "precedence.txt").write_text("HOS_T_LAUNCH=file\nHOS_T_TWICE=first\nHOS_T_FRESH=1\nHOS_T_TWICE=second\n",
+                                            encoding="utf-8")
         exe = str(game / "hookshot").replace("\\", "\\\\")
         fixture = r'''#include <stdio.h>
 #include <stdlib.h>
@@ -102,7 +105,17 @@ int main(int argc, char **argv) {
     setenv("HOS_ENV_FILE", argv[2], 1);            /* a file that is not there: nothing, not the player's switches */
     load_hookshot_env();
     CHECK(is("HOS_T_BESIDE", NULL) && is("HOS_T_OTHER", NULL) && is("HOS_T_SHARED", NULL));
-    printf("PASS: HOS_ENV_FILE replaces hookshot_env.txt; unset or empty reads it as before; the player's file sets only the game's switches\n");
+
+    /* the environment the game was started with goes first: a switch set for one launch beats the file's line; the file's
+       own later lines still replace its earlier ones */
+    clear();
+    setenv("HOS_T_LAUNCH", "launch", 1);
+    setenv("HOS_ENV_FILE", argv[3], 1);
+    load_hookshot_env();
+    CHECK(is("HOS_T_LAUNCH", "launch") && is("HOS_T_TWICE", "second") && is("HOS_T_FRESH", "1"));
+    load_hookshot_env();                           /* (read again in the same run: the same) */
+    CHECK(is("HOS_T_LAUNCH", "launch") && is("HOS_T_TWICE", "second") && is("HOS_T_FRESH", "1"));
+    printf("PASS: HOS_ENV_FILE replaces hookshot_env.txt; unset or empty reads it as before; the player's file sets only the game's switches; the environment goes over the file\n");
     return 0;
 }
 '''
@@ -112,7 +125,7 @@ int main(int argc, char **argv) {
         subprocess.run([a.cc, "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-Wall", "-Werror", str(src), "-o", str(out)],
                        check=True)
         before = (game / "hookshot_env.txt").read_text(encoding="utf-8")
-        subprocess.run([str(out), str(tmp / "test_env.txt"), str(tmp / "missing.txt")], check=True)
+        subprocess.run([str(out), str(tmp / "test_env.txt"), str(tmp / "missing.txt"), str(tmp / "precedence.txt")], check=True)
         if (game / "hookshot_env.txt").read_text(encoding="utf-8") != before:
             raise SystemExit("the player's hookshot_env.txt was changed")
 

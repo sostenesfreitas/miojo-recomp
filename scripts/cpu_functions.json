@@ -1,0 +1,1338 @@
+{
+ "$ehgcr_161_152": {
+  "does": "A compiler-made exception-handling label inside a renderer function (not a function of its own).",
+  "source": "generated"
+ },
+ "$ehgcr_272_605": {
+  "does": "A compiler-made exception-handling label inside a renderer function (not a function of its own).",
+  "source": "generated"
+ },
+ "$ehgcr_59_341": {
+  "does": "A compiler-made exception-handling label inside a renderer function (not a function of its own).",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdBindPipeline@vkx@@3P6AXPEAUVkCommandBuffer_T@@W4VkPipelineBindPoint@@PEAUVkPipeline_T@@@ZEA$1?pack@?$Value@$1?vkCmdBindPipeline@vkx@@3P6AXPEAUVkCommandBuffer_T@@W4VkPipelineBindPoint@@PEAUVkPipeline_T@@@ZEA$0BL@P6AX012@Z@rec@mkwvk@@SAX012@ZP6AX012@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@W4VkPipelineBindPoint@@PEAUVkPipeline_T@@@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdBindVertexBuffers2@vkx@@3P6AXPEAUVkCommandBuffer_T@@IIPEBQEAUVkBuffer_T@@PEB_K22@ZEA$1?pk_vkCmdBindVertexBuffers2@rec@mkwvk@@YAX0II1222@ZP6AX0II1222@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@IIPEBQEAUVkBuffer_T@@PEB_K22@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdCopyBufferToImage@vkx@@3P6AXPEAUVkCommandBuffer_T@@PEAUVkBuffer_T@@PEAUVkImage_T@@W4VkImageLayout@@IPEBUVkBufferImageCopy@@@ZEA$1?pk_vkCmdCopyBufferToImage@rec@mkwvk@@YAX0123I4@ZP6AX0123I4@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@PEAUVkBuffer_T@@PEAUVkImage_T@@W4VkImageLayout@@IPEBUVkBufferImageCopy@@@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdCopyImage@vkx@@3P6AXPEAUVkCommandBuffer_T@@PEAUVkImage_T@@W4VkImageLayout@@12IPEBUVkImageCopy@@@ZEA$1?pk_vkCmdCopyImage@rec@mkwvk@@YAX01212I3@ZP6AX01212I3@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@PEAUVkImage_T@@W4VkImageLayout@@12IPEBUVkImageCopy@@@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdDispatch@vkx@@3P6AXPEAUVkCommandBuffer_T@@III@ZEA$1?pack@?$Value@$1?vkCmdDispatch@vkx@@3P6AXPEAUVkCommandBuffer_T@@III@ZEA$0M@P6AX0III@Z@rec@mkwvk@@SAX0III@ZP6AX0III@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@III@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdDraw@vkx@@3P6AXPEAUVkCommandBuffer_T@@IIII@ZEA$1?pack@?$Value@$1?vkCmdDraw@vkx@@3P6AXPEAUVkCommandBuffer_T@@IIII@ZEA$02P6AX0IIII@Z@rec@mkwvk@@SAX0IIII@ZP6AX0IIII@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@IIII@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdDrawIndexed@vkx@@3P6AXPEAUVkCommandBuffer_T@@IIIHI@ZEA$1?pack@?$Value@$1?vkCmdDrawIndexed@vkx@@3P6AXPEAUVkCommandBuffer_T@@IIIHI@ZEA$03P6AX0IIIHI@Z@rec@mkwvk@@SAX0IIIHI@ZP6AX0IIIHI@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@IIIHI@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdDrawMeshTasksEXT@vkx@@3P6AXPEAUVkCommandBuffer_T@@III@ZEA$1?pack@?$Value@$1?vkCmdDrawMeshTasksEXT@vkx@@3P6AXPEAUVkCommandBuffer_T@@III@ZEA$08P6AX0III@Z@rec@mkwvk@@SAX0III@ZP6AX0III@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@III@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdDrawMeshTasksIndirectEXT@vkx@@3P6AXPEAUVkCommandBuffer_T@@PEAUVkBuffer_T@@_KII@ZEA$1?pack@?$Value@$1?vkCmdDrawMeshTasksIndirectEXT@vkx@@3P6AXPEAUVkCommandBuffer_T@@PEAUVkBuffer_T@@_KII@ZEA$09P6AX012II@Z@rec@mkwvk@@SAX012II@ZP6AX012II@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@PEAUVkBuffer_T@@_KII@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdPushConstants@vkx@@3P6AXPEAUVkCommandBuffer_T@@PEAUVkPipelineLayout_T@@IIIPEBX@ZEA$1?pk_vkCmdPushConstants@rec@mkwvk@@YAX01III2@ZP6AX01III2@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@PEAUVkPipelineLayout_T@@IIIPEBX@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "?call@?$Route@$1?vkCmdPushDescriptorSetKHR@vkx@@3P6AXPEAUVkCommandBuffer_T@@W4VkPipelineBindPoint@@PEAUVkPipelineLayout_T@@IIPEBUVkWriteDescriptorSet@@@ZEA$1?pk_vkCmdPushDescriptorSetKHR@rec@mkwvk@@YAX012II3@ZP6AX012II3@Z@rec@mkwvk@@SAXPEAUVkCommandBuffer_T@@W4VkPipelineBindPoint@@PEAUVkPipelineLayout_T@@IIPEBUVkWriteDescriptorSet@@@Z": {
+  "does": "A Vulkan call wrapper of the renderer (its call-routing template): forwards one Vulkan function, counted or timed when profiling is on.",
+  "source": "generated"
+ },
+ "D3D12Core.dll": {
+  "category": "system",
+  "does": "Direct3D 12 runtime under the presentation path.",
+  "source": "read"
+ },
+ "MoveAbove15": {
+  "category": "crt",
+  "does": "The C runtime's memcpy for small blocks.",
+  "source": "read"
+ },
+ "MoveSmall4": {
+  "category": "crt",
+  "does": "The C runtime's memcpy for 4 to 7 bytes.",
+  "source": "read"
+ },
+ "MoveSmall8": {
+  "category": "crt",
+  "does": "The C runtime's memcpy for 8 to 15 bytes.",
+  "source": "read"
+ },
+ "MoveWithYMM": {
+  "category": "crt",
+  "does": "The C runtime's memcpy for medium blocks (AVX).",
+  "source": "read"
+ },
+ "NtDxgkSubmitPresentToHwQueue (win32u.dll)": {
+  "does": "The present call reaching the hardware queue.",
+  "source": "read"
+ },
+ "NtGdiDdDDISubmitCommandToHwQueue (win32u.dll)": {
+  "does": "The system call that hands a batch of GPU commands to the hardware queue (the driver's queue submit).",
+  "source": "read"
+ },
+ "NtGdiDdDDISubmitSignalSyncObjectsToHwQueue (win32u.dll)": {
+  "does": "The driver signalling a fence on the hardware queue.",
+  "source": "read"
+ },
+ "NtGdiDdDDIWaitForSynchronizationObjectFromCpu (win32u.dll)": {
+  "does": "The driver waiting on a GPU fence from the CPU.",
+  "source": "read"
+ },
+ "RtlAcquireSRWLockExclusive (ntdll.dll)": {
+  "does": "Taking a slim lock for writing (the host's object locks, the virtual cores' lock, the renderer's mutexes).",
+  "source": "read"
+ },
+ "RtlAcquireSRWLockShared (ntdll.dll)": {
+  "does": "Taking a slim lock for reading (check_handle, GetThreadPriority).",
+  "source": "read"
+ },
+ "RtlAllocateHeap (ntdll.dll)": {
+  "does": "A heap allocation.",
+  "source": "read"
+ },
+ "RtlDelayExecution (ntdll.dll)": {
+  "does": "SwitchToThread's and Sleep's system call: gives the processor to another ready thread.",
+  "source": "read"
+ },
+ "RtlEnterCriticalSection (ntdll.dll)": {
+  "does": "Taking a critical section (the driver's locks).",
+  "source": "read"
+ },
+ "RtlFreeHeap (ntdll.dll)": {
+  "does": "A heap free.",
+  "source": "read"
+ },
+ "RtlLeaveCriticalSection (ntdll.dll)": {
+  "does": "Leaving a critical section (the driver's locks).",
+  "source": "read"
+ },
+ "RtlQueryFeatureConfiguration (ntdll.dll)": {
+  "does": "An ntdll-internal function named by its nearest export (no symbols); no frame of ours in its stacks.",
+  "source": "read"
+ },
+ "RtlQueryPerformanceCounter (ntdll.dll)": {
+  "does": "The high-resolution clock read.",
+  "source": "read"
+ },
+ "RtlReleaseSRWLockExclusive (ntdll.dll)": {
+  "does": "Releasing a slim lock taken for writing.",
+  "source": "read"
+ },
+ "RtlReleaseSRWLockShared (ntdll.dll)": {
+  "does": "Releasing a slim lock taken for reading.",
+  "source": "read"
+ },
+ "RtlSizeHeap (ntdll.dll)": {
+  "does": "Heap bookkeeping inside allocation and free (named by the nearest export).",
+  "source": "read"
+ },
+ "RtlSleepConditionVariableSRW (ntdll.dll)": {
+  "does": "A thread going to sleep on a condition variable and waking again (user-mode part).",
+  "source": "read"
+ },
+ "RtlVirtualUnwind2 (ntdll.dll)": {
+  "does": "Not stack unwinding: ntdll has no symbols here and this is the nearest export. The samples are the slow path of taking a slim lock for reading (under check_handle).",
+  "source": "read"
+ },
+ "RtlWakeAllConditionVariable (ntdll.dll)": {
+  "does": "Wakes every sleeper of a condition variable.",
+  "source": "read"
+ },
+ "RtlWakeConditionVariable (ntdll.dll)": {
+  "does": "Wakes one sleeper of a condition variable.",
+  "source": "read"
+ },
+ "VmaAllocator_T::AllocateDedicatedMemoryPage": {
+  "does": "The Vulkan memory allocator library (VmaAllocator_T::AllocateDedicatedMemoryPage): GPU memory for images and buffers.",
+  "source": "generated"
+ },
+ "VmaAllocator_T::AllocateVulkanMemory": {
+  "does": "The Vulkan memory allocator library (VmaAllocator_T::AllocateVulkanMemory): GPU memory for images and buffers.",
+  "source": "generated"
+ },
+ "VmaAllocator_T::FreeDedicatedMemory": {
+  "does": "The Vulkan memory allocator library (VmaAllocator_T::FreeDedicatedMemory): GPU memory for images and buffers.",
+  "source": "generated"
+ },
+ "VmaAllocator_T::GetFlushOrInvalidateRange": {
+  "does": "The Vulkan memory allocator library (VmaAllocator_T::GetFlushOrInvalidateRange): GPU memory for images and buffers.",
+  "source": "generated"
+ },
+ "YAXPEAUVkCommandBuffer_T::3::memory_end_submission::lambda": {
+  "does": "The ordering used when memory_end_submission sorts the submission's copy-backs by address (the sort's comparison).",
+  "source": "read"
+ },
+ "YmmLoop": {
+  "category": "crt",
+  "does": "The C runtime's memset (AVX loop).",
+  "source": "read"
+ },
+ "ZwAlertThreadByThreadId (ntdll.dll)": {
+  "does": "The system call that wakes a thread sleeping on a condition variable or lock.",
+  "source": "read"
+ },
+ "ZwAlertThreadByThreadIdEx (ntdll.dll)": {
+  "does": "The wake system call's newer form (lock hand-off).",
+  "source": "read"
+ },
+ "ZwClose (ntdll.dll)": {
+  "does": "The system call that closes a handle (the volume handle of GetDriveTypeW's check, files).",
+  "source": "read"
+ },
+ "ZwCreateFile (ntdll.dll)": {
+  "does": "The system call that opens a file or device.",
+  "source": "read"
+ },
+ "ZwQueryInformationThread (ntdll.dll)": {
+  "does": "The system call that reads a thread's affinity (inside SetThreadAffinityMask).",
+  "source": "read"
+ },
+ "ZwQueryVirtualMemory (ntdll.dll)": {
+  "does": "The system call behind VirtualQuery (and DiscardVirtualMemory).",
+  "source": "read"
+ },
+ "ZwSetInformationThread (ntdll.dll)": {
+  "does": "The system call behind SetThreadAffinityMask.",
+  "source": "read"
+ },
+ "_Mtx_unlock": {
+  "category": "crt",
+  "does": "The C++ runtime's mutex unlock.",
+  "source": "read"
+ },
+ "_free_base": {
+  "category": "crt",
+  "does": "The C runtime's free.",
+  "source": "read"
+ },
+ "a64_cntpct_host": {
+  "does": "The guest's counter register read (CNTPCT) from the host clock.",
+  "source": "read"
+ },
+ "a64_fpx_add32_add32": {
+  "does": "Two chained single-precision adds with the guest's NaN rules.",
+  "source": "read"
+ },
+ "a64_fpx_div32_div32": {
+  "does": "Two chained single-precision divides with the guest's NaN rules.",
+  "source": "read"
+ },
+ "a64_fpx_fma32_fma32": {
+  "does": "Two chained single-precision fused multiply-adds with the guest's rounding.",
+  "source": "read"
+ },
+ "a64_fpx_mul32_fma32": {
+  "does": "A multiply followed by a fused multiply-add kept as the guest's two operations (single precision), so the rounding matches the console.",
+  "source": "read"
+ },
+ "a64_fpx_sub32_sub32": {
+  "does": "Two chained single-precision subtracts with the guest's NaN rules.",
+  "source": "read"
+ },
+ "a64_icall_site": {
+  "does": "A guest indirect call (BLR): the site's remembered target, or site_call.",
+  "source": "read"
+ },
+ "a64_ijump_site": {
+  "does": "A guest indirect jump (BR) that is not a jump table: the site's remembered target, or site_call.",
+  "source": "read"
+ },
+ "a64_lookup": {
+  "does": "Finds the host function of a guest address for an indirect call or jump (hash table).",
+  "source": "read"
+ },
+ "a64_vfpx_add32_lanes": {
+  "does": "A four-lane single-precision vector add done lane by lane where the exact path is needed.",
+  "source": "read"
+ },
+ "a64_vfpx_mul32_lanes": {
+  "does": "A four-lane single-precision vector multiply done lane by lane where the exact path is needed.",
+  "source": "read"
+ },
+ "a64_vfpx_sub32_lanes": {
+  "does": "A four-lane single-precision vector subtract done lane by lane where the exact path is needed.",
+  "source": "read"
+ },
+ "amdvlk64.dll": {
+  "category": "driver",
+  "does": "AMD's Vulkan driver (user mode): command encoding, descriptor updates, pipeline binds, queue submits.",
+  "source": "read"
+ },
+ "amdxc64.dll": {
+  "category": "driver",
+  "does": "AMD's Direct3D 12 driver, used by the presentation path through DXGI.",
+  "source": "read"
+ },
+ "check_handle": {
+  "does": "Checks under a shared lock that a command handle is a live recording before it is used.",
+  "source": "read"
+ },
+ "cmd_adopt": {
+  "does": "Takes a host slot and recording segment for a command buffer the game initializes.",
+  "source": "read"
+ },
+ "cmd_alloc": {
+  "does": "Room for one command in the command buffer's host segment.",
+  "source": "read"
+ },
+ "cmd_release": {
+  "does": "Gives a command buffer's host slot and recording segment back when the game finalizes it.",
+  "source": "read"
+ },
+ "cmd_reserve_rec": {
+  "does": "Grows the command buffer's host segment when a command does not fit.",
+  "source": "read"
+ },
+ "cmp_range": {
+  "does": "The comparison of hos_gpu_guest_ranges' sort.",
+  "source": "read"
+ },
+ "collect_in": {
+  "does": "Reads and clears the lifted code's write marks over the GPU-visible memory ranges and returns the pages written since the last submission.",
+  "source": "read"
+ },
+ "discard_pages": {
+  "does": "Gives freed guest pages back to the system (DiscardVirtualMemory) when the game frees memory.",
+  "source": "read"
+ },
+ "draw_idx": {
+  "does": "Records an indexed draw into the command buffer's host segment (the body shared by the nvnCommandBufferDrawElements variants).",
+  "source": "read"
+ },
+ "draw_mesh": {
+  "does": "mesh shading: recorded for the Vulkan replay (VK_EXT_mesh_shader); the WebGPU one has none and leaves it out.",
+  "source": "read"
+ },
+ "event_wait": {
+  "does": "Waits for an nn::os event: takes it if set, else spins (spin_until_set), else sleeps on the object's condition variable with its virtual core given up.",
+  "source": "read"
+ },
+ "free_dead_copies": {
+  "does": "Frees the retired recording copies whose last use the renderer has replayed (called when a command buffer gets new control memory).",
+  "source": "read"
+ },
+ "hos_backtrace": {
+  "does": "Writes the guest's call chain to the log (diagnostics).",
+  "source": "read"
+ },
+ "hos_commit": {
+  "does": "Commits guest pages before first use (the lazily committed guest window).",
+  "source": "read"
+ },
+ "hos_cv_sleep": {
+  "does": "A guest thread's sleep on a host condition variable: gives its virtual core up for the wait and takes one again after it (letting the lock go while it waits for the core).",
+  "source": "read"
+ },
+ "hos_gpu_guest_ranges": {
+  "does": "The merged list of guest memory ranges the GPU can reach, rebuilt (and sorted) whenever a mapping changed since the last call.",
+  "source": "read"
+ },
+ "hos_gpu_maps_generation": {
+  "does": "The change counter of the GPU-visible mappings (the renderer rebuilds its range list when it moves).",
+  "source": "read"
+ },
+ "hos_gpu_pools": {
+  "does": "Hands the renderer the list of GPU-visible mappings.",
+  "source": "read"
+ },
+ "hos_gpu_track": {
+  "does": "Adds or removes a native NVN memory pool's range in the list of GPU-visible guest memory (marks the list changed).",
+  "source": "read"
+ },
+ "hos_mark_written": {
+  "does": "HOS_WRITTEN natively (the soft write watch, rt/a64.h A64_MARK): host code wrote [p, p + n) of guest memory.",
+  "source": "read"
+ },
+ "hos_mods_romfs": {
+  "does": "nn_fs.c: the mod file for a RomFS path (no mount, no leading slash), or 0.",
+  "source": "read"
+ },
+ "hos_now_ns": {
+  "does": "The host clock in nanoseconds (QueryPerformanceCounter).",
+  "source": "read"
+ },
+ "hos_region_alloc": {
+  "does": "Finds free guest address space for a new mapping (first fit, top down, under the memory lock).",
+  "source": "read"
+ },
+ "hos_self": {
+  "does": "The calling thread's host thread record (thread-local).",
+  "source": "read"
+ },
+ "hos_setjmp_return": {
+  "does": "Returns into lifted code after an indirect jump left its function.",
+  "source": "read"
+ },
+ "hos_sleep_logged": {
+  "does": "HOS_SLEEP_LOG=1 (diagnostic): guest sleeps by caller (LR) every 5 s: count, asked, slept.",
+  "source": "read"
+ },
+ "hos_sleep_ns": {
+  "does": "A host sleep with the virtual core given up; under a millisecond it yields in a loop until the time (Windows' timer would wake 0.5 ms late).",
+  "source": "read"
+ },
+ "hos_ticks": {
+  "does": "The host clock as the console's tick count.",
+  "source": "read"
+ },
+ "hos_vcore_away": {
+  "does": "Virtual cores: gives the core up around a blocking host wait.",
+  "source": "read"
+ },
+ "hos_vcore_back": {
+  "does": "Virtual cores: takes a core again after a blocking host wait.",
+  "source": "read"
+ },
+ "hos_vcore_checkpoint": {
+  "does": "Virtual cores: at every nn::os call, gives the caller's core to a waiting thread of better priority (a flag test when nobody waits).",
+  "source": "read"
+ },
+ "hos_vi_native_acquire": {
+  "does": "The frame limiter: before the game gets its next window texture, waits until the next frame's time at the chosen cap.",
+  "source": "read"
+ },
+ "hos_vi_native_presented": {
+  "does": "Called at every present: advances the frame clock and the frame-time average the game's time step uses, and writes the present trace when one is asked for.",
+  "source": "read"
+ },
+ "host_aspect_ratio": {
+  "does": "The window's aspect ratio, asked by the renderer.",
+  "source": "read"
+ },
+ "host_path": {
+  "does": "\"mount:/a/b\" -> host path (a mod's file instead of the RomFS one, when a mod has it: mods.c). Returns 0 if the mount is unknown, or the path leaves it (guest_path_ok).",
+  "source": "read"
+ },
+ "imp__ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci": {
+  "does": "OpenFile(FileHandle*, char const* path, int mode): mode bit 0 read, bit 1 write, bit 2 append.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os11GetTlsValueENS0_7TlsSlotE": {
+  "does": "nn::os::GetTlsValue: an array read in the thread record.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os11SleepThreadENS_8TimeSpanE": {
+  "does": "nn::os::SleepThread.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os11UnlockMutexEPNS0_9MutexTypeE": {
+  "does": "nn::os::UnlockMutex: object lookup, then mutex_unlock.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os11YieldThreadEv": {
+  "does": "nn::os::YieldThread: offers the virtual core to an equal waiter, then yields the host processor.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os13GetSystemTickEv": {
+  "does": "nn::os::GetSystemTick: the host clock as the console's tick count.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os14WaitLightEventEPNS0_14LightEventTypeE": {
+  "does": "nn::os::WaitLightEvent: event_wait on a light event.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os16GetCurrentThreadEv": {
+  "does": "nn::os::GetCurrentThread: returns the calling thread's guest ThreadType.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os16SignalLightEventEPNS0_14LightEventTypeE": {
+  "does": "nn::os::SignalLightEvent: sets the event and wakes every thread sleeping on it.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os17GetThreadPriorityEPKNS0_10ThreadTypeE": {
+  "does": "nn::os::GetThreadPriority: finds the thread record under a shared lock and returns its priority.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os19AllocateMemoryPagesEmm": {
+  "does": "nn::os::AllocateMemoryPages(unsigned long, unsigned long) -> Result: new pages read as zero.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os23SignalConditionVariableEPNS0_21ConditionVariableTypeE": {
+  "does": "nn::os::SignalConditionVariable: takes the object's lock, bumps its generation, wakes one waiter.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os24ReceiveLightMessageQueueEPmPNS0_21LightMessageQueueTypeE": {
+  "does": "nn::os::ReceiveLightMessageQueue: queue_get, waiting while the queue is empty.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os24TrySendLightMessageQueueEPNS0_21LightMessageQueueTypeEm": {
+  "does": "nn::os::TrySendLightMessageQueue: puts a message in a queue and wakes its receivers.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os28IsMutexLockedByCurrentThreadEPKNS0_9MutexTypeE": {
+  "does": "nn::os::IsMutexLockedByCurrentThread: object lookup, then compares the owner.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os7WaitAnyEPNS0_13MultiWaitTypeE": {
+  "does": "nn::os::WaitAny: scans the holders of a multi-wait under one lock and sleeps until one of the objects they watch changes.",
+  "source": "read"
+ },
+ "imp__ZN2nn2os9LockMutexEPNS0_9MutexTypeE": {
+  "does": "nn::os::LockMutex: object lookup, then mutex_lock.",
+  "source": "read"
+ },
+ "imp__ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE": {
+  "does": "SixAxisSensorState, 0x60 bytes: {i64 delta time (ns), i64 sampling number, f32 acceleration[3] (G), angular velocity[3] (revolutions a second), angle[3] (revolutions), direction[3][3], u32 attributes (1 connected), pad}. Newest first..",
+  "source": "read"
+ },
+ "inline_recording": {
+  "does": "CallCommands: copies a finished recording into the calling command buffer.",
+  "source": "read"
+ },
+ "level_offset": {
+  "does": "One mip level's offset inside a texture's storage.",
+  "source": "read"
+ },
+ "lifted game code": {
+  "category": "game",
+  "does": "All of the game's own code, translated from the Switch's ARM code to C ahead of time. It is one row here: a list of the game's functions is made from the game binary, so it stays on the developer's PC.",
+  "source": "read"
+ },
+ "logged_wait": {
+  "does": "HOS_WAIT_LOG=1 (diagnostic): event waits by guest caller and thread every 5 s (count, total, longest), the longest first: what a thread blocks on.",
+  "source": "read"
+ },
+ "mcmp60": {
+  "category": "crt",
+  "does": "The C runtime's memcmp.",
+  "source": "read"
+ },
+ "memcpy_repmovs": {
+  "category": "crt",
+  "does": "The C runtime's memcpy for large blocks (rep movs).",
+  "source": "read"
+ },
+ "memmove": {
+  "category": "crt",
+  "does": "The C runtime's memmove.",
+  "source": "read"
+ },
+ "mkwvk::FineScope::~FineScope": {
+  "does": "Ends a fine-grained timer scope of the draw path (adds its time when RX_VK_PROF_FINE is set, nothing otherwise).",
+  "source": "read"
+ },
+ "mkwvk::ParLock::ParLock": {
+  "does": "Takes the lock that guards the renderer's shared tables while a parallel replay is running (nothing otherwise).",
+  "source": "read"
+ },
+ "mkwvk::ProfScopeHot::ProfScopeHot": {
+  "does": "Starts a sampled profiling scope: one scope in eight reads the clock.",
+  "source": "read"
+ },
+ "mkwvk::ProfScopeHot::~ProfScopeHot": {
+  "does": "Ends a sampled profiling scope and adds its time when it was a timed one.",
+  "source": "read"
+ },
+ "mkwvk::ReplayPin::ReplayPin": {
+  "does": "Moves the calling thread to the renderer's reserved core for the length of a replay, remembering the mask to put back.",
+  "source": "read"
+ },
+ "mkwvk::StatsQuery::StatsQuery": {
+  "does": "Begins a draw's or dispatch's statistics query when the draw statistics are being collected (nothing otherwise).",
+  "source": "read"
+ },
+ "mkwvk::answer_handle": {
+  "does": "The texture handle behind one of a program's variant questions.",
+  "source": "read"
+ },
+ "mkwvk::answer_handles": {
+  "does": "The texture handles behind all of a program's variant questions, for the program cache's key.",
+  "source": "read"
+ },
+ "mkwvk::begin_pass": {
+  "does": "Begins a render pass for the current targets when they or their load state changed.",
+  "source": "read"
+ },
+ "mkwvk::begin_recording": {
+  "does": "The next recording slot, begun, for the submission that will signal value.",
+  "source": "read"
+ },
+ "mkwvk::bind_descriptors": {
+  "does": "Allocates or reuses the descriptor set for the writes build_descriptors made and binds it.",
+  "source": "read"
+ },
+ "mkwvk::bind_index": {
+  "does": "Binds the index buffer, skipping the Vulkan call when the same buffer, offset and type are already bound.",
+  "source": "read"
+ },
+ "mkwvk::blit_crop_to_rect": {
+  "does": "The crop of src (x, y, w, h; w 0: all of it) scaled into a rectangle of dst. An empty source clears the whole destination image; current callers give that fallback a full-image rectangle.",
+  "source": "read"
+ },
+ "mkwvk::build_descriptors": {
+  "does": "Builds the descriptor writes of a draw or dispatch: for each binding of the program, the buffer range, texture view or sampler the game's state names.",
+  "source": "read"
+ },
+ "mkwvk::canonical_answer": {
+  "does": "Only ignore an answer bit when the translated module already has the corresponding type. Keep the entries themselves: handle/version tracking and binding-stage masks still use them.",
+  "source": "read"
+ },
+ "mkwvk::capture_make": {
+  "does": "Makes a submission's capture: copies the written pages of GPU-visible memory so the replay sees memory as it was.",
+  "source": "read"
+ },
+ "mkwvk::capture_ranges_merged": {
+  "does": "The ranges the captures take (the mirrored pools, the texture storage, the small pools): their union, sorted and merged, as of now; empty while no capture was made (memory_collect_written: a page in them written after its submit's capture is left for the next capture)..",
+  "source": "read"
+ },
+ "mkwvk::clear_color_target": {
+  "does": "Replays a colour clear of one render target with the game's write mask.",
+  "source": "read"
+ },
+ "mkwvk::clear_depth_stencil": {
+  "does": "Replays a depth and stencil clear of the current depth target.",
+  "source": "read"
+ },
+ "mkwvk::color_types_of": {
+  "does": "(hookshot) The colour output types a program is translated for: each target's, by its format (Shader::AttributeType). The draw's, and the pipeline state list's from the formats it maps the game's to (state_targets).",
+  "source": "read"
+ },
+ "mkwvk::completed": {
+  "does": "The GPU's progress: the timeline semaphore's counter.",
+  "source": "read"
+ },
+ "mkwvk::copy_helper_main": {
+  "does": "A helper thread that shares the capture's page copies.",
+  "source": "read"
+ },
+ "mkwvk::copy_nt": {
+  "does": "Copies captured guest pages with non-temporal stores (the copy of what a submission's memory looked like).",
+  "source": "read"
+ },
+ "mkwvk::copy_part": {
+  "does": "One share of the capture's page copies, done by a copy helper thread.",
+  "source": "read"
+ },
+ "mkwvk::copy_split": {
+  "does": "(hookshot) whole's n copies in helpers + 1 parts: the first on the calling thread, the others queued for the helpers. Under 128 copies (512 KB) all on the calling thread: waking the helpers costs more than they save..",
+  "source": "read"
+ },
+ "mkwvk::cpu_words_merge": {
+  "does": "Merges the per-submission record of CPU-written words into the pools' state.",
+  "source": "read"
+ },
+ "mkwvk::create": {
+  "does": "Creates the renderer's texture for a guest texture description: the Vulkan image, its memory and its bookkeeping.",
+  "source": "read"
+ },
+ "mkwvk::cs_layout": {
+  "does": "The layout of the driver's constant bank for the current state.",
+  "source": "read"
+ },
+ "mkwvk::desc_fp_note": {
+  "does": "Adds a texture slot and its version to the fingerprint of a draw's descriptor set (the set is reused while the fingerprint is the same).",
+  "source": "read"
+ },
+ "mkwvk::desc_slotgen_on": {
+  "does": "(hookshot) the Descriptor reuse row / RX_VK_DESC_SLOTGEN=1: a draw keeps its descriptors through registrations of the texture slots it does not sample. What it does sample is checked by slot version, and the samplers by their registrations' generation, instead of the global one every registration moves..",
+  "source": "read"
+ },
+ "mkwvk::desc_slots_kept": {
+  "does": "(RX_VK_DESC_SLOTGEN) Whether every slot the last build resolved still holds what it did: no registration since touched a slot this draw samples, so its descriptors stand through the streaming's churn. A build that sampled an unregistered slot keeps the old check.",
+  "source": "read"
+ },
+ "mkwvk::dispatch": {
+  "does": "Replays one compute dispatch.",
+  "source": "read"
+ },
+ "mkwvk::dlss_trace_draw": {
+  "does": "(hookshot, a diagnostic for the temporal upscaler's motion: vk_temporal.cpp) RX_VK_DLSS_TRACE=<frames>: every that many frames, one frame's draws into targets of a size the upscaler can take as the scene (temporal_scene_size), logged: the program, its targets' formats, the geometry and the uniform buffers.",
+  "source": "read"
+ },
+ "mkwvk::drain": {
+  "does": "Every stopped queue on now (why: an index of st_forced): in turn as their waits allow; when all of them wait, the oldest past its wait.",
+  "source": "read"
+ },
+ "mkwvk::draw": {
+  "does": "Replays one draw: program, pipeline, vertex streams, descriptors, dynamic state, then the Vulkan draw call.",
+  "source": "read"
+ },
+ "mkwvk::draw_begin_recording": {
+  "does": "Readies the per-recording draw state when the replay starts a new Vulkan command buffer.",
+  "source": "read"
+ },
+ "mkwvk::draw_hazards": {
+  "does": "Finds a draw that samples a target its pass writes, which must start a pass of its own.",
+  "source": "read"
+ },
+ "mkwvk::driver_bank_fill": {
+  "does": "Fills a whole driver constant bank for a stage (the bytes NVN's driver would have written).",
+  "source": "read"
+ },
+ "mkwvk::driver_bank_word": {
+  "does": "One word of the driver's constant bank (what NVN's driver would put in c0/c2) as the shader reads it.",
+  "source": "read"
+ },
+ "mkwvk::dump_on": {
+  "does": "Whether a frame dump is armed (a debug switch; a flag read).",
+  "source": "read"
+ },
+ "mkwvk::dump_ssbos": {
+  "does": "(and the GPU's copies of them, before or after the dispatch).",
+  "source": "read"
+ },
+ "mkwvk::dynamic_state": {
+  "does": "Sets the Vulkan dynamic state that changed since the last draw (viewport, scissor, depth, stencil, blend constants).",
+  "source": "read"
+ },
+ "mkwvk::fence": {
+  "does": "Waits until the GPU has finished the submissions up to a point (called when the game reuses memory the GPU may still read).",
+  "source": "read"
+ },
+ "mkwvk::fence_q": {
+  "does": "(hookshot) A fence of one queue (nvnQueueFenceSync): the value of that queue's last submission.",
+  "source": "read"
+ },
+ "mkwvk::finish_recording": {
+  "does": "The recording being made: ended and submitted, the timeline signalled as far as no older submission is unfinished.",
+  "source": "read"
+ },
+ "mkwvk::flush_ub_updates": {
+  "does": "The recording's uniform updates into guest memory (after its draws: the ones that came after an update read their overlay copies).",
+  "source": "read"
+ },
+ "mkwvk::framegen_scale": {
+  "does": "Scales and sharpens the game's picture into the output image, with the ultrawide sides when they are on; nothing when no scaling is wanted.",
+  "source": "read"
+ },
+ "mkwvk::full_barrier": {
+  "does": "Records a full pipeline barrier in the command buffer (left out when one was just recorded with no work since).",
+  "source": "read"
+ },
+ "mkwvk::get_pushed": {
+  "does": "How many submissions the game has handed over so far.",
+  "source": "read"
+ },
+ "mkwvk::get_replayed": {
+  "does": "How far the replay has got (the last submission replayed), for the host to free what is no longer needed.",
+  "source": "read"
+ },
+ "mkwvk::gpu_bind_stamp": {
+  "does": "(pools leaving, a mirror made, or the next submission: a remembered read binding is looked up again).",
+  "source": "read"
+ },
+ "mkwvk::gpu_buffer_bind": {
+  "does": "The Vulkan buffer and offset for a guest GPU address range: finds the memory pool's mirror and brings it up to date.",
+  "source": "read"
+ },
+ "mkwvk::gpu_buffer_bind::lambda": {
+  "does": "Inside gpu_buffer_bind: remembers the buffer found for a range so the next binding of the same range skips the lookup.",
+  "source": "read"
+ },
+ "mkwvk::gpu_pool_start": {
+  "does": "Where the memory pool that holds a GPU address begins.",
+  "source": "read"
+ },
+ "mkwvk::gpu_time_collect": {
+  "does": "Reads a finished recording's two GPU timestamp queries (the GPU time a frame the profile shows).",
+  "source": "read"
+ },
+ "mkwvk::gpu_write": {
+  "does": "Writes bytes into guest GPU memory from the command stream (vkCmdUpdateBuffer in 64 KB pieces).",
+  "source": "read"
+ },
+ "mkwvk::gpu_wrote_into": {
+  "does": "Whether a finished GPU write went into a texture's storage after its last upload (the texture then reloads from memory).",
+  "source": "read"
+ },
+ "mkwvk::graphics_key": {
+  "does": "A vertex and fragment program's key: their code, and the vertex input and colour output types that change what they translate to.",
+  "source": "read"
+ },
+ "mkwvk::graphics_pipeline": {
+  "does": "The Vulkan pipeline for a program and the state baked into it, from the pipeline cache (compiles on a miss).",
+  "source": "read"
+ },
+ "mkwvk::guarded_copy": {
+  "does": "copy_nt behind a fault handler: a guest page unmapped meanwhile ends the copy instead of the game.",
+  "source": "read"
+ },
+ "mkwvk::guest_bytes": {
+  "does": "The guest bytes [gpu, gpu + n) in host memory: in place when contiguous, else copied into scratch.",
+  "source": "read"
+ },
+ "mkwvk::guest_cpu_wrote": {
+  "does": "Notes the pages of a guest range the game's code wrote, so a pending copy-back of GPU results does not overwrite them.",
+  "source": "read"
+ },
+ "mkwvk::handle_hits": {
+  "does": "The per-thread cache of texture views by handle that texture_view_of looks in first.",
+  "source": "read"
+ },
+ "mkwvk::import_pool": {
+  "does": "Imports a guest memory range as a Vulkan buffer over the same host memory (no copy), or reports why it cannot.",
+  "source": "read"
+ },
+ "mkwvk::jitter_sample": {
+  "does": "(hookshot) The host's camera jitter (nx2/oot_jitter.py, host/rx_backend.c): the scene's size while a temporal upscaler draws, NVIDIA DLSS or AMD FSR 4 (vk_temporal.cpp) or AMD FSR 3.1 (vk_fsr3_inputs.cpp), whichever it is (one at a time: the Upscaler row); 0, no jitter, otherwise.",
+  "source": "read"
+ },
+ "mkwvk::log_big_copy": {
+  "does": "(RX_VK_LOG_BIG_COPY=1: copies into textures of 32 MB or more, 300 lines).",
+  "source": "read"
+ },
+ "mkwvk::log_img_wanted": {
+  "does": "Whether a program's texture bindings are to be logged (RX_VK_LOG_IMG; false in normal runs).",
+  "source": "read"
+ },
+ "mkwvk::memory_begin_submission": {
+  "does": "Start of a submission's memory work: takes the capture made at submit and readies the mirrors.",
+  "source": "read"
+ },
+ "mkwvk::memory_collect_written": {
+  "does": "Collects the pages the game wrote since the last submission (host: collect_in).",
+  "source": "read"
+ },
+ "mkwvk::memory_cpu_owned": {
+  "does": "Notes words of GPU-written memory the CPU has since written itself, so a later write-back does not overwrite them.",
+  "source": "read"
+ },
+ "mkwvk::memory_end_submission": {
+  "does": "End of a submission's memory work: records the write-back of what the GPU wrote and merges the CPU's written words.",
+  "source": "read"
+ },
+ "mkwvk::memory_end_submission::lambda": {
+  "does": "Inside memory_end_submission: records one copy-back of a range the GPU wrote.",
+  "source": "read"
+ },
+ "mkwvk::memory_page_stamp": {
+  "does": "A guest page's change stamp (bumped when the page is written).",
+  "source": "read"
+ },
+ "mkwvk::memory_rb_recording_begun": {
+  "does": "Notes which mirror uploads a new recording has already joined (readback refresh bookkeeping).",
+  "source": "read"
+ },
+ "mkwvk::memory_rb_refresh": {
+  "does": "Records the copies that refresh readback buffers into the submission's upload command buffer.",
+  "source": "read"
+ },
+ "mkwvk::memory_rb_refresh::lambda": {
+  "does": "A lambda inside memory_rb_refresh. Records the refresh copies into the submission's upload command buffer; true when it recorded any.",
+  "source": "read"
+ },
+ "mkwvk::memory_read_as_submitted": {
+  "does": "Reads guest memory as it was when the submission was made (from the capture), for what the replay must read on the CPU.",
+  "source": "read"
+ },
+ "mkwvk::memory_stamp": {
+  "does": "Marks a guest range as changed for everything that caches by page.",
+  "source": "read"
+ },
+ "mkwvk::memory_sync": {
+  "does": "Refresh the guest's pool table (no Vulkan work: pools are imported as they are used).",
+  "source": "read"
+ },
+ "mkwvk::memory_table_flush": {
+  "does": "(at the end of the recording's uploads: the changes, the last one for each page, as transfers into the table; the upload command buffer's barriers order them after the work submitted before and before this submission's).",
+  "source": "read"
+ },
+ "mkwvk::memory_table_flush::lambda": {
+  "does": "A lambda inside memory_table_flush. (at the end of the recording's uploads: the changes, the last one for each page, as transfers into the table; the upload command buffer's barriers order them after the work submitted before and before this submission's).",
+  "source": "read"
+ },
+ "mkwvk::memory_writeback_value": {
+  "does": "The newest submission that writes a guest range back from the GPU.",
+  "source": "read"
+ },
+ "mkwvk::memory_written_runs": {
+  "does": "The runs of pages in a range written since a given generation.",
+  "source": "read"
+ },
+ "mkwvk::menu_vsync": {
+  "does": "The V-Sync choice of the menu, read at every present.",
+  "source": "read"
+ },
+ "mkwvk::mirror_make": {
+  "does": "A pool's mirror made, filled in the recording's upload command buffer: all of it, then the pages a capture holds as they were at their submit (pools_mu held). False over the budget (tried again when next bound, as mirrors are given back) or over 1 GB (never).",
+  "source": "read"
+ },
+ "mkwvk::mirror_sync": {
+  "does": "Copies the pages the CPU wrote in a pool since its mirror's last sync into the mirror (the upload command buffer).",
+  "source": "read"
+ },
+ "mkwvk::nvn_block_size": {
+  "does": "Bytes per block and block size of an NVN format: the texture code's table, plus ASTC's fixed 16-byte blocks.",
+  "source": "read"
+ },
+ "mkwvk::on": {
+  "does": "With a.mu held: the row on, the extension and its feature, and no frame generation (its own display thread). Turning off tells the driver once.",
+  "source": "read"
+ },
+ "mkwvk::parse_code": {
+  "does": "A control section and its code, from the game's memory or the archives (the seed).",
+  "source": "read"
+ },
+ "mkwvk::pass": {
+  "does": "One pass: pipe over w x h in 8x8 groups, the bindings in order (a sampler when one is given: a sampled image).",
+  "source": "read"
+ },
+ "mkwvk::pipeline_key": {
+  "does": "The key of a graphics pipeline: everything baked into it.",
+  "source": "read"
+ },
+ "mkwvk::pointer_table": {
+  "does": "The table of buffer addresses NVN's driver would pass to a shader stage, built once per state change and thread.",
+  "source": "read"
+ },
+ "mkwvk::pool_of": {
+  "does": "The memory pool that holds a guest address range.",
+  "source": "read"
+ },
+ "mkwvk::present": {
+  "does": "The renderer's side of nvnQueuePresentTexture: finishes the frame's replay and hands the game's picture to the presentation path.",
+  "source": "read"
+ },
+ "mkwvk::present_image": {
+  "does": "Puts the frame's picture on the swapchain: scaling, the overlays and the menu, then the present itself; remakes the swapchain when its format or size changed.",
+  "source": "read"
+ },
+ "mkwvk::present_out": {
+  "does": "Presents a swapchain image (vkQueuePresentKHR with the frame's present id), outside the queue lock.",
+  "source": "read"
+ },
+ "mkwvk::prof_now": {
+  "does": "The clock for the renderer's own timers.",
+  "source": "read"
+ },
+ "mkwvk::prog_same": {
+  "does": "The last answer for this serial, these stages, these bindings and these vertex inputs.",
+  "source": "read"
+ },
+ "mkwvk::program_cache_load": {
+  "does": "(shader_mu held) the kept variants of key go to its list, ready, once.",
+  "source": "read"
+ },
+ "mkwvk::program_for": {
+  "does": "The translated shader program for the game's current shaders and state, from a per-thread cache of the last picks.",
+  "source": "read"
+ },
+ "mkwvk::program_for::lambda": {
+  "does": "Inside program_for: stores the picked program in the per-thread cache of last picks.",
+  "source": "read"
+ },
+ "mkwvk::push_constants": {
+  "does": "Pushes a program's constants before a draw or dispatch; most programs read none and skip it.",
+  "source": "read"
+ },
+ "mkwvk::read_code": {
+  "does": "Reads a shader stage's control block and code from guest memory for translation.",
+  "source": "read"
+ },
+ "mkwvk::recording_wait": {
+  "does": "(a recording slot's last submit done: before it is used again).",
+  "source": "read"
+ },
+ "mkwvk::refresh_pool_ranges_locked": {
+  "does": "Rebuilds the list of GPU-visible memory ranges the capture scans.",
+  "source": "read"
+ },
+ "mkwvk::register_texture_copy": {
+  "does": "Stores a copy of a texture's description under its texture-pool slot when the game registers it (nvnTexturePoolRegisterTexture).",
+  "source": "read"
+ },
+ "mkwvk::replay": {
+  "does": "Walks a submission's recorded commands and replays each into Vulkan state and calls.",
+  "source": "read"
+ },
+ "mkwvk::resume_queue": {
+  "does": "A stopped queue on (forced: past the wait it stopped at), then its later submits, as far as their waits allow.",
+  "source": "read"
+ },
+ "mkwvk::retired_imports_give_back": {
+  "does": "Returns imported host memory of retired pools to the system when it is safe (kept by default on Windows).",
+  "source": "read"
+ },
+ "mkwvk::run_submit": {
+  "does": "Replays one submitted command list and submits the Vulkan command buffers made from it.",
+  "source": "read"
+ },
+ "mkwvk::shadow_drop_range": {
+  "does": "Drops the kept copies of what the GPU last wrote for the pages of a range that changed.",
+  "source": "read"
+ },
+ "mkwvk::shadow_written_to": {
+  "does": "Adds pages to the list of pages written since the write-back shadows were taken.",
+  "source": "read"
+ },
+ "mkwvk::shadows_forget_written": {
+  "does": "After a submission: drops the write-back shadows of the pages written since (sorts and merges the three page lists).",
+  "source": "read"
+ },
+ "mkwvk::skin_check": {
+  "does": "Decides whether a draw is a skinned (moving) draw, whose motion the temporal upscalers need (vk_temporal.cpp).",
+  "source": "read"
+ },
+ "mkwvk::skip_live": {
+  "does": "(EvilOOT) RX_VK_SKIP_FILE=<file>: the draws of the programs listed in it (hex keys, comma or newline separated) left out, the file read again whenever it changes (checked every 300 ms): a bisection in one run, from the scene being looked at.",
+  "source": "read"
+ },
+ "mkwvk::stage_cbuf_word": {
+  "does": "One word of a stage's constant buffers as the shader will see it.",
+  "source": "read"
+ },
+ "mkwvk::stage_handle": {
+  "does": "Evaluates a shader stage's small handle program: which texture handle the shader will read from its constants.",
+  "source": "read"
+ },
+ "mkwvk::stats_tick": {
+  "does": "(each draw) arms a capture when the trigger file is there; writes the results once the measured frame is long done.",
+  "source": "read"
+ },
+ "mkwvk::still_valid": {
+  "does": "Whether the textures bound now answer what the variant's translation was told (a variant whose translation asked nothing stands for any, and an unbound slot takes any).",
+  "source": "read"
+ },
+ "mkwvk::stream_reserve": {
+  "does": "Room in the recording's upload stream.",
+  "source": "read"
+ },
+ "mkwvk::submit_job": {
+  "does": "A submit on the replay thread: replayed as far as its waits allow, or (its queue stopped) after its queue's.",
+  "source": "read"
+ },
+ "mkwvk::submit_q": {
+  "does": "The renderer's side of nvnQueueSubmitCommands: takes the capture of guest memory for the submission and replays its command lists (on the calling thread in the default mode).",
+  "source": "read"
+ },
+ "mkwvk::submit_recording": {
+  "does": "Ends a replayed recording: flushes its draw state, adds the texture uploads and the memory copies recorded for it, and submits its Vulkan command buffer.",
+  "source": "read"
+ },
+ "mkwvk::taau_key": {
+  "does": "Whether a shader program is the one Hookshot replaces with its own upscale (shaders/taau_upscale.comp).",
+  "source": "read"
+ },
+ "mkwvk::taau_stand_in": {
+  "does": "Whether a compute dispatch is the game's temporal anti-aliasing pass the renderer stands in for.",
+  "source": "read"
+ },
+ "mkwvk::take_capture": {
+  "does": "Hands a submit-time capture to the replay that will read it.",
+  "source": "read"
+ },
+ "mkwvk::target_write_mask": {
+  "does": "A target's write mask: the state's channel mask, or nothing for a target the fragment shader leaves unwritten.",
+  "source": "read"
+ },
+ "mkwvk::targets": {
+  "does": "The Vulkan views of the game's current render targets, cached until the targets change.",
+  "source": "read"
+ },
+ "mkwvk::temporal_stand_in": {
+  "does": "(hookshot) A temporal upscaler (NVIDIA DLSS, AMD FSR 4: vk_temporal.cpp) in place of the gameplay upscale network, when one is on and its inputs are as expected: the network's input as it samples it, its output's storage view.",
+  "source": "read"
+ },
+ "mkwvk::texture_answer": {
+  "does": "A texture's kind (the answer to a shader variant's question), cached by texture slot.",
+  "source": "read"
+ },
+ "mkwvk::texture_dirty": {
+  "does": "What the CPU wrote of a texture's storage since gen, as byte ranges from its start. A texture in a virtual (sparse) pool is looked at page by page through its mapping, and is all dirty when its mapping changed.",
+  "source": "read"
+ },
+ "mkwvk::texture_frame": {
+  "does": "Per-frame texture bookkeeping at present: upload statistics, deferred uploads, eviction.",
+  "source": "read"
+ },
+ "mkwvk::texture_get": {
+  "does": "The renderer's texture for a guest texture description, created on first use.",
+  "source": "read"
+ },
+ "mkwvk::texture_gpu_wrote": {
+  "does": "Notes that the GPU writes a memory range, so textures stored there are reloaded.",
+  "source": "read"
+ },
+ "mkwvk::texture_of": {
+  "does": "The texture description registered under a texture-pool slot.",
+  "source": "read"
+ },
+ "mkwvk::texture_released": {
+  "does": "Forgets the slots registered for a texture the game finalized.",
+  "source": "read"
+ },
+ "mkwvk::texture_rendered": {
+  "does": "Notes that a pass rendered into a texture.",
+  "source": "read"
+ },
+ "mkwvk::texture_slot_version": {
+  "does": "A texture-pool slot's version: bumped when the slot is registered anew, so caches keyed by the slot notice.",
+  "source": "read"
+ },
+ "mkwvk::texture_touch": {
+  "does": "Marks a texture used by this frame and this recording; for sampling it also makes sure its upload is not deferred.",
+  "source": "read"
+ },
+ "mkwvk::texture_touch_quick": {
+  "does": "Marks a texture used this frame and checks whether its guest storage changed since its upload.",
+  "source": "read"
+ },
+ "mkwvk::texture_view": {
+  "does": "Makes or finds a view of a texture's image for a level and layer range.",
+  "source": "read"
+ },
+ "mkwvk::texture_view_of": {
+  "does": "The Vulkan image view for a texture handle as a binding needs it (view type, use, format), from a small cache keyed by the handle.",
+  "source": "read"
+ },
+ "mkwvk::ub_generation": {
+  "does": "The change counter of the uniform-buffer update list (caches of uniform words check it).",
+  "source": "read"
+ },
+ "mkwvk::ub_overlay": {
+  "does": "Lays the uniform updates the command stream made so far over a buffer range read on the CPU.",
+  "source": "read"
+ },
+ "mkwvk::ub_read": {
+  "does": "Guest memory as the stream's place sees it: the capture with the stream's earlier uniform updates over it.",
+  "source": "read"
+ },
+ "mkwvk::ub_try_gap": {
+  "does": "Whether a read of uniform-buffer memory falls in a gap between the stream's own updates (then the captured memory answers).",
+  "source": "read"
+ },
+ "mkwvk::ub_word_hit": {
+  "does": "A cached word of uniform-buffer memory as the stream sees it, valid while the page and the recording are unchanged.",
+  "source": "read"
+ },
+ "mkwvk::upload_inner": {
+  "does": "Uploads a texture's changed data from guest memory to its Vulkan image, converting or decoding the format where needed.",
+  "source": "read"
+ },
+ "mkwvk::use_queue_state": {
+  "does": "The state the replay goes on with: its queue's. (The draw path's caches made afresh: they are keyed on the state's counters, which the queues' states share no order of.).",
+  "source": "read"
+ },
+ "mkwvk::vertex_set_same": {
+  "does": "Whether the vertex streams to bind are the ones already bound on this command buffer.",
+  "source": "read"
+ },
+ "mkwvk::wait_recorded": {
+  "does": "(hookshot) Waits for the recording submission value f (or the recording of value f) was finished in, on the recordings' timeline: true when that recording is known (the result in *ok), false when it is not (f not finished yet).",
+  "source": "read"
+ },
+ "mkwvk::watch_tex": {
+  "does": "HOS_NVN_WATCH_TEX=<handle hex> (debugging): who binds that texture handle, as guest call chains (frame pointers), each new chain logged once.",
+  "source": "read"
+ },
+ "mkwvk::watched": {
+  "does": "Whether a program is on the debug watch list (RX_VK_WATCH_PROG; false in normal runs).",
+  "source": "read"
+ },
+ "mkwvk::wb_pages_note": {
+  "does": "Notes pages the GPU will write so their contents are copied back to guest memory.",
+  "source": "read"
+ },
+ "mkwvk::widened": {
+  "does": "3-component formats are not image formats on NVIDIA: the image holds 4 (alpha one), the upload widens them.",
+  "source": "read"
+ },
+ "mtx_do_lock": {
+  "category": "crt",
+  "does": "The C++ runtime's mutex lock (the renderer's std::mutex).",
+  "source": "read"
+ },
+ "mutex_lock": {
+  "does": "Locks a guest mutex: one compare-and-swap when free, a short spin, then a sleep on the object's condition variable.",
+  "source": "read"
+ },
+ "mutex_unlock": {
+  "does": "Unlocks a guest mutex and wakes a sleeper when one is counted.",
+  "source": "read"
+ },
+ "n_nvnCommandBufferAddControlMemory": {
+  "does": "nvnCommandBufferAddControlMemory: gives the command buffer new control memory and releases the recordings whose descriptors the old memory held.",
+  "source": "read"
+ },
+ "n_nvnCommandBufferBindTexturesDeferred": {
+  "does": "Binds textures by a handle array that is read when the command buffer is submitted, not when it is recorded.",
+  "source": "read"
+ },
+ "n_nvnCommandBufferEndRecording": {
+  "does": "Ends a command buffer's recording: copies the recorded commands into a pooled block that becomes the command handle.",
+  "source": "read"
+ },
+ "n_nvnCommandBufferSetRenderEnableConditional": {
+  "does": "Turns rendering on or off by comparing two counter values in GPU memory (equal or different, by mode).",
+  "source": "read"
+ },
+ "n_nvnCommandBufferSetRenderTargets": {
+  "does": "nvnCommandBufferSetRenderTargets: records the targets with a copy of each texture's description.",
+  "source": "read"
+ },
+ "n_nvnDeviceGetTextureHandle": {
+  "does": "combined handle = texture id (20 bits) | sampler id << 20: the Maxwell layout, which the shaders' handle reads expect.",
+  "source": "read"
+ },
+ "n_nvnQueueSubmitCommands": {
+  "does": "nvnQueueSubmitCommands: hands the recordings of a submission to the renderer (the replay runs on this call in the default mode).",
+  "source": "read"
+ },
+ "n_nvnWindowAcquireTexture": {
+  "does": "nvnWindowAcquireTexture: the frame limiter's place: waits for the next frame's time, then gives the game its next window texture.",
+  "source": "read"
+ },
+ "npad_states": {
+  "does": "GetNpadStates(State* out, int count, unsigned int const& npadId): the latest state first.",
+  "source": "read"
+ },
+ "nvn_fmt_bpb": {
+  "does": "Bytes per block of an NVN texture format.",
+  "source": "read"
+ },
+ "nvn_gpu_contiguous": {
+  "does": "How many bytes from a GPU address are one contiguous host range.",
+  "source": "read"
+ },
+ "nvn_gpu_guest": {
+  "does": "The guest address behind a GPU address.",
+  "source": "read"
+ },
+ "nvn_gpu_read": {
+  "does": "Reads guest memory by GPU address for the renderer.",
+  "source": "read"
+ },
+ "nvn_gpu_write": {
+  "does": "Writes guest memory by GPU address for the renderer (GPU results the game reads).",
+  "source": "read"
+ },
+ "nvn_tex_layout": {
+  "does": "The byte layout of a texture's levels and layers as the console stores it (block-linear sizes and offsets).",
+  "source": "read"
+ },
+ "obj": {
+  "does": "The per-thread cache in front of obj_lookup, after a virtual-core checkpoint.",
+  "source": "read"
+ },
+ "obj_lookup": {
+  "does": "Finds the host object of a guest mutex, event, queue or condition variable by its guest address in the shared table (lock-free probe; creates it on a miss).",
+  "source": "read"
+ },
+ "poke_multiwait": {
+  "does": "Wakes the WaitAny calls that watch an object which just changed (only objects some holder links are checked).",
+  "source": "read"
+ },
+ "pool_get": {
+  "does": "A block for a recording's copy from the size-class pool (the heap above the largest class).",
+  "source": "read"
+ },
+ "qsort": {
+  "category": "crt",
+  "does": "The C runtime's sort.",
+  "source": "read"
+ },
+ "queue_get": {
+  "does": "Takes a message from a guest message queue, waiting as an event wait does when it is empty.",
+  "source": "read"
+ },
+ "queue_put": {
+  "does": "mode: 0 send (back), 1 jam (front). try: do not block. Returns 1 if done.",
+  "source": "read"
+ },
+ "read_at": {
+  "does": "Reads a file at an offset straight into guest memory for nn::fs::ReadFile (the host file's read with an explicit position).",
+  "source": "read"
+ },
+ "recomp_fp_estimate": {
+  "does": "The ARM reciprocal and reciprocal-square-root estimate instructions, bit-exact (table and integer arithmetic).",
+  "source": "read"
+ },
+ "recomp_fpe_fma32": {
+  "does": "A 32-bit fused multiply-add with ARM's exact result and flags for the cases the fast path cannot decide (NaN operands, exceptions).",
+  "source": "read"
+ },
+ "recomp_fpe_fma64": {
+  "does": "A 64-bit fused multiply-add with ARM's exact result for the cases the fast path cannot decide.",
+  "source": "read"
+ },
+ "recomp_fpe_recps32": {
+  "does": "ARM's reciprocal step (2 - a*b), bit-exact.",
+  "source": "read"
+ },
+ "recomp_fpe_sub32": {
+  "does": "A 32-bit subtract with ARM's NaN and exception rules for the cases the fast path cannot decide.",
+  "source": "read"
+ },
+ "rx_nvn_fence_q": {
+  "does": "Asks the renderer to wait until the GPU has finished the submissions so far.",
+  "source": "read"
+ },
+ "rx_nvn_pushed": {
+  "does": "How many submissions the game has handed to the renderer (the host's view of the queue).",
+  "source": "read"
+ },
+ "rx_nvn_replayed": {
+  "does": "How many submissions the renderer has replayed.",
+  "source": "read"
+ },
+ "rx_option": {
+  "does": "Reads one renderer option for the host.",
+  "source": "read"
+ },
+ "set_split_volume": {
+  "does": "SetSplitterMixVolume(SplitterType*, int destinationIndex, mix, float volume, int src, int dst).",
+  "source": "read"
+ },
+ "site_call": {
+  "does": "An indirect call site's slow path: looks the target up and remembers it for the site.",
+  "source": "read"
+ },
+ "sleep_ns": {
+  "does": "The sleep itself: a high-resolution waitable timer for a millisecond or more, the yield loop below that.",
+  "source": "read"
+ },
+ "spin_until_set": {
+  "does": "Spins for up to 20 us (HOS_SPIN_US) on an event's or queue's flag before the waiter sleeps.",
+  "source": "read"
+ },
+ "tex_copy": {
+  "does": "Copies a texture's guest description into a recorded command.",
+  "source": "read"
+ },
+ "vc_acquire": {
+  "does": "Virtual cores: waits for one of the game's six cores before running game code; after the escape time (HOS_VCORE_ESCAPE_US, 2 s by default on this build) it runs without one and logs an escape.",
+  "source": "read"
+ },
+ "vc_cores": {
+  "does": "Virtual cores: the table of the game's six cores and who holds each.",
+  "source": "read"
+ },
+ "vc_free_for": {
+  "does": "Virtual cores: the free core a waiting thread may take, by its core mask and priority.",
+  "source": "read"
+ },
+ "vc_release": {
+  "does": "Virtual cores: gives the core back and wakes the best waiter.",
+  "source": "read"
+ },
+ "vc_yield": {
+  "does": "Virtual cores: gives the caller's core to a waiter allowed on it that is as good or better.",
+  "source": "read"
+ },
+ "wait_any": {
+  "does": "The body of WaitAny: scans the multi-wait's holders under one lock, sleeps until an object they watch changes.",
+  "source": "read"
+ },
+ "watch_tex": {
+  "does": "HOS_NVN_WATCH_TEX=<handle hex> (debugging): who binds that texture handle, as guest call chains (frame pointers), each new chain logged once.",
+  "source": "read"
+ }
+}

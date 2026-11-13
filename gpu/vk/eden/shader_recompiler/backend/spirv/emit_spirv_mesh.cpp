@@ -16,6 +16,9 @@
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+#ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
+#include "hookshot_env.h"
+#endif
 
 namespace Shader::Backend::SPIRV {
 namespace {
@@ -621,7 +624,7 @@ void EmitMeshPrologue(EmitContext& ctx) {
     // across the whole map (vertices from other meshlets' leftovers), dark lines on the ground, the water and Link that
     // changed every frame. Zeroed, such a primitive is (0,0,0): no area. Straight-line stores, each clamped into its array
     // (no branch: see below). RX_VK_MESH_NO_ZERO=1: as before
-    static const bool no_zero{std::getenv("RX_VK_MESH_NO_ZERO") != nullptr};
+    static const bool no_zero{env_on("RX_VK_MESH_NO_ZERO")};
     if (!no_zero && ctx.mesh_threads) {
         const Id invocation{LocalInvocation(ctx)};
         const auto zero_all = [&](Id array, u32 count) {

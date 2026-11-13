@@ -38,7 +38,7 @@
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/host_translate_info.h"
-#include "shader_recompiler/ir_opt/oot_visual_workaround.h"
+#include "shader_recompiler/ir_opt/fragment_output_guard.h"
 #include "shader_recompiler/object_pool.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/program_header.h"

@@ -8,6 +8,8 @@ import io
 from pathlib import Path
 import zstandard
 
+RUN_ALL_MODULES = ["zstandard"]
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--source', type=Path, default=Path(__file__).resolve().parents[1])
 args = parser.parse_args()

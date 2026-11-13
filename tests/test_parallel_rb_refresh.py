@@ -21,6 +21,9 @@ import subprocess
 import sys
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ["--cxx", "{cxx}"]
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,10 +95,10 @@ def main():
         fixture = ROOT / "tests" / "parallel_rb_refresh_test.cpp"
         define = "HAVE_SEGMENTS_BEGIN=%d" % segments_begin
         if msvc:
-            command = [compiler, "/nologo", "/std:c++20", "/EHsc", "/D" + define, "/D_CRT_SECURE_NO_WARNINGS", "/I" + str(folder),
+            command = [compiler, "/nologo", "/std:c++20", "/FI" + ENV_ON_H, "/EHsc", "/D" + define, "/D_CRT_SECURE_NO_WARNINGS", "/I" + str(folder),
                        "/Fo" + str(folder / "fixture.obj"), "/Fe" + str(binary), str(fixture)]
         else:
-            command = [compiler, "-std=c++20", "-O1", "-D" + define, "-D_CRT_SECURE_NO_WARNINGS", "-I" + str(folder),
+            command = [compiler, "-std=c++20", "-include", ENV_ON_H, "-O1", "-D" + define, "-D_CRT_SECURE_NO_WARNINGS", "-I" + str(folder),
                        str(fixture), "-o", str(binary)] + ([] if os.name == "nt" else ["-pthread"])
         r = subprocess.run(command, capture_output=True, text=True, timeout=180)
         if r.returncode:

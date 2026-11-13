@@ -5,7 +5,8 @@ past the buttons host/pad_sdl.c reads for the game. Its poll turns that button i
 gpu/vk/vk_menu.cpp presses F1 (press[6]) with it: the menu opens, and closes again, as the key does. The touchpad is not
 one of the inputs the Controls page binds, so its bit is past HOS_PAD_N.
 
-The poll's button block is compiled over a stand-in SDL, which reports one button at a time:
+The poll's button block is compiled over a stand-in SDL, which reports one button at a time.
+It also checks that all four paddle buttons have their own bindable bits.
 
     python -I -B tests/test_touchpad_menu.py [--cxx clang++]
 """
@@ -38,7 +39,7 @@ def main():
         raise SystemExit("host/pad_sdl.c: no BTN_A ... BTN_N enum")
     buttons = m.group(0)
     # (the block that builds the polled buttons from SDL's, triggers aside)
-    start = pad.index("            for (int k = BTN_A; k <= BTN_RIGHT; k++)")
+    start = pad.index("            uint64_t sig = 0;\n            for (int k = BTN_A; k <= BTN_RIGHT; k++)")
     end = pad.index("            if (hos_sdl_pad_axis(gc, AX_LT)", start)
     block = pad[start:end]
     fixture = r'''#include "gpu/vk/vk_api.h"
@@ -46,25 +47,27 @@ def main():
 #include <stdio.h>
 ''' + buttons + r'''
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); return 1; } } while (0)
-static int touch = -1;
-static int hos_sdl_pad_button(void *gc, int button) { (void)gc; return button == touch; }
+static int pressed;
+static int hos_sdl_pad_button(void *gc, int button) { (void)gc; return button == pressed; }
+static uint64_t poll_button(int button) {
+    pressed = button;
+    void *gc = NULL;
+    uint64_t b = 0;
+''' + block + r'''
+    return b;
+}
 int main(void) {
     /* (SDL2's SDL_CONTROLLER_BUTTON_TOUCHPAD and SDL3's SDL_GAMEPAD_BUTTON_TOUCHPAD are both 20) */
     CHECK(BTN_TOUCHPAD == 20);
     /* (its own bit, past the positions a Switch button can be bound to) */
     CHECK((int)HOS_PAD_TOUCHPAD >= (int)HOS_PAD_N && (int)HOS_PAD_TOUCHPAD < 32);
-    void *gc = NULL;
-    uint64_t b = 0;
-''' + block + r'''
-    CHECK(b == 0);                                  /* (nothing pressed: nothing set) */
-    touch = BTN_TOUCHPAD;
-    b = 0;
-''' + block + r'''
-    CHECK(b == 1ULL << HOS_PAD_TOUCHPAD);           /* (the touchpad reaches the menu, and only there) */
-    touch = BTN_A;
-    b = 0;
-''' + block + r'''
-    CHECK(b == 1ULL << HOS_PAD_SOUTH);              /* (the game's own buttons are unchanged) */
+    CHECK(poll_button(-1) == 0);
+    CHECK(poll_button(BTN_TOUCHPAD) == 1ULL << HOS_PAD_TOUCHPAD);
+    CHECK(poll_button(BTN_A) == 1ULL << HOS_PAD_SOUTH);
+    CHECK(poll_button(16) == 1ULL << HOS_PAD_RPADDLE1);
+    CHECK(poll_button(17) == 1ULL << HOS_PAD_LPADDLE1);
+    CHECK(poll_button(18) == 1ULL << HOS_PAD_RPADDLE2);
+    CHECK(poll_button(19) == 1ULL << HOS_PAD_LPADDLE2);
     printf("PASS: SDL's touchpad click sets its own bit, past the bindable inputs\n");
     return 0;
 }

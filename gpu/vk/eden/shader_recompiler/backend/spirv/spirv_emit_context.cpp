@@ -20,6 +20,9 @@
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/mma_layout.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
+#ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
+#include "hookshot_env.h"
+#endif
 
 namespace Shader::Backend::SPIRV {
 namespace {
@@ -528,14 +531,11 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineCommonConstants();
     DefineInterfaces(program);
     // (RX_VK_MESH_FIRST=1, with RX_VK_MESH_ARGS=1: off, one task program with it hung or ended the game at its first draw)
-    if (stage == Stage::Task && !runtime_info.mesh_fallback && getenv("RX_VK_MESH_FIRST") &&
+    if (stage == Stage::Task && !runtime_info.mesh_fallback && env_on("RX_VK_MESH_FIRST") &&
         profile.unified_descriptor_binding && profile.support_int64) {
         // (hookshot) the draw's first task workgroup, read through a pushed address (EmitIsbeRead)
         if (!Sirit::ValidId(U64)) { AddCapability(spv::Capability::Int64); U64 = Name(TypeInt(64, false), "u64"); }
         wants_mesh_first = true;
-        if (getenv("RX_VK_FOLLOW_MESH") && !getenv("RX_VK_NO_FOLLOW") && program.info.uses_global_memory) {
-            wants_guest_pages = true;   // (the block is made once: with the page table's member if the stage will want it)
-        }
         AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         AddExtension("SPV_KHR_physical_storage_buffer");
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
@@ -1079,17 +1079,15 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     const char* const gp_test{getenv("RX_VK_GP_TEST")};   // (1: the addressing model alone, 2: and the table's load, 3 or unset: all of it)
     const int gp_level{gp_test ? atoi(gp_test) : 3};
     // (the culling; a graphics stage with it hung the renderer at a load. RX_VK_NO_FOLLOW: none of it, as before)
-    static const bool no_follow{getenv("RX_VK_NO_FOLLOW") != nullptr};
-    // (RX_VK_FOLLOW_MESH=1: the task and mesh stages too. Tried for the foliage, which it did not bring back: off)
-    static const bool no_mesh{getenv("RX_VK_FOLLOW_MESH") == nullptr};
+    static const bool no_follow{env_on("RX_VK_NO_FOLLOW")};
+    // (not the task and mesh stages: tried for the foliage, which it did not bring back)
     // (EvilOOT: vertex and fragment stages too, as the fallback only: an access no bound buffer holds read 0 there (Kokiri's
     // pond came out grey, not green). The pointer pass leaves graphics stages as they were, so what was found before still is,
     // and the menus' text stays. Not where the stage has the render area's push block: a stage has one push block.
     // RX_VK_FOLLOW_GRAPHICS=0: off)
     static const bool graphics{!getenv("RX_VK_FOLLOW_GRAPHICS") || atoi(getenv("RX_VK_FOLLOW_GRAPHICS")) != 0};
     const bool graphics_stage{stage == Stage::VertexB || stage == Stage::Fragment};
-    const bool follow_pointers{(stage == Stage::Compute || (!no_mesh && (stage == Stage::Task || stage == Stage::Mesh)) ||
-                                (graphics && graphics_stage && !info.uses_render_area)) && !no_follow};
+    const bool follow_pointers{(stage == Stage::Compute || (graphics && graphics_stage && !info.uses_render_area)) && !no_follow};
     Id ptr_u64{};
     if (follow_pointers) {
         wants_guest_pages = true;
@@ -1128,7 +1126,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     // (the page table's lookup of addr: hit(target) is called in the block where the page is mapped, its device address in target,
     // and must end that block (a return). Falls through after it)
     // (RX_VK_FOLLOW_STORES=1: writes and atomics through the table too; off by default, see the storage buffer pass)
-    static const bool follow_stores{getenv("RX_VK_FOLLOW_STORES") != nullptr};
+    static const bool follow_stores{env_on("RX_VK_FOLLOW_STORES")};
     // (hookshot) size: the access's bytes. An access that runs past its 4 KB page is left to the miss path: the table maps pages one
     // by one, the next page may be another allocation's or none, and a 16-byte read at a page's end faulted the device (the culling
     // passes 53caac5f, b6122162 at a save's load)
@@ -1169,6 +1167,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     // (EvilOOT) the structure pointer type of a storage buffer of that member's elements, for OpArrayLength
     const auto struct_pointer_of{[&](DefPtr m) -> Id {
         if (m == &StorageDefinitions::U32) return storage_types.U32.array;
+        if (m == &StorageDefinitions::F32) return storage_types.F32.array;   // (hookshot: the native float add's, as U32's)
         if (m == &StorageDefinitions::U32x2) return storage_types.U32x2.array;
         if (m == &StorageDefinitions::U32x4) return storage_types.U32x4.array;
         return Id{};
@@ -1211,6 +1210,12 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
     const auto define_body{[&](DefPtr ssbo_member, Id addr, Id element_pointer, u32 shift,
                                auto&& callback, bool add_label = true) {
         if (add_label) AddLabel();
+        // (hookshot, global_table_loop: the tables' entries in a loop, its counter here, where the function's variables must be.
+        // The CAS loops' callers open the block themselves: theirs stay written out)
+        const Id table_counter{global_table_loop && add_label && !ssbo_tables.empty()
+                                   ? AddLocalVariable(TypePointer(spv::StorageClass::Function, U32[1]), spv::StorageClass::Function)
+                                   : Id{}};
+        if (Sirit::ValidId(table_counter)) AddCapability(spv::Capability::StorageBufferArrayDynamicIndexing);   // (the tables by k)
         const size_t num_buffers{info.storage_buffers_descriptors.size()};
         // (from Fritchii) Info::native_global_bounds: the candidate pointers the storage buffer pass bound for accesses it
         // left global (any single descriptor not in the driver bank) carry no NVN size word: the address goes to the
@@ -1306,6 +1311,58 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         for (const GlobalTableVars& table : ssbo_tables) {   // (hookshot: Info::global_tables)
             const Id table_id{table.vars.*ssbo_member};
             if (!Sirit::ValidId(table_id) || !Sirit::ValidId(cbufs[table.cbuf_index].U32x2)) {
+                continue;
+            }
+            if (Sirit::ValidId(table_counter)) {
+                // (mma_layout.h global_table_loop) the same test as the written-out one below, entry k of the loop's counter, the
+                // driver asked not to unroll it. k is the same in every invocation that runs it: dynamic indexing, not non-uniform.
+                // The written-out form below is left as it was: other GPUs' SPIR-V, and their drivers' caches of it, do not change
+                const Id header{OpLabel()};
+                const Id check{OpLabel()};
+                const Id body{OpLabel()};
+                const Id next{OpLabel()};
+                const Id done{OpLabel()};
+                OpStore(table_counter, zero);
+                OpBranch(header);
+                AddLabel(header);
+                OpLoopMerge(done, next, spv::LoopControlMask::DontUnroll);
+                OpBranch(check);
+                AddLabel(check);
+                const Id k{OpLoad(U32[1], table_counter)};
+                OpBranchConditional(OpULessThan(U1, k, Const(table.count)), body, done);
+                AddLabel(body);
+                // (entry k at cbuf_offset + 16k: its address in the U32x2 word cbuf_offset / 8 + 2k, its size in the next)
+                const Id word{OpIAdd(U32[1], Const(table.cbuf_offset / 8), OpShiftLeftLogical(U32[1], k, Const(1U)))};
+                const Id entry_pointer{OpAccessChain(uniform_types.U32x2, cbufs[table.cbuf_index].U32x2, zero, word)};
+                const Id size_pointer{OpAccessChain(uniform_types.U32x2, cbufs[table.cbuf_index].U32x2, zero,
+                                                    OpIAdd(U32[1], word, Const(1U)))};
+                const u64 ssbo_align_mask{~(profile.min_ssbo_alignment - 1U)};
+                const Id unaligned_addr{OpBitcast(U64, OpLoad(U32[2], entry_pointer))};
+                const Id ssbo_addr{OpBitwiseAnd(U64, unaligned_addr, Constant(U64, ssbo_align_mask))};
+                const Id size_word{OpCompositeExtract(U32[1], OpLoad(U32[2], size_pointer), 0U)};
+                Id ssbo_end{OpIAdd(U64, unaligned_addr, OpUConvert(U64, size_word))};
+                if (const Id struct_pointer{struct_pointer_of(ssbo_member)}; Sirit::ValidId(struct_pointer)) {
+                    const Id elements{OpArrayLength(U32[1], OpAccessChain(struct_pointer, table_id, k), 0U)};
+                    const Id bound_end{
+                        OpIAdd(U64, ssbo_addr, OpUConvert(U64, OpShiftLeftLogical(U32[1], elements, Const(shift))))};
+                    const Id capped{OpSelect(U64, OpULessThan(U1, bound_end, ssbo_end), bound_end, ssbo_end)};
+                    ssbo_end = OpSelect(U64, OpIEqual(U1, size_word, zero), bound_end, capped);
+                }
+                const Id cond{OpLogicalAnd(U1, OpUGreaterThanEqual(U1, addr, ssbo_addr), OpULessThan(U1, addr, ssbo_end))};
+                const Id then_label{OpLabel()};
+                const Id else_label{OpLabel()};
+                OpSelectionMerge(else_label, spv::SelectionControlMask::MaskNone);
+                OpBranchConditional(cond, then_label, else_label);
+                AddLabel(then_label);
+                const Id ssbo_offset{OpUConvert(U32[1], OpISub(U64, addr, ssbo_addr))};
+                const Id ssbo_index{OpShiftRightLogical(U32[1], ssbo_offset, Const(shift))};
+                callback(OpAccessChain(element_pointer, table_id, k, zero, ssbo_index));   // (ends in a return)
+                AddLabel(else_label);
+                OpBranch(next);
+                AddLabel(next);
+                OpStore(table_counter, OpIAdd(U32[1], k, Const(1U)));
+                OpBranch(header);
+                AddLabel(done);
                 continue;
             }
             for (u32 k = 0; k < table.count; ++k) {
@@ -1504,17 +1561,18 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
         write_global_cas_loop_func = func;
     }
     // (hookshot) RED/ATOM.E.ADD.F32 at an address no buffer was tracked to: the 32-bit atomics' fallback, with the float
-    // sum made in a compare-exchange loop as the storage buffers' f32_add_cas does
+    // sum made in a compare-exchange loop as the storage buffers' f32_add_cas does, or the GPU's own float add where
+    // the storage buffers' adds are (native_f32_add: the f32 views, searched as the u32 ones)
     if (info.stores_global_memory) {
         const Id func_type{TypeFunction(F32[1], U64, F32[1])};
         const Id func{OpFunction(F32[1], spv::FunctionControlMask::DontInline, func_type)};
         const Id addr{OpFunctionParameter(U64)};
         const Id value{OpFunctionParameter(F32[1])};
         AddLabel();
-        const Id expected_var{AddLocalVariable(TypePointer(spv::StorageClass::Function, U32[1]),
-                                               spv::StorageClass::Function)};
-        const Id tries_var{AddLocalVariable(TypePointer(spv::StorageClass::Function, U32[1]),
-                                            spv::StorageClass::Function)};
+        const Id expected_var{native_f32_add ? Id{} : AddLocalVariable(TypePointer(spv::StorageClass::Function, U32[1]),
+                                                                       spv::StorageClass::Function)};
+        const Id tries_var{native_f32_add ? Id{} : AddLocalVariable(TypePointer(spv::StorageClass::Function, U32[1]),
+                                                                    spv::StorageClass::Function)};
         const auto cas_loop{[&](Id pointer) {
             OpStore(expected_var, OpLoad(U32[1], pointer, spv::MemoryAccessMask::Aligned, 4U));
             OpStore(tries_var, u32_zero_value);   // (a ceiling of attempts, as every compare-exchange loop has: #548)
@@ -1541,11 +1599,19 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             AddLabel(continue_label);
             OpBranch(begin_label);
         }};
-        define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2,
-                    [&](Id ssbo_pointer) { cas_loop(ssbo_pointer); }, false);
+        const auto native_add{[&](Id pointer) {
+            OpReturnValue(OpAtomicFAddEXT(F32[1], pointer, Const(static_cast<u32>(spv::Scope::Device)), u32_zero_value, value));
+        }};
+        if (native_f32_add) {
+            define_body(&StorageDefinitions::F32, addr, storage_types.F32.element, 2, native_add, false);
+        } else {
+            define_body(&StorageDefinitions::U32, addr, storage_types.U32.element, 2,
+                        [&](Id ssbo_pointer) { cas_loop(ssbo_pointer); }, false);
+        }
         if (follow_stores) guest_lookup(addr, 4U, [&](Id target) {
-            if (gp_level >= 3) cas_loop(psb_member(U32[1], target));
-            else OpReturnValue(ConstantNull(F32[1]));
+            if (gp_level < 3) OpReturnValue(ConstantNull(F32[1]));
+            else if (native_f32_add) native_add(psb_member(F32[1], target));
+            else cas_loop(psb_member(U32[1], target));
         });
         OpReturnValue(ConstantNull(F32[1]));
         OpFunctionEnd();
@@ -1814,6 +1880,14 @@ void EmitContext::DefineConstantBufferIndirectFunctions(const Info& info) {
 }
 
 void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
+    // (hookshot) RED/ATOM.ADD.F32 as the GPU's own float add where it has one, on an f32 view of the buffer: the
+    // compare-exchange loop gives up after CAS_LOOP_MAX_TRIES attempts, and an add that gives up is lost. Decided before
+    // the early return: DefineGlobalMemoryFunctions' fallback reads it too
+    native_f32_add = profile.support_float32_atomic_add && profile.support_descriptor_aliasing && info.uses_atomic_f32_add;
+    if (native_f32_add) {
+        AddExtension("SPV_EXT_shader_atomic_float_add");
+        AddCapability(spv::Capability::AtomicFloat32AddEXT);
+    }
     if (info.storage_buffers_descriptors.empty()) {
         return;
     }
@@ -1822,6 +1896,9 @@ void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
     IR::Type used_types{profile.support_descriptor_aliasing ? info.used_storage_buffer_types
                                                             : IR::Type::U32};
     used_types |= IR::Type::U32;
+    if (native_f32_add) {
+        used_types |= IR::Type::F32;
+    }
     if (profile.support_int8 && profile.support_storage_buffer_8bit &&
         True(used_types & IR::Type::U8)) {
         DefineSsbos(*this, storage_types.U8, &StorageDefinitions::U8, info, binding, U8,
@@ -1874,7 +1951,7 @@ void EmitContext::DefineStorageBuffers(const Info& info, u32& binding) {
         decrement_cas_ssbo = CasLoop(*this, Operation::Decrement, storage_types.U32.array,
                                      storage_types.U32.element, U32[1], spv::Scope::Device);
     }
-    if (info.uses_atomic_f32_add) {
+    if (info.uses_atomic_f32_add && !native_f32_add) {
         f32_add_cas = CasLoop(*this, Operation::FPAdd, storage_types.U32.array,
                               storage_types.U32.element, F32[1], spv::Scope::Device);
     }
@@ -2017,6 +2094,12 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
 void EmitContext::DefineInputs(const IR::Program& program) {
     const Info& info{program.info};
     const VaryingState loads{info.loads.mask | info.passthrough.mask};
+    const bool noperspective_as_smooth{
+        stage == Stage::Fragment && runtime_info.scaled_noperspective_inputs &&
+        std::ranges::any_of(info.interpolation,
+                            [](Interpolation mode) {
+                                return mode == Interpolation::NoPerspective;
+                            })};
 
     if (info.uses_workgroup_id) {
         workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
@@ -2084,7 +2167,8 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         layer = DefineInput(*this, U32[1], false, spv::BuiltIn::Layer);
         Decorate(layer, spv::Decoration::Flat);
     }
-    if (loads.AnyComponent(IR::Attribute::PositionX)) {
+    if (loads.AnyComponent(IR::Attribute::PositionX) ||
+        info.passthrough.AnyComponent(IR::Attribute::PositionX) || noperspective_as_smooth) {
         const bool is_fragment{stage == Stage::Fragment};
         if (!is_fragment && profile.has_broken_spirv_position_input) {
             need_input_position_indirect = true;
@@ -2189,7 +2273,12 @@ void EmitContext::DefineInputs(const IR::Program& program) {
             case Interpolation::Smooth:
                 break;
             case Interpolation::NoPerspective:
-                Decorate(id, spv::Decoration::NoPerspective);
+                // The previous stage may write it times Position.w (noperspective_outputs).
+                if (!runtime_info.scaled_noperspective_inputs) {
+                    Decorate(id, spv::Decoration::NoPerspective);
+                } else {
+                    noperspective_as_smooth_inputs[index] = true;
+                }
                 break;
             case Interpolation::Flat:
                 Decorate(id, spv::Decoration::Flat);
@@ -2256,7 +2345,11 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     mesh_attribute_words = (std::max)(
         mesh_primitive_base + Common::DivCeil(mesh_info.max_primitives, 32U) * primitive_lines * 32,
         1U);
-    mesh_map_bytes = 4 + mesh_info.Corners() * mesh_info.max_primitives;
+    // Whole blocks of 32 primitives, as the attributes: the program writes the index bytes of every primitive block, lanes past
+    // max_primitives too (a count of 0 wraps its min(count - 1, lane) to every lane). Sized to max_primitives, those writes were
+    // clamped onto the last byte, the last primitive's last corner: with 126 primitives (most of OoT's) a stray vertex, flashing
+    // triangles over Kokiri's foliage and ground (as nxnative found: "primitive index bytes for every primitive block")
+    mesh_map_bytes = 4 + mesh_info.Corners() * Common::DivCeil(mesh_info.max_primitives, 32U) * 32;
     mesh_shared_u32 = TypePointer(spv::StorageClass::Workgroup, U32[1]);
     mesh_attributes = DefineVariable(*this, TypeArray(U32[1], Const(mesh_attribute_words)),
                                      std::nullopt, spv::StorageClass::Workgroup);
@@ -2346,7 +2439,7 @@ void EmitContext::DefineMesh(const IR::Program& program) {
     }
     // (hookshot) A component of a generic output no line writes was undefined at the fragment stage (the console's: 0, and 1 for .w,
     // as the vertex stage's defaults here). The foliage is drawn by mesh programs: neon plants. RX_VK_MESH_NO_DEFAULTS=1: as before
-    if (!std::getenv("RX_VK_MESH_NO_DEFAULTS")) {
+    if (!env_on("RX_VK_MESH_NO_DEFAULTS")) {
         std::array<u32, IR::NUM_GENERICS> written{};
         for (const u32 line : mesh_info.vertex_lines) {
             const IR::Attribute attribute{line};

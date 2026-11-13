@@ -1,14 +1,19 @@
 #version 450
 // (hookshot) NVIDIA DLSS's inputs for OoT's gameplay upscale (vk_dlss.cpp), at the render size, in one pass:
 //  - colour: the network's input as it samples it, the square root of the scene colour (tonemapped, perceptual): DLSS
-//    takes it as LDR colour
+//    takes it as LDR colour, clamped to 0..1. With the game's native HDR the scene goes past 1, and an engine made for HDR
+//    colour (vk_temporal.h TemporalEngine::hdr) is given linear light, which an HDR feature and its auto exposure expect:
+//    vk_temporal.cpp makes this pass a second time with kSquare (constant 1) on, the colour squared, and kColorMax
+//    (constant 0) far above 1, so the highlights are not cut at the paper white (dlss_out.comp's kSquare then off)
 //  - depth: the scene's depth as a plain float image
 //  - motion: where each pixel was in the frame before, in render pixels. The game has no motion vectors: the scene depth
 //    is taken back to clip space and through the frame before's camera (pc.reproject: this frame's clip space to the
 //    frame before's, from the camera's two matrices, its jitter taken off). Only the camera's motion: what moves by itself gets
 //    the motion of what is behind it, until vk_dlss.cpp's actor motion draws the skinned draws' own over it (dlss_actor.vert). pc.flags bit 0: motion (none on the first frame);
 //    bit 1: the motion shown as the colour instead (RX_VK_DLSS_DEBUG=motion); bit 2: only that, from the motion image as it is
-//    then (after vk_dlss.cpp's actor motion drew into it: dlss_actor.vert)
+//    then (after vk_dlss.cpp's actor motion drew into it: dlss_actor.vert); bit 3 (hookshot): the depth reversed, 1 - d, as
+//    AMD FSR 3.1's passes take it (vk_fsr3.cpp on this chain: fsr3_math.h flip_depth). A NaN in the colour is taken as black
+//    (fsr3_prep.comp's rule: one NaN spreads through an upscaler's history)
 //  - (miojo) ambient occlusion, pc.ao > 0 (the menu's Ambient occlusion row): the colour darkened where the scene depth
 //    around a pixel stands in front of its surface (McGuire's Scalable Ambient Obscurance estimator, 16 taps on a spiral
 //    turned by a noise that changes with the frame's jitter: DLSS's accumulation averages it). View space comes back from
@@ -16,6 +21,8 @@
 //    the picture's height, so it needs no word of the game's units
 // The game's clip space: depth from -1 to 1 (NVN's default), y up, the picture's rows top down.
 layout(local_size_x = 8, local_size_y = 8) in;
+layout(constant_id = 0) const float kColorMax = 1.0;   // (the colour's ceiling: 1 for LDR colour)
+layout(constant_id = 1) const bool kSquare = false;    // (the colour squared: linear light, for an engine made for HDR colour)
 layout(binding = 0) uniform sampler2D scene;
 layout(binding = 1) uniform sampler2D scene_depth;
 layout(binding = 2, rgba16f) uniform writeonly image2D color;
@@ -75,14 +82,16 @@ void main() {
         imageStore(color, g, vec4(clamp(abs(m) / 16.0, 0.0, 1.0), textureLod(scene_depth, uv, 0.0).r, 1.0));
         return;
     }
-    vec3 c = textureLod(scene, uv, 0.0).rgb;
+    vec3 e = textureLod(scene, uv, 0.0).rgb;
+    e = max(mix(e, vec3(0.0), isnan(e)), vec3(0.0));   // (a NaN taken as black first: max(NaN, 0) is undefined)
+    vec3 c = kSquare ? e * e : e;
     const float d = textureLod(scene_depth, uv, 0.0).r;
-    if (pc.ao > 0.0 && d > 0.0 && d < 1.0) {   // (not the sky; pc.flags bit 3: the occlusion alone, RX_VK_AO_DEBUG)
-        const float a = mix(1.0, ambient(g, uv, size), pc.ao);
-        c = (pc.flags & 8) != 0 ? vec3(a * a) : c * a;
+    if (pc.ao > 0.0 && d > 0.0 && d < 1.0) {   // ((miojo) not the sky; pc.flags bit 4: the occlusion alone, RX_VK_AO_DEBUG)
+        const float a = mix(1.0, ambient(g, uv, size), pc.ao), a2 = kSquare ? a * a : a;   // (as over the colour not squared)
+        c = (pc.flags & 16) != 0 ? vec3(a * a) : c * a2;
     }
-    imageStore(color, g, vec4(clamp(c, 0.0, 1.0), 1.0));
-    imageStore(depth, g, vec4(d));
+    imageStore(color, g, vec4(min(c, vec3(kColorMax)), 1.0));
+    imageStore(depth, g, vec4((pc.flags & 8) != 0 ? 1.0 - d : d));
     vec2 mv = vec2(0.0);
     if ((pc.flags & 1) != 0 && d >= 0.0 && d <= 1.0) {
         const vec4 clip = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, d * 2.0 - 1.0, 1.0);

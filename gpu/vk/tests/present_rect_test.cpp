@@ -35,6 +35,11 @@ int main() {
     expect("float camera ratio keeps the full 32:9 destination",
            mkwvk::present_rect(1920, 1080, nullptr, 5120, 1440, {static_cast<float>(32.0 / 9.0)}),
            {0, 0, 5120, 1440});
+    constexpr PresentAspect surround{static_cast<float>(48.0 / 9.0)};
+    expect("48:9 internal picture fills the triple-monitor output",
+           mkwvk::present_rect(6528, 1224, nullptr, 7680, 1440, surround), {0, 0, 7680, 1440});
+    expect("48:9 picture keeps its shape in a resized 32:9 window",
+           mkwvk::present_rect(6528, 1224, nullptr, 5120, 1440, surround), {0, 240, 5120, 960});
     expect("logical portrait content", mkwvk::present_rect(1920, 1080, nullptr, 1600, 1000, {0.5}),
            {550, 0, 500, 1000});
     expect("ultrawide source aspect fits naturally",

@@ -156,7 +156,7 @@ def enumerate_romfs(romfs, out_dir, limit=0):
                 index[ident] = len(stage_list)
                 stage_list.append({"id": ident, "nvn_stage": nvn, "control": control, "code": code,
                                    "census_key": "%016x" % int.from_bytes(
-                                       hashlib.sha1(control + code).digest()[:8], "little"),
+                                       hashlib.sha1(control + code, usedforsecurity=False).digest()[:8], "little"),
                                    "sources": [source]})
             else:
                 srcs = stage_list[index[ident]]["sources"]
@@ -265,8 +265,10 @@ def cxx_std(compiler):
     cached = os.path.join(work_dir(), "cxx_std")
     if os.path.isfile(cached):
         return open(cached).read().strip()
-    for std in ("-std=c++23", "-std=c++2b", "-std=c++2a"):
-        probe = "constexpr int f(){ static int x=0; return x; } int main(){return f();}"
+    for std in ("-std=c++23", "-std=c++2b"):
+        # Match assert.h: a static on the non-constant failure path, while a
+        # successful call remains a valid constant expression (also on Clang 18).
+        probe = "constexpr int f(int n){if(n<0){static int x=0;return ++x;}return n;} static_assert(f(1)==1);"
         r = subprocess.run([compiler, std, "-x", "c++", "-fsyntax-only", "-"], input=probe, text=True,
                            capture_output=True)
         if r.returncode == 0:
@@ -284,7 +286,7 @@ def work_dir(out=None):
 def translator_stamp():
     """nx2/build.py:691-699 HOOKSHOT_SHADER_STAMP, byte for byte: what makes hookshot_programs.bin valid."""
     vk = os.path.join(ROOT, "gpu", "vk")
-    stamp = hashlib.sha1()
+    stamp = hashlib.sha1(usedforsecurity=False)
     translator = [os.path.join(d, f) for top in ("eden", "sirit", "compat")
                   for d, _, fs in os.walk(os.path.join(vk, top)) for f in fs]
     for f in sorted(translator) + [os.path.join(vk, n) for n in
@@ -325,7 +327,7 @@ def build_tool(out_dir, jobs=0):
             f.write(stamp)
 
     def obj_of(src):
-        name = hashlib.sha1(os.path.relpath(src, ROOT).encode()).hexdigest()[:16] + ".o"
+        name = hashlib.sha1(os.path.relpath(src, ROOT).encode(), usedforsecurity=False).hexdigest()[:16] + ".o"
         return os.path.join(objs_dir, name)
 
     jobs = jobs or min(os.cpu_count() or 4, 24)

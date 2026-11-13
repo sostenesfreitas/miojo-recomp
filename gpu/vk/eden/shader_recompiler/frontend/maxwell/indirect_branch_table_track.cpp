@@ -11,6 +11,9 @@
 #include "shader_recompiler/frontend/maxwell/indirect_branch_table_track.h"
 #include "shader_recompiler/frontend/maxwell/opcodes.h"
 #include "shader_recompiler/frontend/maxwell/translate/impl/load_constant.h"
+#ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
+#include "hookshot_env.h"
+#endif
 
 namespace Shader::Maxwell {
 namespace {
@@ -121,7 +124,7 @@ std::optional<IndirectBranchTableInfo> TrackIndirectBranchTable(Environment& env
                                           static_cast<u32>(((*movc >> 20) & 0x3fff) * 4));
                 if (bound > 0 && bound + extra < count) count = bound + extra;
             }
-            if (std::getenv("RX_VK_LOG_BRX")) {
+            if (env_on("RX_VK_LOG_BRX")) {
                 std::fprintf(stderr, "brx: cbuf-bounded table at %#x: c%u[%#x], %u entries (bound %u)\n",
                              static_cast<unsigned>(brx_pos.Offset()), t_index, cbuf_offset, count, bound);
             }

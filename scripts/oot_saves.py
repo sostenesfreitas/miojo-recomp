@@ -39,8 +39,10 @@ Program = collections.namedtuple("Program", "name display folders processes alia
 # home folder); the saves are then found under it by LAYOUTS. processes: lower case, without .exe, for the
 # running-game check. The sources are in docs/saves.md.
 EDEN = {"linux": ["{data}/eden"], "windows": ["{appdata}/eden"]}
+# (Lichii has a data folder of its own since its build 150, 2026-11-10; a build from before keeps its saves in Eden's)
+LICHII = {"linux": ["{data}/lichii"] + EDEN["linux"], "windows": ["{appdata}/lichii"] + EDEN["windows"]}
 EMULATORS = [
-    Program("lichii", "Lichii", EDEN, ["lichii"], []),
+    Program("lichii", "Lichii", LICHII, ["lichii"], []),
     Program("frizti", "Frizti (Fritchii)", EDEN, ["lichii", "fritchii"], ["fritchii"]),
     Program("orchid", "Orchid", EDEN, ["orchid"], []),
     Program("pokedinner", "PokeDinner", EDEN, ["eglantine"], []),
@@ -256,19 +258,18 @@ def list_all(args):
         show("Hookshot", *locate(HOOKSHOT, args.hookshot, "--hookshot"))
     except Fail as e:
         print("Hookshot: %s" % e)
+    # (by the folder import and export use, the first of a program's with saves, as locate: the programs whose saves are there)
     groups = collections.OrderedDict()
     for program in EMULATORS:
-        groups.setdefault(tuple(folders(program)), []).append(program.display)
-    for tried, displays in groups.items():
+        tried = folders(program)
+        used = next((d for d in tried if os.path.isdir(d) and find_saves(d)), None)
+        groups.setdefault(used or tuple(tried), []).append(program.display)
+    for where, displays in groups.items():
         title = " / ".join(displays) + (" (one shared folder)" if len(displays) > 1 else "")
-        shown = False
-        for d in tried:
-            found = find_saves(d) if os.path.isdir(d) else {}
-            if found:
-                show(title, d, found)
-                shown = True
-        if not shown:
-            print("%s: nothing in %s" % (title, ", ".join(tried) or "(no default folder)"))
+        if isinstance(where, str):
+            show(title, where, find_saves(where))
+        else:
+            print("%s: nothing in %s" % (title, ", ".join(where) or "(no default folder)"))
     if args.folder:
         show("Folder", *locate(FOLDER, args.folder, "--from"))
 

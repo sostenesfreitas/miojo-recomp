@@ -9,6 +9,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ["--cxx", "g++"]
 
 ROOT = next(p for p in Path(__file__).resolve().parents if (p / 'gpu/vk/vk_draw.cpp').is_file())
@@ -129,6 +132,8 @@ void vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice, VkFormat format, VkFo
 void end_pass(VkCommandBuffer) {}
 // (the temporal upscaler, off here: upscale_stub offers it the frame first, vk_draw.cpp temporal_rejected_network)
 bool temporal_wanted() { return false; }
+bool temporal_off() { return false; }
+namespace fsr3_inputs { bool wanted() { return false; } }   // (FSR 3.1, off here too)
 static bool temporal_rejected_network(VkCommandBuffer, uint64_t, Texture *, const nvn_tex *, Texture *, const nvn_tex *) {
     return false;
 }
@@ -270,11 +275,11 @@ def main():
         exe = tmp / ('check.exe' if os.name == 'nt' else 'check')
         source.write_text(PREFIX + body + SUFFIX, encoding='utf-8')
         if Path(args.cxx).name.lower() in ('cl', 'cl.exe', 'clang-cl', 'clang-cl.exe'):
-            command = [args.cxx, '/nologo', '/std:c++20', '/EHsc', '/UNDEBUG', str(source),
+            command = [args.cxx, '/nologo', '/std:c++20', "/FI" + ENV_ON_H, '/EHsc', '/UNDEBUG', str(source),
                        '/Fo' + str(tmp / 'check.obj'), '/Fe' + str(exe)]
             cwd = tmp
         else:
-            command = [args.cxx, '-std=c++20', '-UNDEBUG', str(source), '-o', str(exe)]
+            command = [args.cxx, '-std=c++20', '-include', ENV_ON_H, '-UNDEBUG', str(source), '-o', str(exe)]
             cwd = None
         subprocess.run(command, cwd=cwd, env=env, check=True)
         cases = ('captured', 'r11', 'movie', 'view', 'skip', 'mip', 'swizzle', 'fd', 'fd-r11',

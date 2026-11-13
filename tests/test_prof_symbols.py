@@ -99,6 +99,22 @@ def linux_elf(tmp, cc):
 
 
 def main():
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    sys.path.insert(0, str(SCRIPTS))
+    import prof
+    symbols = [
+        "mkwvk::(anonymous namespace)::build_descriptors(int)",
+        "mkwvk::(anonymous namespace)::texture_view_of(unsigned int)",
+        "mkwvk::Recorder::operator()(int)",
+        "mkwvk::Recorder::operator()(float)",
+    ]
+    output = "\n".join("%016x t %s" % (0x1000 + i * 16, name)
+                       for i, name in enumerate(symbols))
+    with patch.object(prof.subprocess, "run", return_value=SimpleNamespace(stdout=output)):
+        addresses, names = prof.load_elf("synthetic.so")
+    check(names == symbols and addresses == [0x1000, 0x1010, 0x1020, 0x1030],
+          "anonymous namespace functions and overloaded operators keep distinct names")
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--cc", default="cc")
     a = p.parse_args()

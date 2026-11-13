@@ -130,7 +130,8 @@ def check_probe(cc_arg):
         source.write_text(template.replace("/* ACTUAL_NARROW_PATHS_OK */", narrow_paths_ok_source()), encoding="utf-8")
         res = win_manifest.write(str(build / "hookshot_manifest.res"))
         target = [] if os.name == "nt" or "mingw32" in os.path.basename(cc) else ["--target=x86_64-w64-mingw32"]
-        flags = target + ["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-D_CRT_SECURE_NO_WARNINGS", "-fuse-ld=lld"]
+        flags = target + ["-std=c11", "-O0", "-Wall", "-Wextra", "-Werror", "-D_CRT_SECURE_NO_WARNINGS", "-fuse-ld=lld",
+                          "-include", str(ROOT / "gpu" / "vk" / "compat" / "hookshot_env.h")]   # (env_on: narrow_paths_ok's)
         libs = ["-luser32"]
         with_manifest, without = build / "probe.exe", build / "probe_ansi.exe"
         subprocess.run([cc] + flags + [str(source), res, "-o", str(with_manifest)] + libs, check=True)

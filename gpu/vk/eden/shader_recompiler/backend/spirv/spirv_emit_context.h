@@ -19,8 +19,6 @@
 
 namespace Shader::Backend::SPIRV {
 
-static std::bitset<8> clip_distance_written;
-
 using Sirit::Id;
 
 class VectorTypes {
@@ -336,6 +334,7 @@ public:
     Id decrement_cas_shared{};
     Id decrement_cas_ssbo{};
     Id f32_add_cas{};
+    bool native_f32_add{};   // (hookshot) the float adds are OpAtomicFAddEXT, not f32_add_cas (DefineStorageBuffers)
     Id f16x2_add_cas{};
     Id f16x2_min_cas{};
     Id f16x2_max_cas{};
@@ -369,6 +368,8 @@ public:
     bool need_input_position_indirect{};
     Id input_position{};
     std::array<InputGenericInfo, 32> input_generics{};
+    /// Screen-linear fragment inputs read through perspective interpolation, times FragCoord.w.
+    std::array<bool, 32> noperspective_as_smooth_inputs{};
 
     Id output_point_size{};
     Id output_position{};

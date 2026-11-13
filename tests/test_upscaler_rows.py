@@ -28,11 +28,13 @@ def main():
     parser.add_argument("--cxx", default="g++")
     args = parser.parse_args()
     menu = (ROOT / "gpu" / "vk" / "vk_menu.cpp").read_text(encoding="utf-8")
-    # the picture's way, top to bottom; Reflex with the frame rows
-    order = ['"Frame generation", &opts.framegen', '"Frame pacing", &opts.pace', '"NVIDIA Reflex", &opts.reflex',
-             '"Output resolution", &opts.output_res', '"Upscaler", &opts.dlss', '"DLSS model", &opts.dlss_model',
-             '"Render resolution", &opts.resolution',
-             '"Window scaling filter", &opts.upscale', '"Sharpness", &opts.sharpness']
+    # the picture's way, top to bottom: the output, what fills it, the 3D's size and its sharpening (Resolution and
+    # upscaling); then the frame rows, Reflex with them (Frame generation and latency); then the window (Screen)
+    order = ['"Output resolution", &opts.output_res', '"Upscaler", &opts.dlss', '"DLSS model", &opts.dlss_model',
+             '"Render resolution", &opts.resolution', '"Sharpness", &opts.sharpness',
+             '"Frame generation", &opts.framegen', '"Frame generation by", &opts.framegen_by',
+             '"Frame pacing", &opts.pace', '"NVIDIA Reflex", &opts.reflex',
+             '"Window scaling filter", &opts.upscale']
     at = [menu.find(row) for row in order]
     if -1 in at:
         raise SystemExit("vk_menu.cpp: a scaling row is missing: " + order[at.index(-1)])
@@ -61,7 +63,7 @@ def main():
     # where the driver lacks them (the Upscaler and the DLSS model above), and HDR's levels while HDR is off
     shown = function(menu, "bool row_shown(int i) {")
     for call in ("v != &opts.reflex || reflex_available()", "v != &opts.antilag || antilag_available()",
-                 "(v != &opts.hdr_white && v != &opts.hdr_peak) || opts.hdr != 0"):
+                 "(v != &opts.hdr_white && v != &opts.hdr_peak && v != &opts.hdr_contrast) || opts.hdr != 0"):
         if call not in shown:
             raise SystemExit("row_shown: %s is not there (a row for what is not available here, or HDR's levels with HDR "
                              "off, would show)" % call)
@@ -124,8 +126,25 @@ def main():
     if "fsr3_wanted()" not in mode:
         raise SystemExit("temporal_mode runs DLSS or FSR 4 while FSR 3.1 upscales (two upscalers, two jitters)")
     fsr3 = (ROOT / "gpu" / "vk" / "vk_fsr3.cpp").read_text(encoding="utf-8")
-    if "!temporal_env_chosen()" not in function(fsr3, "bool fsr3_wanted() {"):
-        raise SystemExit("fsr3_wanted: a saved FSR 3.1 drops RX_VK_DLSS / RX_VK_FSR4, which go over the row")
+    if "!temporal_env_chosen()" not in function(fsr3, "bool fsr3_chosen() {"):
+        raise SystemExit("fsr3_chosen: a saved FSR 3.1 drops RX_VK_DLSS / RX_VK_FSR4, which go over the row")
+    # FSR 3.1 is an engine of the chain (the skinned draws' motion), unless RX_VK_FSR3_CHAIN=0 keeps its own inputs: the chain
+    # takes it before its fallback to the game's own, fsr3_wanted (its own inputs) is then off, and the chain has its slot
+    if "return !fsr3_on_chain() && fsr3_chosen();" not in function(fsr3, "bool fsr3_wanted() {"):
+        raise SystemExit("fsr3_wanted: FSR 3.1 would upscale with its own inputs while it draws on the chain (two upscales)")
+    on_chain = "if (fsr3_on_chain() && fsr3_chosen()) return ur::FSR3;"
+    if on_chain not in mode or mode.index(on_chain) > mode.index("if (!ur::is_dlss(v) && !ur::is_fsr4(v)) return ur::GAME;"):
+        raise SystemExit("temporal_mode does not run the row's FSR 3.1 on the chain before falling back to the game's own")
+    if "fsr3_engine()" not in function(temporal, "Engine& engine_of("):
+        raise SystemExit("engine_of has no slot for FSR 3.1's engine")
+    # The chain's depth is reversed for FSR 3.1 (the prep's bit 3, from fsr_flip): the frame says so, for whatever else reads it
+    upscale = function(temporal, "bool temporal_upscale(")
+    if "(fsr_flip ? 8 : 0)" not in upscale or "f.depth_reversed = fsr_flip;" not in upscale:
+        raise SystemExit("temporal_upscale reverses the depth without saying so in the frame (TemporalFrame::depth_reversed)")
+    # DLSS Frame Generation (NGX) copies the chain's depth: it must hand NGX the depth convention the frame says
+    dlss = (ROOT / "gpu" / "vk" / "vk_dlss.cpp").read_text(encoding="utf-8")
+    if "g.depth_reversed = f.depth_reversed;" not in dlss or "o.depthInverted = g.depth_reversed;" not in dlss:
+        raise SystemExit("DLSS Frame Generation tells NGX the chain's depth is not reversed while FSR 3.1 reverses it")
     chosen = function(temporal, "bool temporal_env_chosen() {")
     if "dlss_why() == DLSS_OK" not in chosen or "fsr4_why() == FSR_OK" not in chosen:
         raise SystemExit("temporal_env_chosen: a switch for an engine that cannot run here leaves the game's own, not the saved FSR 3.1")
@@ -135,6 +154,33 @@ def main():
         raise SystemExit("upscalers_available does not ask vk_fsr3.cpp whether FSR 3.1 runs here")
     if "fsr4_why() == FSR_OK" not in available:
         raise SystemExit("upscalers_available does not ask vk_fsr4.cpp whether FSR 4 runs here")
+    # Off: offered on every PC, shown as what runs, and the game's network left out for it where DLSS's and FSR 4's are
+    if "ur::bit(ur::OFF)" not in available:
+        raise SystemExit("upscalers_available does not offer Off (no upscaler) everywhere")
+    if "temporal_off()" not in function(menu, "int upscaler() {"):
+        raise SystemExit("upscaler(): the row does not show Off while it runs")
+    if "bool temporal_off() { return opts.dlss == ur::OFF && temporal_mode() == ur::GAME; }" not in temporal:
+        raise SystemExit("temporal_off: Off is not the row's Off with no engine over it (RX_VK_DLSS, RX_VK_FSR4, FSR 3.1)")
+    upscale = function(temporal, "bool temporal_upscale(")
+    if "temporal_off() && stretch(" not in upscale:
+        raise SystemExit("temporal_upscale: the Upscaler's Off does not stretch in place of the game's network")
+    stretch = function(temporal, "bool stretch(")
+    for need in ("s.linear, in_view", "s.out_layout", "c.valid", "in->width != c.width", "VK_FORMAT_B10G11R11_UFLOAT_PACK32"):
+        if need not in stretch:
+            raise SystemExit("stretch: %s is missing (Off's linear stretch of the scene only, into the picture)" % need)
+    if "!temporal_wanted() && !temporal_off()" not in function(temporal, "void temporal_note_scene_draw("):
+        raise SystemExit("temporal_note_scene_draw: no scene camera with Off, so the fixed shares' networks are never stretched")
+    draw = (ROOT / "gpu" / "vk" / "vk_draw.cpp").read_text(encoding="utf-8")
+    if "(!temporal_wanted() && !temporal_off())" not in function(draw, "bool temporal_stand_in("):
+        raise SystemExit("temporal_stand_in: the game's network runs with Off")
+    if "(temporal_wanted() || temporal_off() || fsr3_inputs::wanted()) && temporal_rejected_network(" not in function(draw, "bool upscale_stub("):
+        raise SystemExit("upscale_stub: a network that did not translate is not stretched with Off, or not offered to FSR 3.1")
+    rejected = function(draw[draw.rindex("static bool temporal_rejected_network("):], "static bool")   # (the definition)
+    fsr3 = rejected.find("fsr3_upscale(cmd, key, false, src, in_view, dst, out_view, 0)")
+    if fsr3 < 0 or fsr3 > rejected.find("temporal_upscale(cmd, key, false"):
+        raise SystemExit("temporal_rejected_network: FSR 3.1 is not offered a network that did not translate (before the "
+                         "temporal upscaler, as fsr3_stand_in comes before temporal_stand_in): its fixed Render resolution "
+                         "steps are a plain stretch on cards that leave those networks out (issue #1829)")
     if "upscalers_available()" not in function(menu, "void set_row(") or "upscalers_available()" not in function(menu, "bool row_fixed("):
         raise SystemExit("the Upscaler row does not step over (or fix on) what runs here")
     with tempfile.TemporaryDirectory(prefix="upscaler-rows-") as tmp:

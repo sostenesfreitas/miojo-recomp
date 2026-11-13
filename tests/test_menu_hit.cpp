@@ -55,21 +55,25 @@ int main() {
     CHECK("the slider's value", slider_value(m.drag(720, 7), 0, 100, 10) == 30 && slider_value(1000, 0, 100, 10) == 100);
     CHECK("the knob's place", slider_permille(60, 0, 100) == 600 && slider_permille(500, 10, 300) == 1000);
 
-    // ---- the Controls page: a name and two cells (gamepad, keyboard) a row, Reset to defaults at the end ----
+    // ---- the Controls page: a name, two gamepad cells and a keyboard cell per row, then Reset to defaults ----
     m.clear(0, 0, 1920, 1080);
     for (int i = 0; i < 3; i++) {
         const float y = 120 + i * 42;
         m.add(100, y, 400, y + 36, kCtlRow, i);
-        m.add(400, y, 700, y + 36, kCtlCell, i, 0, 0, 0, 0, 0);
-        m.add(700, y, 1000, y + 36, kCtlCell, i, 0, 0, 0, 0, 1);
+        m.add(400, y, 547, y + 36, kCtlCell, i, 0, 0, 0, 0, kCtlPrimary);
+        m.add(553, y, 697, y + 36, kCtlCell, i, 0, 0, 0, 0, kCtlAlternate);
+        m.add(703, y, 1000, y + 36, kCtlCell, i, 0, 0, 0, 0, kCtlKeyboard);
     }
     m.add(100, 120 + 3 * 42, 390, 120 + 3 * 42 + 36, kCtlRow, 3);
     h = m.at(200, 130 + 42);
     CHECK("a control's name", h.part == kCtlRow && h.index == 1);
     h = m.at(500, 130 + 84);
-    CHECK("its gamepad cell", h.part == kCtlCell && h.index == 2 && h.side == 0);
+    CHECK("its primary gamepad cell", h.part == kCtlCell && h.index == 2 && h.side == kCtlPrimary);
+    h = m.at(620, 130 + 84);
+    CHECK("its alternate gamepad cell", h.part == kCtlCell && h.index == 2 && h.side == kCtlAlternate);
+    CHECK("the gap between gamepad cells", m.at(550, 130 + 84).part == kNone);
     h = m.at(800, 130);
-    CHECK("its keyboard cell", h.part == kCtlCell && h.index == 0 && h.side == 1);
+    CHECK("its keyboard cell", h.part == kCtlCell && h.index == 0 && h.side == kCtlKeyboard);
     h = m.at(200, 130 + 126);
     CHECK("Reset to defaults", h.part == kCtlRow && h.index == 3);
     m.add(100, 60, 1000, 96, kCtlOption, 1, 600, 1000);   // (a row of the page's own, above the grid: Button prompts)

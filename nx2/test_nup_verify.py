@@ -159,6 +159,30 @@ with tempfile.TemporaryDirectory(prefix='nup-verify-') as temp:
     seal(blob)
     struct.pack_into('<I', blob, at + 80, 2)  # invalid child AND unhashed TOC
     cli_bad(blob, 'TOC SHA-256 mismatch', rehash=False)
+    # A prefix-valid but corrupt near match must not be selected as a stand-in.
+    destination, near, whole = ('Wall_A_Nrm.bntx.zs', 'Wall_B_Nrm.bntx.zs', 'Other_Nrm.bntx.zs')
+    blob, at = package([(0, destination, bytes(64), 0), (0, near, game, 0), (0, whole, game, 1)])
+    offset, size = struct.unpack_from('<QQ', blob, at + 80 + 16)
+    blob[offset + size - 1] ^= 1
+    seal(blob)
+    path.write_bytes(blob)
+    reader = nup.Nup(str(path))
+    output = Path(temp) / 'stand-in'
+    try:
+        for count in (3, 0):
+            with redirect_stdout(io.StringIO()):
+                assert nup.extract(reader, reader.titles[0], str(output), only='romfs', quiet=True)[0] == count
+            assert nup.read_heads(output / nup.HEADS_NAME) == [destination, near]
+        romfs = output / 'romfs'
+        bad = [str(romfs / member) for member in (destination, near)]
+        assert dict(nup.stand_in_damaged(romfs, damaged=bad)) == {
+            member: str(romfs / whole) for member in bad
+        }
+        assert all(Path(member).read_bytes() == game for member in bad)
+        assert (romfs / whole).read_bytes() == game and path.read_bytes() == blob
+    finally:
+        reader.f.close()
+
     assert 'COM\u00b9' in nup.WINDOWS_DEVICES and 'LPT\u00b3' in nup.WINDOWS_DEVICES
     try:
         nup.extraction_path(temp, 'romfs', 'COM\u00b9/file')

@@ -3,13 +3,20 @@
 # Built in Ubuntu 22.04, the oldest system it is for (glibc 2.35). A workflow artifact on every run; for a release, also
 # an asset of its release (scripts/release_upload.sh, shared with the Windows builder workflow). A release is a tag
 # pushed by hand, or the tag the Release workflow passes when it calls this one (inputs.tag). On any other push to main,
-# the same files replace those of the nightly prerelease, the latest development build.
+# the same files replace those of the nightly prerelease, the latest development build, when its commit comes after the
+# one the nightly holds.
 name: Linux AppImage
 on:
   push:
     branches: [main]
     tags: ['*']
+  # (not for a pull request that changes only documentation or the release manifest: nothing of them is compiled or
+  # packaged but readme.md, which is only copied in. A push to main builds every time)
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.release-please-manifest.json'
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -24,14 +31,18 @@ env:
   RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name || '') }}
 concurrency:
   group: linux-appimage-${{ inputs.tag || github.ref }}
-  # (a pull request's older run is cancelled; a push's or a tag's never is)
+  # (a pull request's older run is cancelled; a push's or a tag's never is. One run of main at a time, and one waiting,
+  # replaced by a newer push's: scripts/release_upload.sh counts on it, so this platform's nightly files never go back)
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   appimage:
     # (builder-parts holds the installer's parts: no AppImage there, and it must never be made "latest")
-    # (nightly is moved by the release job of a push to main, never built as a tag)
-    if: github.ref_name != 'builder-parts' && github.ref_name != 'linux-parts' && github.ref_name != 'nightly'
+    # (nightly is moved forward by the release job of a push to main, here or in the Windows builder workflow, and rc by
+    # the Release workflow: never built as a tag)
+    if: >-
+      github.ref_name != 'builder-parts' && github.ref_name != 'linux-parts' && github.ref_name != 'nightly'
+      && github.ref_name != 'rc'
     runs-on: ubuntu-latest
     container: ubuntu:22.04
     # (about 4 minutes with the dependencies cached; building them all, as a release does, takes longer)
@@ -42,30 +53,42 @@ jobs:
       id-token: write
       attestations: write
     steps:
+      # (dpkg without an fsync per file: this container is thrown away after the job, so an install cut short loses nothing)
+      - name: Package installs without fsync
+        run: echo force-unsafe-io > /etc/dpkg/dpkg.cfg.d/force-unsafe-io
       - name: System packages
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # Retry the entire bootstrap: even the first index refresh or the toolchain setup can fail while a mirror syncs.
-          # Every attempt refreshes the signed indexes; no stale-index or authentication checks are bypassed.
-          for try in 1 2 3; do
+          retry_packages() {
+            for try in 1 2 3; do
+              if "$@"; then return 0; else package_status=$?; fi
+              if [ "$try" = 3 ]; then return "$package_status"; fi
+              sleep 20
+            done
+          }
+          base_packages() {
+            apt-get update &&
+              apt-get install -y --no-install-recommends software-properties-common gpg-agent
+          }
+          toolchain_packages() {
+            # Enrollment can leave a source without its key after a network failure. Repair it before refreshing
+            # indexes that depend on that key; retrying the base refresh first would stop at NO_PUBKEY (#2266).
+            # --no-update only separates enrollment from the explicit, signed index refresh immediately afterward.
             # (libstdc++ 13, from the toolchain PPA: C++20 <format>; linked in statically)
-            if apt-get update &&
-              apt-get install -y --no-install-recommends software-properties-common gpg-agent &&
-              add-apt-repository -y ppa:ubuntu-toolchain-r/test &&
+            # Launchpad metadata connections can hang past the entire job's hour. Give each retry a real chance;
+            # terminate enrollment after three minutes, then kill it if termination itself stalls.
+            timeout --kill-after=5s 180s add-apt-repository -y --no-update ppa:ubuntu-toolchain-r/test &&
+              apt-get update &&
               apt-get install -y --no-install-recommends g++-13 libstdc++-13-dev &&
               apt-get install -y --no-install-recommends git ca-certificates curl xz-utils zstd file unzip python3 \
               build-essential gcc-12 g++-12 libstdc++-12-dev nasm meson ninja-build cmake pkg-config \
               libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxfixes-dev libxinerama-dev \
               libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgles-dev libdrm-dev libgbm-dev \
-              libpulse-dev libasound2-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libxft-dev libfontconfig1-dev zlib1g-dev; then
-              break
-            else
-              package_status=$?
-            fi
-            if [ "$try" = 3 ]; then exit "$package_status"; fi
-            sleep 20
-          done
+              libpulse-dev libasound2-dev libpipewire-0.3-dev libudev-dev libdbus-1-dev libxft-dev libfontconfig1-dev zlib1g-dev
+          }
+          retry_packages base_packages
+          retry_packages toolchain_packages
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -78,12 +101,15 @@ jobs:
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       # (a release builds what the AppImage carries from its checked downloads: no built deps from a cache, which other
-      # runs write. Other runs take the built deps)
+      # runs write. Other runs take the built deps, without the downloads they were built from: deps.sh fetches only a
+      # part it has not built (its .<part> marks), and the downloads were most of the cache, about 1.4 of 2.3 GB)
       - if: env.RELEASE_TAG == ''
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: build-linux/deps
-          key: linux-deps-${{ hashFiles('scripts/linux/deps.sh', 'requirements.txt', 'nx2/prompt_requirements.txt') }}
+          path: |
+            build-linux/deps
+            !build-linux/deps/downloads
+          key: linux-deps-built-${{ hashFiles('scripts/linux/deps.sh', 'requirements.txt', 'nx2/prompt_requirements.txt') }}
       - if: env.RELEASE_TAG != ''
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -94,6 +120,30 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/linux/deps.sh
+
+      # The Vulkan back end's compiled objects (nx2/build.py's object cache, build-linux/vk-work/objcache: each object
+      # under the SHA-1 of its source, its flags and the headers it can see), for pull requests: a pull request compiles
+      # only the files its change reaches, not all 209 (about 80-140 s here). Written after every build but a release's
+      # (a pull request's own, for its next push; main's, for every pull request). Read only by pull requests: a push to
+      # main compiles every object itself, as a release does, so the nightly and the releases never take one from a cache. The
+      # key also names the compiler (deps.sh pins LLVM) and this system's C and C++ library headers, which the objects'
+      # own keys leave out.
+      - name: Object cache key
+        if: env.RELEASE_TAG == ''
+        id: objkey
+        env:
+          COMPILER: ${{ hashFiles('scripts/linux/deps.sh') }}
+          SOURCES: ${{ hashFiles('gpu/**', 'third_party/imgui/**', 'third_party/zstd/**', 'host/posix/**', 'nx2/build.py') }}
+        run: |
+          system=$(dpkg-query -W -f '${Package}=${Version}\n' libc6-dev libstdc++-13-dev libstdc++-12-dev | sha256sum | cut -c1-16)
+          echo "prefix=linux-vk-objects-$COMPILER-$system-" >> "$GITHUB_OUTPUT"
+          echo "key=linux-vk-objects-$COMPILER-$system-$SOURCES" >> "$GITHUB_OUTPUT"
+      - if: env.RELEASE_TAG == '' && github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build-linux/vk-work/objcache
+          key: ${{ steps.objkey.outputs.key }}
+          restore-keys: ${{ steps.objkey.outputs.prefix }}
 
       # work/: the lists and the play profile made on the development PC (addresses and counts, no game code). When the
       # repository does not carry them, the ones in the latest release's app part (named by its hookshot-setup.txt) are
@@ -112,16 +162,43 @@ jobs:
             { echo "the profile did not download: built without it"; exit 0; }
           ls -la work work/image
 
-      # (with its update information and .zsync, for AppImageUpdate and Gear Lever: this repository's latest release, or
-      # for the nightly the next nightly)
+      # (with its update information and .zsync, for AppImageUpdate and Gear Lever: this repository's latest release, for
+      # the nightly the next nightly, and for a release candidate the rc release, which holds the newest release candidate
+      # or release (scripts/release_rc.sh): it moves on to the next release candidate and its version's release, never
+      # back to an older release, as the builder's Release candidate Update track does, builder/linux/hookshot_builder.py)
       - name: AppImage
         env:
           # (a release is named by its tag: a promoted version's commit also has its release candidate's tag, which git
           # describe could name instead)
           HOOKSHOT_VERSION: ${{ env.RELEASE_TAG }}
           HOOKSHOT_UPDATE_RELEASE: >-
-            ${{ env.RELEASE_TAG == '' && github.event_name == 'push' && github.ref == 'refs/heads/main' && 'nightly' || 'latest' }}
+            ${{ env.RELEASE_TAG == '' && github.event_name == 'push' && github.ref == 'refs/heads/main' && 'nightly'
+            || contains(env.RELEASE_TAG, '-') && 'rc' || 'latest' }}
         run: scripts/linux/appimage.sh
+
+      # (the object cache down to the objects this build used, as nx2/make_game.py prune_object_cache does: each object in
+      # sa/build/obj names its key in <obj>.sha1. Nothing goes when no stamp is found)
+      - name: Object cache for pull requests
+        if: env.RELEASE_TAG == ''
+        shell: bash
+        run: |
+          W=build-linux/vk-work
+          shopt -s nullglob
+          stamps=("$W"/sa/build/obj/*.sha1)
+          [ "${#stamps[@]}" -gt 0 ] || { echo "no object stamps: the cache is kept as it is"; exit 0; }
+          # (one key a line: a stamp holds its key with no line end, so cat would run them together)
+          awk '{ sub(/\r$/, ""); print }' "${stamps[@]}" | sort -u > "$RUNNER_TEMP/used.txt"
+          for f in "$W"/objcache/*.o; do
+            k=$(basename "$f" .o)
+            grep -qxF "$k" "$RUNNER_TEMP/used.txt" || rm -f "$f"
+          done
+          left=("$W"/objcache/*.o)
+          echo "objcache: ${#left[@]} objects, $(du -sh "$W/objcache" | cut -f1)"
+      - if: env.RELEASE_TAG == ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build-linux/vk-work/objcache
+          key: ${{ steps.objkey.outputs.key }}
 
       # (AMD FSR 4's Linux side, a build option the AppImage leaves off (gpu/vk/vk_fsr4.cpp: dlopen, the older backend
       # description, the unit exposure; the descriptor buffers in vk_main.cpp): built once more in a copy of the back end's
@@ -175,7 +252,8 @@ jobs:
     name: Release asset
     if: >-
       inputs.tag != '' || (startsWith(github.ref, 'refs/tags/') && github.ref_name != 'builder-parts'
-      && github.ref_name != 'linux-parts' && github.ref_name != 'nightly') || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+      && github.ref_name != 'linux-parts' && github.ref_name != 'nightly' && github.ref_name != 'rc')
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: appimage
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -188,6 +266,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RELEASE_SUMS_OUT: dist/SHA256SUMS
+      # (called by the Release workflow: its draft is there already, and no release is made here)
+      RELEASE_FROM_WORKFLOW: ${{ inputs.tag && 'true' || 'false' }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -1,0 +1,35 @@
+#version 450
+// (hookshot) The temporal upscalers' reactive mask (vk_reactive.cpp): how much of each pixel of the scene was blended over
+// it after its opaque draws. `opaque` is the scene's colour as it was copied before the transparent draws, `scene` the same
+// target now: where they differ, something without depth or motion of its own was drawn (reactive_policy.h). Both are
+// compared as the eye sees them (Reinhard, so a bright glow over a bright sky counts as little as it shows), and the
+// largest channel's difference is the mask, as in AMD's own pass for it (ffx_fsr3upscaler_reactive_mask.h).
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D opaque;
+layout(binding = 1) uniform sampler2D scene;
+layout(binding = 2, r8) uniform writeonly image2D mask;
+layout(binding = 3, rgba16f) uniform image2D color;   // (the upscaler's colour input: written only to show the mask)
+layout(push_constant) uniform P {
+    ivec2 size;
+    float scale;   // (the difference times this)
+    float limit;   // (and no more than this: a mask of 1 leaves a pixel no history at all, which flickers)
+    int flags;     // (1: show the mask in the upscaler's colour input)
+} pc;
+
+vec3 seen(vec3 c) {
+    c = max(c, vec3(0.0));
+    return c / (1.0 + max(c.r, max(c.g, c.b)));
+}
+
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, pc.size))) return;
+    const vec3 d = abs(seen(texelFetch(scene, g, 0).rgb) - seen(texelFetch(opaque, g, 0).rgb));
+    float m = max(d.r, max(d.g, d.b)) * pc.scale;
+    m = isnan(m) ? 0.0 : clamp(m, 0.0, pc.limit);
+    imageStore(mask, g, vec4(m));
+    if ((pc.flags & 1) != 0) {
+        const vec4 c = imageLoad(color, g);
+        imageStore(color, g, vec4(mix(c.rgb, vec3(1.0, 0.0, 1.0), m), c.a));
+    }
+}

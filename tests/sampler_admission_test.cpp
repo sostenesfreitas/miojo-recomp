@@ -95,6 +95,7 @@ const char* getenv(const char* name) {
     if (!std::strcmp(name, "RX_VK_FORCE_LINEAR") && policy == "force-linear") return "1";
     return nullptr;
 }
+bool env_on(const char* name) { const char* v = getenv(name); return v && !env_value_off(v); }   // (the switches through the stand-in)
 void logf(const char*, ...) {}
 VkResult vkCreateSampler(VkDevice, const VkSamplerCreateInfo* ci, const VkAllocationCallbacks*, VkSampler* out) {
     creates++;

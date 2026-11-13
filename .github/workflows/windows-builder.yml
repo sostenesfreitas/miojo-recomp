@@ -1,19 +1,27 @@
 # What a Windows player downloads, made without game data: HookshotBuilder-Setup.exe (builder/setup/setup.c, with
 # llvm-mingw) and the Hookshot Builder package (dotnet publish, versioned from the tag as docs/versioning.md says), split
 # into the parts the setup downloads by scripts/make_setup_parts.py. The Python, emsdk, CPM and wgpu-native parts, and the
-# third_party part's prebuilt files, are the latest release's (scripts/release_parts.py). The Windows Vulkan back end is
+# third_party part's prebuilt files, are the latest release's (scripts/release_parts.py); the CPM part gets dav1d added
+# (the dav1d job) when that release's lacks it. The Windows Vulkan back end is
 # compiled too, with the same llvm-mingw: players build it on their PC, this only checks that it still builds.
 # A workflow artifact on every run; for a release, the new parts go to the builder-parts release and the setup
 # (HookshotBuilder.exe) and its list (hookshot-setup.txt) to the release, beside the Linux AppImage. A release is a tag
 # pushed by hand, or the tag the Release workflow passes when it calls this one (inputs.tag). On any other push to main,
-# the same files replace those of the nightly prerelease, the latest development build.
+# the same files replace those of the nightly prerelease, the latest development build, when its commit comes after the
+# one the nightly holds.
 name: Windows builder
 
 on:
   push:
     branches: [main]
     tags: ['*']
+  # (not for a pull request that changes only documentation or the release manifest: nothing of them is compiled or
+  # packaged but readme.md, which is only copied in. A push to main builds every time)
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - '.release-please-manifest.json'
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -30,7 +38,8 @@ env:
   RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name || '') }}
 
 concurrency:
-  # (a fixed name: when called, github.workflow is the caller's)
+  # (a fixed name: when called, github.workflow is the caller's. One run of main at a time, and one waiting, replaced by a
+  # newer push's: scripts/release_upload.sh counts on it, so this platform's nightly files never go back)
   group: windows-builder-${{ inputs.tag || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -41,8 +50,10 @@ defaults:
 jobs:
   package:
     name: Hookshot Builder package and setup
-    # (builder-parts holds the installer's parts: no package there. nightly is moved by the release job of a push to main)
-    if: github.ref_name != 'builder-parts' && github.ref_name != 'nightly'
+    # (builder-parts holds the installer's parts: no package there. nightly is moved forward by the release job of a push
+    # to main, here or in the Linux AppImage workflow, and rc by the Release workflow)
+    if: github.ref_name != 'builder-parts' && github.ref_name != 'nightly' && github.ref_name != 'rc'
+    needs: [dav1d]
     runs-on: windows-2022
     timeout-minutes: 30
     # (id-token and attestations: a release's build provenance)
@@ -79,13 +90,15 @@ jobs:
       - name: llvm-mingw
         run: echo "LLVM_MINGW=$(python -I scripts/release_parts.py llvm-mingw "$RUNNER_TEMP/llvm")" >> "$GITHUB_ENV"
 
-      # (a release is its tag's version; any other commit is git describe's: v2.0.1-3-g1a2b3c4, version 2.0.1-3-g1a2b3c4)
+      # (a release is its tag's version; any other commit is git describe --long's: v2.0.1-3-g1a2b3c4, version 2.0.1-3-g1a2b3c4.
+      # --long: a nightly built on a tagged commit is v2.1.0-rc.1-0-g1a2b3c4, not the release candidate's name, so the builder,
+      # the setup and the game know it is the nightly: Updater.cs TrackOf)
       - name: Version
         run: |
           if [[ -n $RELEASE_TAG ]]; then
             tag=$RELEASE_TAG
           else
-            tag=$(git describe --tags --match 'v[0-9]*' 2>/dev/null || echo "v0.0.0-$(git rev-parse --short HEAD)")
+            tag=$(git describe --tags --long --match 'v[0-9]*' 2>/dev/null || echo "v0.0.0-0-g$(git rev-parse --short HEAD)")
           fi
           echo "TAG=$tag" >> "$GITHUB_ENV"
           echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
@@ -113,12 +126,16 @@ jobs:
         run: python -I scripts/release_parts.py profile "$PREVIOUS" work
 
       # (--dependent-load-flag 0x800, LOAD_LIBRARY_SEARCH_SYSTEM32: the libraries it imports come from System32, not from
-      # the folder it was downloaded to)
+      # the folder it was downloaded to. A release candidate's setup installs that release candidate, and the nightly's the
+      # nightly, when started with no --tag: HOOKSHOT_SETUP_RELEASE)
       - name: HookshotBuilder-Setup.exe
         working-directory: builder/setup
         run: |
+          release=
+          if [[ -z $RELEASE_TAG ]]; then release=nightly; elif [[ $RELEASE_TAG == *-* ]]; then release=$RELEASE_TAG; fi
           "$LLVM_MINGW/bin/x86_64-w64-mingw32-windres" setup.rc -O coff -o "$RUNNER_TEMP/setup_rc.o"
-          "$LLVM_MINGW/bin/x86_64-w64-mingw32-clang" -O2 -mwindows -municode setup.c "$RUNNER_TEMP/setup_rc.o" \
+          "$LLVM_MINGW/bin/x86_64-w64-mingw32-clang" -O2 -mwindows -municode ${release:+"-DHOOKSHOT_SETUP_RELEASE=\"$release\""} \
+            setup.c "$RUNNER_TEMP/setup_rc.o" \
             -lwinhttp -lbcrypt -lcomctl32 -lshell32 -lole32 -Wl,--dependent-load-flag=0x800 \
             -o "$RUNNER_TEMP/HookshotBuilder-Setup.exe"
           ls -l "$RUNNER_TEMP/HookshotBuilder-Setup.exe"
@@ -129,11 +146,16 @@ jobs:
           -p:Version="$VERSION" -p:NuGetAudit=false --output "$RUNNER_TEMP/publish"
 
       # (it stops when assets/pipeline_states/, the sources of the pipeline state list every release ships, hold none or one does not read)
+      # (dav1d for the AV1 movies, from the dav1d job: added to the CPM part when the latest release's lacks it)
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dav1d-windows
+          path: ${{ runner.temp }}/dav1d-cpm
       - name: Package folder
         run: >-
           python -I scripts/release_parts.py package "$RUNNER_TEMP/package"
           --publish "$RUNNER_TEMP/publish" --setup "$RUNNER_TEMP/HookshotBuilder-Setup.exe"
-          ${PREVIOUS:+--list "$PREVIOUS" --python-packages nx2/prompt_requirements.txt}
+          ${PREVIOUS:+--list "$PREVIOUS" --python-packages nx2/prompt_requirements.txt --cpm-add "$RUNNER_TEMP/dav1d-cpm"}
 
       - name: Setup parts
         run: |
@@ -168,7 +190,7 @@ jobs:
 
   vulkan:
     name: Windows Vulkan back end (llvm-mingw)
-    if: github.ref_name != 'builder-parts' && github.ref_name != 'nightly'
+    if: github.ref_name != 'builder-parts' && github.ref_name != 'nightly' && github.ref_name != 'rc'
     runs-on: windows-2022
     timeout-minutes: 45
     steps:
@@ -214,6 +236,28 @@ jobs:
           key: ${{ steps.llvm.outputs.name }}
       - name: llvm-mingw
         run: echo "HOOKSHOT_MINGW=$(python -I scripts/release_parts.py llvm-mingw "$RUNNER_TEMP/llvm")" >> "$GITHUB_ENV"
+      # The back end's compiled objects (nx2/build.py's object cache, vk-work/objcache: each object under the SHA-1 of its
+      # source, its flags and the headers it can see), for pull requests, as the Linux AppImage workflow keeps its own: a
+      # pull request compiles only the files its change reaches, not all of them (about 160 s here). Written after every
+      # build but a release's (a pull request's own, for its next push; main's, for every pull request). Read only by pull
+      # requests: a push to main and a release compile every object themselves. The key also names llvm-mingw (its C and
+      # C++ library headers, which the objects' own keys leave out) and this file (the pinned header checkouts above).
+      - name: Object cache key
+        if: env.RELEASE_TAG == ''
+        id: objkey
+        env:
+          COMPILER: ${{ steps.llvm.outputs.name }}
+          PINS: ${{ hashFiles('.github/workflows/windows-builder.yml') }}
+          SOURCES: ${{ hashFiles('gpu/**', 'third_party/imgui/**', 'third_party/zstd/**', 'nx2/build.py') }}
+        run: |
+          echo "prefix=windows-vk-objects-$COMPILER-${PINS:0:16}-" >> "$GITHUB_OUTPUT"
+          echo "key=windows-vk-objects-$COMPILER-${PINS:0:16}-$SOURCES" >> "$GITHUB_OUTPUT"
+      - if: env.RELEASE_TAG == '' && github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/vk-work/objcache
+          key: ${{ steps.objkey.outputs.key }}
+          restore-keys: ${{ steps.objkey.outputs.prefix }}
       # (as scripts/linux/appimage.sh builds Linux's: the back end alone, no lift, no game)
       - name: hookshot_vk.dll
         env:
@@ -223,10 +267,75 @@ jobs:
           OOT_WORK="$RUNNER_TEMP/vk-work" RX_CPM="$GITHUB_WORKSPACE/_deps/cpm" \
             python -I nx2/build.py --standalone --jobs "$NUMBER_OF_PROCESSORS"
           ls -l "$RUNNER_TEMP/vk-work/sa/build/hookshot_vk.dll"
+      # (the object cache down to the objects this build used, as the Linux AppImage workflow prunes its own: each object
+      # in sa/build/obj names its key in <obj>.sha1. Nothing goes when no stamp is found)
+      - name: Object cache for pull requests
+        if: env.RELEASE_TAG == ''
+        run: |
+          W="$RUNNER_TEMP/vk-work"
+          shopt -s nullglob
+          stamps=("$W"/sa/build/obj/*.sha1)
+          [ "${#stamps[@]}" -gt 0 ] || { echo "no object stamps: the cache is kept as it is"; exit 0; }
+          # (one key a line: a stamp holds its key with no line end)
+          declare -A used
+          while read -r k; do used[$k]=1; done < <(awk '{ sub(/\r$/, ""); print }' "${stamps[@]}")
+          for f in "$W"/objcache/*.o; do
+            k=${f##*/}
+            [ -n "${used[${k%.o}]+x}" ] || rm -f "$f"
+          done
+          left=("$W"/objcache/*.o)
+          echo "objcache: ${#left[@]} objects, $(du -sh "$W/objcache" | cut -f1)"
+      - if: env.RELEASE_TAG == ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/vk-work/objcache
+          key: ${{ steps.objkey.outputs.key }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hookshot_vk-windows
           path: ${{ runner.temp }}/vk-work/sa/build/hookshot_vk.dll
+          if-no-files-found: error
+
+  # dav1d for the AV1 movies (issue 2316: the CPM cache's FFmpeg has none), made as scripts/windows/dav1d.sh makes it, with
+  # the same llvm-mingw release on Linux, and checked under Wine by the test of host/dav1d_av1.c. The artifact is a CPM
+  # folder (dav1d/<version>): the package job adds it to the CPM part when the latest release's lacks it, and the new
+  # part goes to builder-parts with the others. The build prints the library's SHA-256, the same on every run with the
+  # same pins, so the part made from it is too.
+  dav1d:
+    name: dav1d for Windows (llvm-mingw)
+    if: github.ref_name != 'builder-parts' && github.ref_name != 'nightly' && github.ref_name != 'rc'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      LLVM_MINGW: llvm-mingw-20261104-ucrt-ubuntu-22.04-x86_64
+      LLVM_MINGW_SHA256: 919380403de87dca3c581c2053230cd298af5e891286628ba0613b7fed370926
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - name: Meson, nasm and Wine
+        run: sudo apt-get update && sudo apt-get install -y meson ninja-build nasm wine64
+      - name: llvm-mingw (Linux)
+        run: |
+          curl -fL --retry 5 --retry-delay 10 --proto '=https' -o "$RUNNER_TEMP/llvm.tar.xz" \
+            "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/$LLVM_MINGW.tar.xz"
+          echo "$LLVM_MINGW_SHA256  $RUNNER_TEMP/llvm.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/llvm.tar.xz" -C "$RUNNER_TEMP"
+          echo "HOOKSHOT_MINGW=$RUNNER_TEMP/$LLVM_MINGW" >> "$GITHUB_ENV"
+      - name: dav1d
+        run: scripts/windows/dav1d.sh "$RUNNER_TEMP/cpm"
+      - name: host/dav1d_av1.c on it, under Wine
+        run: |
+          wine=$(command -v wine || command -v wine64 || echo /usr/lib/wine/wine64)
+          export WINEPREFIX="$RUNNER_TEMP/wine" WINEDEBUG=-all
+          python3 -I -B tests/test_dav1d_av1.py --cross "$HOOKSHOT_MINGW/bin/x86_64-w64-mingw32-clang" --run "$wine" \
+            --dav1d "$(ls -d "$RUNNER_TEMP"/cpm/dav1d/*)"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dav1d-windows
+          path: ${{ runner.temp }}/cpm
           if-no-files-found: error
 
   release:
@@ -236,7 +345,7 @@ jobs:
     # calls this on a push to main: that is a release, and github.event_name and github.ref are the caller's)
     if: >-
       ((inputs.tag != '' || (startsWith(github.ref, 'refs/tags/') && github.ref_name != 'builder-parts'
-      && github.ref_name != 'nightly')) && vars.CI_RELEASE_WINDOWS != 'false')
+      && github.ref_name != 'nightly' && github.ref_name != 'rc')) && vars.CI_RELEASE_WINDOWS != 'false')
       || (!inputs.tag && github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: [package, vulkan]
     runs-on: ubuntu-24.04
@@ -250,6 +359,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RELEASE_SUMS_OUT: dist/SHA256SUMS
+      # (called by the Release workflow: its draft is there already, and no release is made here)
+      RELEASE_FROM_WORKFLOW: ${{ inputs.tag && 'true' || 'false' }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

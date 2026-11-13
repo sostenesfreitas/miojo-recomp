@@ -13,6 +13,9 @@
 #include <string_view>
 #include <vector>
 #include "common/common_types.h"
+#ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
+#include "hookshot_env.h"
+#endif
 
 namespace Shader::Ampere {
 
@@ -173,6 +176,9 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         return result;
     };
     if (code.empty() || code.size() > 65536) return fail(0, "invalid native program size");
+    // (hookshot) A shared memory store (STS) not yet followed by a barrier: an LDS after it may read what another lane of the
+    // warp stored (see LDS below)
+    bool shared_store_pending = false;
     for (u32 index = 0; index < code.size(); ++index) {
         auto insn = code[index];
         result.source_instruction_offsets.push_back(static_cast<u32>(result.instructions.size()));
@@ -208,7 +214,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         std::array<bool, 256> marker_taken{};
         std::array<bool, 256> native_occupied{};
         // (RX_VK_MARKERS_V205=1: markers avoid only the native high registers, as in v2.0.5: an A/B for the AMD stripes report)
-        static const bool markers_v205 = std::getenv("RX_VK_MARKERS_V205") != nullptr;
+        static const bool markers_v205 = env_on("RX_VK_MARKERS_V205");
         {
             const u32 renameable = RenameableFields(opcode);
             constexpr u32 bits[4]{16, 24, 32, 64};
@@ -285,7 +291,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             }
         }
         if (!any_high) native_high = {};
-        static const bool no_extended = std::getenv("RX_VK_NO_EXTREGS") != nullptr;   // (as before them: rejected)
+        static const bool no_extended = env_on("RX_VK_NO_EXTREGS");   // (as before them: rejected)
         if (any_high && no_extended) return fail(index, "native program uses lowering scratch registers");
         std::array<bool, 256> lowering_used{};   // (the reserved numbers uniform_register gave this instruction)
         const size_t words_before = result.instructions.size();
@@ -1599,6 +1605,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         case 0xb1d: // BAR.SYNC 0 (bit 80: .DEFER_BLOCKING), full workgroup.
             if (insn.words[1] || (insn.words[2] & ~0x10000U) || native_predicate != 7)
                 return fail(index, "native workgroup barrier mode");
+            shared_store_pending = false;
             emit(0xf0a8000000000000ULL | predicate | (u64{1} << 43) |
                 (u64{1} << 44) | (u64{1} << 39) | (u64{7} << 39));
             break;
@@ -1621,6 +1628,18 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 address = 250;
             }
             const u32 data = opcode == 0x388 ? insn.Bits(32, 8) : static_cast<u32>(dest);
+            // (hookshot) A warp stores to shared memory (STS) and reads it back (LDS) with no barrier between: the Switch runs a
+            // warp's shared memory accesses in order, Vulkan orders another lane's store and this lane's load only through a
+            // barrier, and the driver's compiler may move them past each other (OoT's 4/3 gameplay network on NVIDIA's cooperative
+            // matrix path: 16x2 bright bars, Hookshot issue 2455). As for LDSM: a subgroup barrier before the first LDS after an
+            // STS, only where the LDS is not predicated (every lane of the warp reaches it). RX_VK_SHARED_NO_LDS_BARRIER=1: none, as before
+            static const bool lds_barrier = !env_on("RX_VK_SHARED_NO_LDS_BARRIER");
+            if (opcode == 0x388) {
+                shared_store_pending = true;
+            } else if (shared_store_pending && lds_barrier && native_predicate == 7) {
+                emit(0xef98000000000000ULL | predicate | (u64{1} << 20));   // (MEMBAR, bit 20: barrier_operations.cpp)
+                shared_store_pending = false;
+            }
             emit((opcode == 0x388 ? 0xef58000000000000ULL : 0xef48000000000000ULL) |
                 predicate | data | (u64{address} << 8) | (u64{insn.Bits(40, 24)} << 20) |
                 (u64{width} << 48));
@@ -1733,9 +1752,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 return fail(index, "native matrix load mode");
             u32 address = insn.Bits(24, 8);
             const u64 offset = insn.Bits(40, 24);
+            // (Fritchii f130f0c50) An address the results overwrite is copied first, to R254: the paths below use R246-R253,
+            // and R253 (the copy's old place) is where each matrix's row address is shuffled to, so matrices 1-3 of an .x2/.x4
+            // shuffled matrix 0's address and read the wrong rows (OoT has one such LDSM.x4, gpu/vk/tests/ldsm_address_test.cpp)
             if (address != 255 && address >= dest && address < dest + count) {
-                emit(0x5c10000000000000ULL | predicate | 253 | (u64{address} << 8) | (u64{255} << 20));
-                address = 253;
+                emit(0x5c10000000000000ULL | predicate | 254 | (u64{address} << 8) | (u64{255} << 20));
+                address = 254;
             }
             // (hookshot) A warp stores its tiles (STS) and reads them back with LDSM, often with no BAR between: the Switch runs a
             // warp's shared memory accesses in order, Vulkan orders another lane's store and this lane's load only through a
@@ -1743,7 +1765,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             // the rows before every lane has read them); LDSM is warp-collective, so every lane reaches both. nxnative's finding
             // (seedds/nxnative, MIT: "LDSM reads rows other lanes stored", white blotches through agl's upscaler).
             // RX_VK_MMA_NO_LDSM_BARRIER=1: none, as before
-            static const bool ldsm_barrier = std::getenv("RX_VK_MMA_NO_LDSM_BARRIER") == nullptr;
+            static const bool ldsm_barrier = !env_on("RX_VK_MMA_NO_LDSM_BARRIER");
             const auto subgroup_barrier = [&] {
                 if (ldsm_barrier) emit(0xef98000000000000ULL | predicate | (u64{1} << 20));   // (MEMBAR, bit 20: barrier_operations.cpp)
             };

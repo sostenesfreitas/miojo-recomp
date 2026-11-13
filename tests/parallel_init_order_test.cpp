@@ -266,6 +266,7 @@ void draw_begin_recording(int, VkCommandBuffer, uint64_t) {}
 void draw_flush_recording(int slot) { CHECK(slot >= 0 && slot < 8); published_slots.insert(slot); }
 void queue_flush_locked() {}
 void checkpoints_report() {}
+const void* reflex_submit_id(const void* next, uint64_t = ~0ull) { return next; }   // (vk_reflex.cpp: no tag without Reflex)
 [[noreturn]] void device_lost() { std::_Exit(3); }   // (vk_replay.cpp: the report, then the process ends)
 struct {
     VkDevice device = VK_NULL_HANDLE;

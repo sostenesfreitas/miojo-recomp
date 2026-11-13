@@ -14,7 +14,8 @@ sources always merge into the same bytes.
     python -I nx2/pipeline_states.py <list>...                            what they hold
     python -I nx2/pipeline_states.py add <name> <list>... --who ... --gpu ... --build ... --settings ... --route ...
         a contributed list, contrib/<name>.bin.xz: the lists' pipelines that no other contributed list holds (to an existing
-        <name>, its pipelines are kept and the new ones added), and its note contrib/<name>.md
+        <name>, its pipelines are kept and the new ones added), and its note contrib/<name>.md. The lists are someone else's
+        files: each must be exactly a list (read_sent), or nothing is written
     python -I nx2/pipeline_states.py tour <list>... --gpu ... --build ... --settings ... --route ...
         tour.bin.xz and tour.md replaced by the lists' pipelines (the pipeline tour runs it)
     python -I nx2/pipeline_states.py merge --out <file>                    the merged list (xz when <file> ends in .xz)
@@ -22,7 +23,8 @@ sources always merge into the same bytes.
                                                                           with its note; the merge the same twice (CI runs it)
     python -I nx2/pipeline_states.py --out <file> <list>...               lists merged, each pipeline once (any lists)
     python -I nx2/pipeline_states.py --v2 --out <file> <list>...          the same, version 1 lists converted to version 2
-    python -I nx2/pipeline_states.py --check <list>...                    each list whole and holding pipelines
+    python -I nx2/pipeline_states.py --check <list>...                    each list exactly a list, as add takes one (a list
+                                                                          someone sent: read_sent), and what it holds
 
 add, tour, merge and check take --dir <sources folder> (default: the repository's assets/pipeline_states).
 
@@ -32,6 +34,8 @@ has lzma but not compression.zstd.
 
 A list holds no game code: each record is a pipeline's stage code keys (hashes of the game's shaders, which the player's own
 hookshot_shaders.bin turns back into the shaders), the program variant's hash, and the formats and draw state baked into the pipeline.
+A record can also name a compute program the game dispatched, by its compute stage's code key alone (a compute pipeline has no
+formats or draw state): the first start keeps those programs' pipelines ready with the others.
 
 Version 2 (HKSTATE2, written by builds since it) holds what the game asked for, the same on every GPU and with any settings: the
 targets' NVN formats, whether the draw was a mesh draw, the draw's own topology, and the program variant's texture answers with its
@@ -46,7 +50,14 @@ stage numbering; the game still reads it.
             u32 colour NVN texture formats[8] (0: none), u32 colour NVN view formats[8] (the format each is drawn in),
             u64 blend[8], u32 vertex attributes[16], u32 attribute count, u32 strides[16], u32 divisors[16],
             u32 blend enables, channel mask, polygon mode, depth clamp, alpha to coverage,
-            u32 answers, u32 questions, u32 answers[24] (stage, descriptor, image, type), u8 questions[32], u32 pad[2]
+            u32 answers, u32 questions, u32 answers[24] (stage, descriptor, image, type), u8 questions[32], u32 kind, u32 pad
+            (variant 0 with no answers and no questions: the variant nothing bound makes, each texture as its instruction
+            declares it; lists converted from records without texture answers hold those)
+            kind 0: a graphics or mesh pipeline, as above (every list from before the kinds: the word was padding, 0).
+            kind 1 (COMPUTE): a compute program, code[0] its compute stage's code key and every other field 0. The game keeps
+            the pipelines of the shipped list's ready before the title (vk_draw.cpp computes_plan), with the ones its own play
+            dispatched (hookshot_computes.bin holds the same keys). A build from before the kinds leaves such a record out (0
+            samples is no pipeline's); version 1 has none
     <list>: "HKSTATE1", u32 record size (528), then the records:
             u64 code[4], u64 variant,
             u32 mesh, topology, targets, samples, depth format, has depth, u32 color formats[8] (Vulkan), u8 color types[8],
@@ -90,6 +101,21 @@ V1_NVN = {
 _V1 = struct.Struct("<4QQ6I8I8s8Q16II16I16I6III24I32s4x")
 _V2 = struct.Struct("<4QQ6I8I8I8Q16II16I16I5III24I32s2I")
 assert _V1.size == SIZE and _V2.size == SIZE2
+KIND_AT = SIZE2 - 8   # (a version 2 record's kind: vk_draw.cpp StateRec2::kind)
+COMPUTE = 1           # (StateRec2::kCompute)
+# The compute programs a shipped list may name before `check` stops, for someone to decide: the game keeps ready every one a
+# shipped list names, never fewer (vk_draw.cpp computes_plan), so the bound is here and loud, not there and silent.
+# Measured 2026-11-12 (RTX 3090, driver 620.70, Linux; a full prepare; the heap in use from the game's "vk: malloc:" line after
+# the same short session): the game has 4,127 compute programs (code keys) in 9,925 texture variants. None kept ready: 7,667 MB.
+# The 224 that play on that PC had dispatched (1,059 variants): 7,888 MB, so about 1 MB a listed program, and 4.8 s of
+# precompile. All of them: 10,112 MB and 8.1 s. Play there reached 132 to 225 programs over 15 game folders. 1024 is four times
+# that and about 1 GB: past it, measure again and raise this, or prune the list
+COMPUTE_MOST = 1024
+# One list someone sent: more than the game has programs (twice 4,127, rounded up) was not written by the game. The merge's bound
+# above is the one that counts what a release costs; this one only keeps a made-up file small
+SENT_COMPUTE_MOST = 8192
+# A list someone sent, packed or unpacked: 256 MB is some 480,000 pipelines, ten times every source here together
+SENT_MOST = 256 << 20
 
 
 SOURCES = ("assets", "pipeline_states")   # (under the repository's root: the sources of the list a release ships)
@@ -104,13 +130,27 @@ ARG = {"Who": "who", "GPU and driver": "gpu", "Build": "build", "Settings": "set
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def load(path):
-    """The list's bytes as the game reads them: unpacked when the file is xz"""
+def load(path, most=None):
+    """The list's bytes as the game reads them: unpacked when the file is xz. most: stops, before reading or unpacking more, on
+    a file or an unpacked list of more bytes than that (a list someone sent: read_sent)"""
+    if most is not None:
+        if not os.path.isfile(path):
+            raise SystemExit("%s: no such file" % path)
+        if os.path.getsize(path) > most:
+            raise SystemExit("%s: %d bytes, more than a pipeline state list holds (%d)" % (path, os.path.getsize(path), most))
     with open(path, "rb") as f:
-        data = f.read()
+        data = f.read() if most is None else f.read(most + 1)
     if data[:6] == XZ_MAGIC:
         try:
-            data = lzma.decompress(data)
+            if most is None:
+                data = lzma.decompress(data)
+            else:   # (unpacked no further than the limit: a small xz file can unpack to gigabytes)
+                un = lzma.LZMADecompressor(format=lzma.FORMAT_XZ)
+                data = un.decompress(data, max_length=most + 1)
+                if len(data) > most:
+                    raise SystemExit("%s: unpacks to more than a pipeline state list holds (%d bytes)" % (path, most))
+                if not un.eof or un.unused_data:
+                    raise SystemExit("%s: a damaged xz file (cut short, or with more after its end)" % path)
         except lzma.LZMAError as e:
             raise SystemExit("%s: a damaged xz file (%s)" % (path, e))
     return data
@@ -140,6 +180,56 @@ def read(path, strict=False):
     return parse(load(path), path, strict)
 
 
+def kind(r):
+    """A record's kind: 0 a graphics or mesh pipeline (every version 1 record), COMPUTE a compute program"""
+    return struct.unpack_from("<I", r, KIND_AT)[0] if len(r) == SIZE2 else 0
+
+
+def compute_record(key):
+    """The record of a compute program: its compute stage's code key and nothing else (vk_draw.cpp state_record_compute)"""
+    r = bytearray(SIZE2)
+    struct.pack_into("<Q", r, 0, key)
+    struct.pack_into("<I", r, KIND_AT, COMPUTE)
+    return bytes(r)
+
+
+def compute_keys(recs):
+    """The compute programs records name, each once, in the order first seen"""
+    return list(dict.fromkeys(struct.unpack_from("<Q", r, 0)[0] for r in recs if kind(r) == COMPUTE))
+
+
+def check_kinds(recs, path):
+    """Each record of a kind this build knows, a compute program's exactly as the game writes it (its key, the rest 0: one
+    program is then one record, which the merge keeps once). Stops with the reason"""
+    for i, r in enumerate(recs):
+        k = kind(r)
+        if k == COMPUTE:
+            key = struct.unpack_from("<Q", r, 0)[0]
+            if not key or r != compute_record(key):
+                raise SystemExit("%s: record %d names a compute program but holds more than its key (or no key): not one the "
+                                 "game wrote" % (path, i))
+        elif k:
+            raise SystemExit("%s: record %d is of kind %d, which this build does not know: make the list again with this "
+                             "build" % (path, i, k))
+
+
+def read_sent(path):
+    """The records of a list someone sent (the "Submit your pipelines" issue's zips, a pull request's list): a file nobody here
+    made, so it is taken only when it is exactly a list. No more than SENT_MOST bytes, packed or unpacked; this build's magic
+    and record size (either version); whole records and nothing after them; every record of a kind this build knows, a
+    compute program's exactly as the game writes it; no more compute programs than the game could have (SENT_COMPUTE_MOST). The bytes
+    are only ever compared and counted: nothing in them is run, followed or used as a name. Stops with the reason"""
+    recs = parse(load(path, SENT_MOST), path, strict=True)
+    if not recs:
+        raise SystemExit("%s holds no pipelines" % path)
+    check_kinds(recs, path)
+    computes = len(compute_keys(recs))
+    if computes > SENT_COMPUTE_MOST:
+        raise SystemExit("%s: names %d compute programs, more than the game has (at most %d): not a list the game wrote"
+                         % (path, computes, SENT_COMPUTE_MOST))
+    return recs
+
+
 def check_shipped(path):
     """A list a release ships: present, whole, of this build's format and not empty; its records. Stops with the reason"""
     if not os.path.isfile(path):
@@ -147,6 +237,7 @@ def check_shipped(path):
     recs = read(path, strict=True)
     if not recs:
         raise SystemExit("%s holds no pipelines" % path)
+    check_kinds(recs, path)
     return recs
 
 
@@ -260,8 +351,9 @@ def describe(recs):
     for r in recs:
         code = struct.unpack_from("<4Q", r, 0)
         mesh = struct.unpack_from("<I", r, 40)[0]
-        programs[(code, mesh)] += 1
-        kinds["mesh" if mesh else "graphics"] += 1
+        compute = kind(r) == COMPUTE
+        programs[(code, mesh, compute)] += 1
+        kinds["compute" if compute else "mesh" if mesh else "graphics"] += 1
     return "%d pipelines (%s) of %d programs%s" % (len(recs), ", ".join("%s %d" % kv for kv in sorted(kinds.items())), len(programs),
                                                   "".join(", version %d" % v for v in sorted(versions)))
 
@@ -379,6 +471,12 @@ def check_sources(d):
     recs = parse(a, d, strict=True)
     if a != b or set(recs) != seen or len(recs) != len(seen):
         raise SystemExit("%s: the merge is not reproducible, or misses pipelines of its sources" % d)
+    computes = len(compute_keys(recs))
+    if computes > COMPUTE_MOST:
+        raise SystemExit("%s: the merged list names %d compute programs, more than COMPUTE_MOST (%d). The game keeps every one "
+                         "of them ready at every start, about 1 MB each: measure what the list costs now and raise COMPUTE_MOST "
+                         "(nx2/pipeline_states.py has the last measurement), or prune the list. Nothing is dropped for you"
+                         % (d, computes, COMPUTE_MOST))
     print("merged: %s" % describe(recs))
     return recs
 
@@ -396,7 +494,7 @@ def contribute(d, name, lists, fields):
     for p in sources(d):
         if os.path.dirname(p) == c and p != path:
             others.update(read(p, strict=True))
-    given = [read(p) for p in lists]
+    given = [read_sent(p) for p in lists]   # (lists from other people's PCs)
     (old, given, others), _ = as_v2([old, unique(given), list(others)])   # (one version: version 2 when any is)
     others = set(others)
     recs = unique([old, [r for r in given if r not in others]])
@@ -467,7 +565,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     lists = []
     for path in a.lists:
-        recs = check_shipped(path) if a.check else read(path)
+        recs = read_sent(path) if a.check else read(path)
         print("%s: %s" % (path, describe(recs)))
         lists.append(recs)
     if a.out:

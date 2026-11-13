@@ -117,6 +117,15 @@ void EmitInst(EmitContext& ctx, IR::Inst* inst) {
         EmitInstOf(ctx, inst);
     } catch (const NotImplementedException& e) {
         throw NotImplementedException("{} ({})", e.what(), IR::NameOf(inst->GetOpcode()));
+    } catch (const std::runtime_error& e) {   // (super build: sirit's null Id, named by the IR op that asked for it)
+        std::string args;
+        for (size_t i = 0; i < inst->NumArgs(); ++i) {
+            const IR::Value a{inst->Arg(i)};
+            args += a.IsImmediate() ? " imm" : a.IsEmpty() ? " empty" : a.IsIdentity() ? " identity"
+                  : (" " + std::string(IR::NameOf(a.InstRecursive()->GetOpcode())) +
+                     (a.InstRecursive()->Definition<Id>().value == 0 ? "(undefined)" : ""));
+        }
+        throw LogicError("{} ({}; args:{})", e.what(), IR::NameOf(inst->GetOpcode()), args);
     }
 }
 

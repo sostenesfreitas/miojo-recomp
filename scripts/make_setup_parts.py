@@ -17,6 +17,7 @@ package made in CI (.github/workflows/windows-builder.yml) carries the Python, e
 made. Without the folder and without the part in that list it is an error.
 """
 import argparse
+import concurrent.futures
 import hashlib
 import os
 import sys
@@ -97,16 +98,24 @@ def main():
                 if len(w) == 7 and w[0] == "part" and w[6].rsplit("/", 1)[-1].startswith("HookshotBuilder-"):
                     reuse[w[6].rsplit("/", 1)[-1][len("HookshotBuilder-"):].rsplit("-", 1)[0]] = line
     lines = ["tag %s" % a.tag]
-    for name in ("app", "dotnet") + TOOLS_PARTS:
+    names = ("app", "dotnet") + TOOLS_PARTS
+    for name in names:
+        if not parts.get(name) and a.reuse and name in TOOLS_PARTS and name not in reuse:
+            sys.exit("no tools/%s in the package and no %s part in %s" % (name, name, a.reuse))
+    # (the parts zipped at once, one thread each, as scripts/linux/make_parts.py: zlib lets go of the GIL while it compresses, and
+    # each zip is the same bytes as when they are made one after the other. The list keeps this order)
+    todo = [n for n in names if parts.get(n)]
+    with concurrent.futures.ThreadPoolExecutor(max(1, min(len(todo), os.cpu_count() or 1))) as pool:
+        zipped = dict(zip(todo, pool.map(lambda n: write_zip(os.path.join(a.out, "HookshotBuilder-%s.zip" % n), root, parts[n]),
+                                         todo)))
+    for name in names:
         if not parts.get(name):
             if a.reuse and name in TOOLS_PARTS:
-                if name not in reuse:
-                    sys.exit("no tools/%s in the package and no %s part in %s" % (name, name, a.reuse))
                 lines.append(reuse[name])
                 print("%-12s (as in %s)" % (name, os.path.basename(a.reuse)), flush=True)
             continue
         zp = os.path.join(a.out, "HookshotBuilder-%s.zip" % name)
-        sha, size = write_zip(zp, root, parts[name])
+        sha, size = zipped[name]
         named = os.path.join(a.out, "HookshotBuilder-%s-%s.zip" % (name, sha[:12]))
         os.replace(zp, named)
         zp = named

@@ -5,6 +5,7 @@ host/nn_hid.c's binding table and its bound_down are compiled alone, against fak
 hookshot_options.ini: the defaults (WASD, the arrows, the mouse's left button Y and right button ZL), a mouse button
 only while the mouse is captured and only once the click that captured it was let go, key_move_up from the file, a
 pad_ line for a keys-only control ignored, a key taken from the control that had it, and Enter with Alt still no key.
+Gamepad checks cover old single bindings, a saved alternate, either slot pressing the same button, reassignment and clearing.
 python -I -B tests/test_bound_keys.py   (needs a C compiler)
 """
 import shutil
@@ -46,6 +47,12 @@ PRELUDE = r"""
 #include "vk_api.h"
 typedef long LONG;
 typedef unsigned long DWORD;
+typedef int SRWLOCK;
+#define SRWLOCK_INIT 0
+static void AcquireSRWLockExclusive(SRWLOCK *p) { (void)p; }
+static void ReleaseSRWLockExclusive(SRWLOCK *p) { (void)p; }
+static void AcquireSRWLockShared(SRWLOCK *p) { (void)p; }
+static void ReleaseSRWLockShared(SRWLOCK *p) { (void)p; }
 #define VK_LBUTTON 0x01
 #define VK_RBUTTON 0x02
 #define VK_MBUTTON 0x04
@@ -57,6 +64,11 @@ typedef unsigned long DWORD;
 #define VK_CONTROL 0x11
 #define VK_MENU 0x12
 #define VK_SPACE 0x20
+#define VK_NUMPAD0 0x60
+#define VK_NUMPAD2 0x62
+#define VK_NUMPAD4 0x64
+#define VK_NUMPAD6 0x66
+#define VK_NUMPAD8 0x68
 #define VK_LEFT 0x25
 #define VK_UP 0x26
 #define VK_RIGHT 0x27
@@ -113,8 +125,31 @@ int main(int argc, char **argv) {
     /* Enter with Alt is fullscreen, not Plus */
     release(), held[VK_RETURN] = held[VK_MENU] = 1;
     CHECK(!bound_down(HOS_SW_PLUS, 0));
+    const uint64_t face = 1ULL << HOS_PAD_EAST, paddle = 1ULL << HOS_PAD_RPADDLE1, a = 1ULL << HOS_SW_A;
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_A, 0) == HOS_PAD_EAST);
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_A, 1) == HOS_PAD_RPADDLE1);
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_B, 1) == -1);   /* old one-value entry */
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_X, 1) == -1);   /* invalid second value */
+    CHECK(bound_pad_buttons(face) == a && bound_pad_buttons(paddle) == a && bound_pad_buttons(face | paddle) == a);
+    CHECK(bound_pad_buttons(1ULL << HOS_PAD_RTRIGGER) == 1ULL << HOS_SW_ZR);
+    CHECK(bound_pad_buttons(1ULL << HOS_PAD_TOUCHPAD) == 0);
+    hos_bind(HOS_BIND_PAD, HOS_SW_B, 1, HOS_PAD_RPADDLE1);
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_A, 1) == -1);
+    CHECK(bound_pad_buttons(paddle) == 1ULL << HOS_SW_B && bound_pad_buttons(face) == a);
+    hos_bind(HOS_BIND_PAD, HOS_SW_B, 1, -1);
+    CHECK(bound_pad_buttons(paddle) == 0 && bound_pad_buttons(face) == a);
+    hos_bind(HOS_BIND_PAD, HOS_SW_A, 1, HOS_PAD_RPADDLE1);
+    /* another button's only input into an empty Input 2: refused, nothing left unbound */
+    const int y0 = hos_binding(HOS_BIND_PAD, HOS_SW_Y, 0);
+    hos_bind(HOS_BIND_PAD, HOS_SW_B, 1, y0);
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_B, 1) == -1 && hos_binding(HOS_BIND_PAD, HOS_SW_Y, 0) == y0);
+    /* from a button with an Input 2: taken, and that button's Input 2 moves up */
+    hos_bind(HOS_BIND_PAD, HOS_SW_B, 1, HOS_PAD_EAST);
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_B, 1) == HOS_PAD_EAST);
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_A, 0) == HOS_PAD_RPADDLE1 && hos_binding(HOS_BIND_PAD, HOS_SW_A, 1) == -1);
     hos_bind(HOS_BIND_KEY, -1, 0, 0);
     CHECK(hos_binding(HOS_BIND_KEY, HOS_KEY_MOVE_UP, 0) == 'W' && hos_binding(HOS_BIND_KEY, HOS_SW_A, 0) == 'E');
+    CHECK(hos_binding(HOS_BIND_PAD, HOS_SW_A, 1) == -1 && bound_pad_buttons(face) == a);
     if (!fails) printf("PASS\n");
     return fails != 0;
 }
@@ -128,7 +163,8 @@ class BoundKeysTests(unittest.TestCase):
             self.skipTest("no C compiler")
         hid = (ROOT / "host" / "nn_hid.c").read_text(encoding="utf-8")
         code = [block(hid, "static int kmap_down("),
-                between(hid, "static const char *const bind_names[HOS_KEY_N]", "void hos_bind("),
+                between(hid, "static const char *const bind_names[HOS_KEY_N]", "\nvoid hos_bind("),   # (its definition)
+                block(hid, "static uint64_t bound_pad_buttons("),
                 between(hid, "static int mouse_vk_slot(", "static int bound_down(")]
         code = "\n".join(code).replace("GetModuleFileNameA(NULL,", "GetModuleFileNameA(0,")
         read = block(hid, "static void read_input(")
@@ -137,7 +173,9 @@ class BoundKeysTests(unittest.TestCase):
         self.assertNotIn("key('W')", read, "read_input still reads WASD itself")
         with tempfile.TemporaryDirectory(prefix="hookshot-bound-keys-") as tmp:
             tmp = Path(tmp)
-            (tmp / "hookshot_options.ini").write_text("key_move_up=90,0\npad_move_up=0\n", encoding="utf-8")
+            (tmp / "hookshot_options.ini").write_text(
+                "key_move_up=90,0\npad_move_up=0\npad_a=1,17\npad_b=0\npad_x=3,99\n", encoding="utf-8"
+            )
             (tmp / "t.c").write_text(PRELUDE + code + MAIN, encoding="utf-8")
             binary = tmp / ("t.exe" if sys.platform == "win32" else "t")
             build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wno-unused-function", "-I", str(ROOT / "gpu" / "vk"),

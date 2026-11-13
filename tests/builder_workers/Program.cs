@@ -16,7 +16,7 @@ static class Program
     }
 
     static ProcessStartInfo Info(Tools tools, string[] args, int? workers = null, int? memoryGb = null) =>
-        (ProcessStartInfo)InfoMethod.Invoke(null, new object?[] { tools, args, workers, null, memoryGb })!;   // (ngxSdk: none)
+        (ProcessStartInfo)InfoMethod.Invoke(null, new object?[] { tools, args, workers, null, memoryGb, null })!;   // (ngxSdk, ffxSdk: none)
 
     static async Task<JsonElement> Delivery(ProcessStartInfo info)
     {
@@ -85,10 +85,15 @@ static class Program
         var emptyParent = args.Length == 2 && args[0] == "--empty-parent";
         var python = Path.GetFullPath(args[^1]);
         var original = Environment.GetEnvironmentVariable(Key);
+        var originalHome = Environment.GetEnvironmentVariable("HOOKSHOT_SETUP_BASE");
+        var originalPortable = Environment.GetEnvironmentVariable("HOOKSHOT_BUILDER_PORTABLE");
         var root = Path.Combine(Path.GetTempPath(), "hookshot-workers-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(root, "nx2"));
+        Environment.SetEnvironmentVariable("HOOKSHOT_SETUP_BASE", root);
+        Environment.SetEnvironmentVariable("HOOKSHOT_BUILDER_PORTABLE", null);
         try
         {
+            Require(BuilderHome.Base == root && !BuilderHome.Portable, "The worker fixture did not use its isolated standard home.");
             // This is authored test content, not the real pipeline, game files or a compiler invocation.
             File.WriteAllText(Path.Combine(root, "nx2", "make_game.py"), """
                 import json, os, sys
@@ -220,6 +225,8 @@ static class Program
         finally
         {
             Environment.SetEnvironmentVariable(Key, original);
+            Environment.SetEnvironmentVariable("HOOKSHOT_SETUP_BASE", originalHome);
+            Environment.SetEnvironmentVariable("HOOKSHOT_BUILDER_PORTABLE", originalPortable);
             Directory.Delete(root, recursive: true);
         }
     }

@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
+#include <wctype.h>
 
 typedef struct {
     char *args, *env;      /* (the files' bytes, each string ended by a NUL) */
@@ -67,4 +69,41 @@ static inline int hos_relaunch_command(const char *cmdline, const char *environ_
         return 0;
     }
     return 1;
+}
+
+/* Windows' restart: the environment block the game started with (GetEnvironmentStringsW before hookshot_env.txt was read,
+   strings ended by a NUL each and the block by one more), with name=value put in, in place of the same name in any case,
+   at its place in the block's order (by name, case left out, as Windows keeps it). A new block (malloc), or NULL */
+static inline int hos_relaunch_env_cmp(const wchar_t *a, const wchar_t *b) {   /* (two names, each ended by '=' or a NUL) */
+    for (;; a++, b++) {
+        const wint_t x = *a == L'=' ? 0 : towupper((wint_t)*a), y = *b == L'=' ? 0 : towupper((wint_t)*b);
+        if (x != y || !x) return x < y ? -1 : x > y;
+    }
+}
+static inline wchar_t *hos_relaunch_env_put(wchar_t *o, const wchar_t *name, const wchar_t *value) {
+    const size_t n = wcslen(name), v = wcslen(value);
+    memcpy(o, name, n * sizeof *o), o[n] = L'=', memcpy(o + n + 1, value, (v + 1) * sizeof *o);
+    return o + n + 1 + v + 1;
+}
+static inline wchar_t *hos_relaunch_env_block(const wchar_t *saved, const wchar_t *name, const wchar_t *value) {
+    size_t total = 0;
+    for (const wchar_t *e = saved; e && *e; e += wcslen(e) + 1) total += wcslen(e) + 1;
+    const size_t add = wcslen(name) + 1 + wcslen(value) + 1;
+    wchar_t *out = (wchar_t *)malloc((total + add + 1) * sizeof *out), *o = out;
+    if (!out) return NULL;
+    int put = 0;
+    for (const wchar_t *e = saved; e && *e; e += wcslen(e) + 1) {
+        const int c = *e == L'=' ? -1 : hos_relaunch_env_cmp(e, name);   /* (=C: and the like stay first) */
+        if (!put && c >= 0) {
+            o = hos_relaunch_env_put(o, name, value);
+            put = 1;
+        }
+        if (c == 0) continue;   /* (the old value of the name) */
+        const size_t n = wcslen(e) + 1;
+        memcpy(o, e, n * sizeof *o);
+        o += n;
+    }
+    if (!put) o = hos_relaunch_env_put(o, name, value);
+    *o = 0;
+    return out;
 }

@@ -8,7 +8,7 @@
 
 int main() {
     namespace mr = mkwvk::menu_restart;
-    const char* names[] = {"GPU device", "Output resolution", "Profile", "Ultrawide", "Robust buffers"};
+    const char* names[] = {"GPU device", "Output resolution", "Profile", "Aspect ratio", "Robust buffers"};
     mr::State st;
     // (the five rows as the game started: Auto, 2048x1152, Off, 16:9, Auto)
     int now[5] = {0, 0, 0, 0, 0};
@@ -65,8 +65,8 @@ int main() {
 
     // the names, in the rows' order
     CHECK("one name", mr::names(names, 5, 2u) == "Output resolution");
-    CHECK("two names", mr::names(names, 5, 2u | 8u) == "Output resolution, Ultrawide");
-    CHECK("the question's", mr::names(names, 5, 2u | 8u, ", ", " and ") == "Output resolution and Ultrawide");
+    CHECK("two names", mr::names(names, 5, 2u | 8u) == "Output resolution, Aspect ratio");
+    CHECK("the question's", mr::names(names, 5, 2u | 8u, ", ", " and ") == "Output resolution and Aspect ratio");
     CHECK("three, the question's", mr::names(names, 5, 1u | 2u | 16u, ", ", " and ") == "GPU device, Output resolution and Robust buffers");
     CHECK("none", mr::names(names, 5, 0).empty());
     std::puts("menu restart: all checks passed");

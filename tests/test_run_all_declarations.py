@@ -20,7 +20,8 @@ spec = importlib.util.spec_from_file_location("run_all", ROOT / "tests" / "run_a
 run_all = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(run_all)
 
-TOOLS = {"cxx": None, "vulkan_headers": None, "spirv_headers": None, "spirv_val": None, "glslang": None, "dotnet": None}
+TOOLS = {"cxx": None, "vulkan_headers": None, "spirv_headers": None, "spirv_val": None, "glslang": None, "dotnet": None,
+         "dav1d": None}
 
 
 class Reader(unittest.TestCase):

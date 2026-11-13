@@ -14,14 +14,19 @@ namespace mkwvk {
 
 struct Texture;
 
-/// What the Upscaler row runs now on this chain (upscaler_rows.h: GAME, DLSS, DLAA, FSR4, FSR4_AA): the row's choice
-/// (opts.dlss), or RX_VK_DLSS=1 / 2 or RX_VK_FSR4=1 / 2 over it; GAME when the chosen engine cannot run here, and while
-/// AMD FSR 3.1 (vk_fsr3.cpp, its own inputs) upscales: RX_VK_FSR=1, or the row's FSR 3.1 with neither switch above set
+/// What the Upscaler row runs now on this chain (upscaler_rows.h: GAME, DLSS, DLAA, FSR3, FSR4, FSR4_AA): the row's choice
+/// (opts.dlss), or RX_VK_DLSS=1 / 2 or RX_VK_FSR4=1 / 2 over it; GAME when the chosen engine cannot run here. AMD FSR 3.1
+/// (RX_VK_FSR=1, or the row's FSR 3.1 with neither switch above set) is FSR3 here, an engine of this chain with the skinned
+/// draws' motion (vk_fsr3.h fsr3_on_chain); with RX_VK_FSR3_CHAIN=0 it upscales with its own inputs and this is GAME then
 int temporal_mode();
 /// RX_VK_DLSS=1 / 2 or RX_VK_FSR4=1 / 2 set for this run, and that engine runs here: over the row, its FSR 3.1 too
 /// (vk_fsr3.cpp fsr3_wanted). Where it cannot run, a saved FSR 3.1 stays
 bool temporal_env_chosen();
 bool temporal_wanted();       // (temporal_mode() != GAME)
+/// The Upscaler row's Off (upscaler_rows.h OFF) with no engine running over it for this run (temporal_mode() is GAME): no
+/// upscaler at all. temporal_upscale then leaves the game's network out too and stretches its input to its output with a plain
+/// linear filter
+bool temporal_off();
 /// DLAA or FSR's native anti-aliasing: the 3D drawn at full scale, whatever the Render resolution row says
 bool temporal_full_scale();
 
@@ -55,7 +60,8 @@ void temporal_note_skinned_draw(const SkinnedDraw& k);
 /// share): its input as it samples it (in, in_view) and its output's storage view (out at level 0). known: one of the
 /// gameplay networks by its key; else a network of that shape (the fixed shares' own), taken only when its input is this
 /// frame's scene and its output the picture, and left to run without a word otherwise. true: the engine wrote the output
-/// (the dispatch is left out); false: the network runs, the reason logged
+/// (the dispatch is left out); false: the network runs, the reason logged. With the Upscaler Off (temporal_off) the same
+/// dispatches get the linear stretch in place of an engine
 bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, VkImageView in_view, Texture* out,
                       VkImageView out_view, uint32_t out_level);
 
@@ -63,16 +69,17 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
 /// engine's own state, the chain's images and deferred frees are let go, so their video memory comes back. Nothing to do
 /// costs one atomic load
 void temporal_idle();
+void temporal_reset_failure();
 
 /// For the renderer's status line (vk_replay.cpp status_tick): while an engine draws, its details since the last call into b
 /// ("; DLSS: jitter ..., actor motion ..., its images ... MB") and temporal_mode(); else 0 and b left alone
 int temporal_status(char* b, size_t n);
 
 /// The scene's width (axis 0) or height (1) for the host's camera jitter (nx2/oot_jitter.py, HOS_OPT_DLSS_JITTER_W and _H):
-/// 0 when there is to be none (no engine drawing, or RX_VK_DLSS_JITTER=0). Axis 2: the jitter sequence's length for the
+/// 0 when there is to be none (no engine drawing, RX_VK_DLSS_JITTER=0, or RX_VK_FSR_JITTER=0 with FSR 3.1 on the chain). Axis 2: the jitter sequence's length for the
 /// engine's scale (dlss_jitter_phases, HOS_OPT_DLSS_JITTER_PHASES)
 uint32_t temporal_jitter_size(int axis);
-/// One completed sample shared by DLSS and FSR 4; all zero while inactive.
+/// One completed sample shared by DLSS, FSR 4 and FSR 3.1 on the chain; all zero while inactive.
 MkwVkJitter temporal_jitter_sample();
 
 // ---- what an engine is given and does ----
@@ -84,8 +91,10 @@ struct TemporalImage {
     VkFormat format = VK_FORMAT_UNDEFINED;
     uint32_t width = 0, height = 0;
 };
-/// One frame's evaluation. color: the scene as the network samples it (tonemapped, square-root encoded: LDR, RGBA16F);
-/// depth: R32F in [0, 1], not reversed; motion: RG16F in render pixels, towards the frame before, the jitter taken off. They
+/// One frame's evaluation. color: the scene as the network samples it (tonemapped, square-root encoded: LDR, RGBA16F; linear
+/// light past 1 with the game's native HDR for an engine whose hdr() says it takes that, its output then linear as well);
+/// depth: R32F in [0, 1], not reversed (reversed, 1 - d, for an engine with fsr_depth where the projection puts the near
+/// plane at 0: FSR 3.1; depth_reversed says so); motion: RG16F in render pixels, towards the frame before, the jitter taken off. They
 /// are as large as the engine asked (in_w x in_h), the frame's part at the top left. output: RGBA16F, at the output's size
 /// (DLAA, FSR's native AA: the render size)
 struct TemporalFrame {
@@ -94,6 +103,11 @@ struct TemporalFrame {
     float jitter[2]{};          // (the scene's sub-pixel offset this frame, in render pixels, x right and y down)
     bool reset = false;         // (no history: the first frame, or one after a gap or a camera cut the chain saw)
     float near_z = 0.1f, far_z = 1000.0f, fov_y = 1.0f;   // (the scene's projection's, when it is a plain perspective one)
+    float projection[16]{};     // (hookshot) the scene's projection without this frame's jitter: FSR 3.1's depth constants
+    uint32_t jitter_phases = 8; // (hookshot) the length of the jitter's sequence the host runs (dlss_jitter_phases)
+    /// (hookshot) depth holds 1 - d (the engine's fsr_depth, where the projection puts the near plane at 0: FSR 3.1). Anything
+    /// else that reads this frame's depth (frame generation, other passes) must look here, not assume the plain depth
+    bool depth_reversed = false;
 };
 /// An engine: plain functions, each called with the chain's lock held, on the recording thread
 struct TemporalEngine {
@@ -103,9 +117,10 @@ struct TemporalEngine {
     bool (*start)();
     /// Ready to scale rw x rh into ow x oh, made again when its sizes or settings changed (cmd: what that records). in_w and
     /// in_h: how large the inputs are to be (the most the render size can be for what it made). 1 ready, 2 ready and made
-    /// just now (a new history), 0 not this frame (*why: the reason), -1 failed for good (*why too)
-    int (*prepare)(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, uint32_t* in_w, uint32_t* in_h,
-                   const char** why);
+    /// just now (a new history), 0 not this frame (*why: the reason), -1 failed for good (*why too).
+    /// native_aa requests the engine's native anti-aliasing feature even if an upscale feature accepts these dimensions.
+    int (*prepare)(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool native_aa,
+                   uint32_t* in_w, uint32_t* in_h, const char** why);
     /// Records the frame: false when it failed (for good: the game's upscale from then on)
     bool (*evaluate)(VkCommandBuffer cmd, const TemporalFrame& f);
     /// What it made, let go (its feature or context): the chain unused for a while, or another engine chosen. Work in flight
@@ -113,6 +128,16 @@ struct TemporalEngine {
     void (*release)();
     /// Its own video memory for the status line, in bytes (0: not known)
     uint64_t (*memory)();
+    /// Whether what prepare made takes HDR colour (past 1: the game's native HDR), which the chain then gives it as linear
+    /// light, unclamped, and takes back linear; null or false: LDR colour, square-root encoded, clamped to 0..1 (an LDR
+    /// engine fed more would misread it)
+    bool (*hdr)() = nullptr;
+    /// (hookshot) The depth as FSR's own passes take it: reversed (1 at the near plane) where the game's projection puts the near
+    /// plane at 0 (fsr3_math.h camera_from_projection's flip_depth). AMD FSR 3.1 (vk_fsr3.cpp): its passes are built for that
+    bool fsr_depth = false;
+    /// (hookshot) An evaluation that fails is for that frame only (the network draws it, and the next frame starts a new
+    /// history), not for good: FSR 3.1, whose constants come from the frame's stream
+    bool retry = false;
 };
 /// Runs f a few frames on, to free what work in flight may still use. Called by the engines with the chain's lock held
 void temporal_later(std::function<void()> f);

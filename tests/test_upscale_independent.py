@@ -9,6 +9,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -51,7 +54,7 @@ def main():
         assert owned.parent == Path(tempfile.gettempdir()).resolve() and owned.name.startswith("upscale-independent-")
         cpp, exe = Path(tmp) / "fixture.cpp", Path(tmp) / "fixture.exe"
         cpp.write_text(fixture, encoding="utf-8")
-        subprocess.run([a.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "gpu/vk"),
+        subprocess.run([a.cxx, "-std=c++20", "-include", ENV_ON_H, "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT / "gpu/vk"),
                         str(cpp), "-o", str(exe)], check=True)
         for allow in ("0", "1"):
             env = os.environ.copy()

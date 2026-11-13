@@ -61,6 +61,20 @@ IR::U32 SmallAbs(TranslatorVisitor& v, const IR::U32& value, int bitsize) {
     return IR::U32{v.ir.Select(is_least, value, absolute)};
 }
 
+// (Fritchii, zortos293 f6a8f5132) U32 -> F32 rounded toward zero. OpConvertUToF rounds to nearest whatever the IR's rounding
+// asks, so an input of 2^24 or more could round up: 0xffffff80..0xffffffff became 2^32 instead of 0x4f7fffff (a hash times 2^-32
+// reached 1.0). The top 24 significant bits make the float, the rest are dropped; an input below 2^24 converts exactly
+IR::F32 ConvertUnsigned32ToFloatRZ(TranslatorVisitor& v, const IR::U32& source) {
+    auto& ir = v.ir;
+    const IR::U32 msb{ir.Select(ir.INotEqual(source, ir.Imm32(0)), ir.FindUMsb(source), ir.Imm32(0))};
+    const IR::U32 shift{ir.ISub(ir.UMax(msb, ir.Imm32(23)), ir.Imm32(23))};
+    const IR::U32 retained{ir.ShiftRightLogical(source, shift)};
+    const IR::U32 bits{ir.BitwiseOr(ir.ShiftLeftLogical(ir.IAdd(msb, ir.Imm32(127)), ir.Imm32(23)),
+                                    ir.BitwiseAnd(retained, ir.Imm32(0x7fffff)))};
+    const IR::F32 exact{ir.ConvertIToF(32, 32, false, ir.BitwiseAnd(source, ir.Imm32(0xffffff)))};
+    return IR::F32{ir.Select(ir.IGreaterThan(msb, ir.Imm32(23), false), ir.BitCast<IR::F32>(bits), exact)};
+}
+
 void I2F(TranslatorVisitor& v, u64 insn, IR::U32U64 src) {
     const Encoding i2f{insn};
     if (i2f.cc != 0) {
@@ -99,7 +113,12 @@ void I2F(TranslatorVisitor& v, u64 insn, IR::U32U64 src) {
         .rounding = CastFpRounding(i2f.fp_rounding),
         .fmz_mode = IR::FmzMode::DontCare,
     };
-    auto value{v.ir.ConvertIToF(size_t(dst_bitsize), size_t(conversion_src_bitsize), is_signed, src, fp_control)};
+    IR::F16F32F64 value;
+    if (!is_signed && conversion_src_bitsize == 32 && dst_bitsize == 32 && i2f.fp_rounding == FpRounding::RZ) {
+        value = ConvertUnsigned32ToFloatRZ(v, IR::U32{src});
+    } else {
+        value = v.ir.ConvertIToF(size_t(dst_bitsize), size_t(conversion_src_bitsize), is_signed, src, fp_control);
+    }
     if (i2f.neg != 0) {
         if (i2f.abs != 0 || !is_signed) {
             // We know the value is positive

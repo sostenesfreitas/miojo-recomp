@@ -2,8 +2,8 @@
 # The game folder's launcher, what hookshot.exe is on Windows: Play, and Update when a newer release is out.
 # The game itself is bin/hookshot. This file is copied to hookshot in the folder (nx2/make_game.py).
 #
-# It starts the builder installed by an update ($XDG_DATA_HOME/hookshot/builder), or the builder= line in
-# hookshot_version.txt (the AppImage that built the folder). With neither, it starts the game.
+# It starts the builder= line in hookshot_version.txt (the builder that made this game), or the installed builder
+# ($XDG_DATA_HOME/hookshot/builder) when that one is gone. With neither, it starts the game.
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
@@ -27,9 +27,9 @@ builder_line() {
     printf '%s\n' "$path"
 }
 
-run=$(installed || true)
+run=$(builder_line || true)
 if [ -z "$run" ]; then
-    run=$(builder_line || true)
+    run=$(installed || true)
 fi
 if [ -n "$run" ]; then
     exec "$run" --launch "$HERE"

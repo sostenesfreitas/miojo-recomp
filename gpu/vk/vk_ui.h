@@ -13,6 +13,7 @@
 
 #include "imgui.h"
 #include "vk_imgui.h"
+#include "vk_menu_i18n.h"   // (every text below is looked up in the menu's language first: i18n::tr)
 
 namespace mkwvk::ui {
 
@@ -51,7 +52,9 @@ struct Ctx {
     int confirm_dot = 3, back_dot = 1;   // (the face buttons that confirm and go back: vk_menu_keys.h dot, 3 the bottom, 1 the right)
 };
 
-inline ImVec2 size_of(ImFont* font, float px, const char* t, float wrap = 0) { return font->CalcTextSizeA(px, FLT_MAX, wrap, t); }
+inline ImVec2 size_of(ImFont* font, float px, const char* t, float wrap = 0) {
+    return font->CalcTextSizeA(px, FLT_MAX, wrap, i18n::tr(t));
+}
 /// (hookshot) Shrink to fit: the size a text is drawn at to be at most room wide. px when it fits there; else the largest size
 /// below it, on steps of step, down to min_px at the least; 0 when it fits at none (not drawn). width(size): the text's width
 /// at a size (size_of's .x). The first guess scales px by room over the width, as a text's width grows with its size; from it
@@ -68,17 +71,22 @@ float fit_px(float px, float min_px, float step, float room, Width width) {
     return f >= min_px ? f : 0;
 }
 inline float text(Ctx& c, ImFont* font, float px, ImVec2 p, ImU32 col, const char* t, float wrap = 0) {
+    t = i18n::tr(t);
     c.d->AddText(font, px, p, col, t, nullptr, wrap);
-    return size_of(font, px, t, wrap).x;
+    return font->CalcTextSizeA(px, FLT_MAX, wrap, t).x;
 }
 /// Text wrapped at wrap pixels, its lines 1.3 em apart (ImGui's own wrap sets them 1 em apart: too tight for reading); its
 /// height. draw false: measured only
 inline float para(Ctx& c, ImFont* font, float px, ImVec2 p, ImU32 col, const char* t, float wrap, bool draw = true) {
+    t = i18n::tr(t);
     const char* end = t + strlen(t);
     float y = 0;
     while (t < end) {
         const char* cut = font->CalcWordWrapPosition(px, t, end, wrap);
-        if (cut == t) cut = t + 1;   // (a word wider than the line: a letter at least)
+        if (cut == t) {   // (a word wider than the line: a letter at least, a whole UTF-8 one)
+            cut = t + 1;
+            while (cut < end && ((unsigned char)*cut & 0xC0) == 0x80) cut++;
+        }
         if (draw) c.d->AddText(font, px, ImVec2(p.x, p.y + y), col, t, cut);
         y += px * 1.3f;
         t = cut;
@@ -102,14 +110,19 @@ inline void text_centre(Ctx& c, ImFont* font, float px, ImVec2 p, ImU32 col, con
 }
 /// Capitals with extra space between the letters (gap in pixels), centred on x
 inline void spaced(Ctx& c, ImFont* font, float px, ImVec2 p, ImU32 col, const char* t, float gap) {
-    char one[2] = {0, 0};
+    // (a letter at a time, each a whole UTF-8 character: a translated title has accents and other scripts)
+    t = i18n::tr(t);
+    const auto next = [](const char* q) {
+        const char* e = q + 1;
+        while (*e && ((unsigned char)*e & 0xC0) == 0x80) e++;
+        return e;
+    };
     float total = 0;
-    for (const char* q = t; *q; q++) one[0] = *q, total += size_of(font, px, one).x + gap;
+    for (const char* q = t; *q; q = next(q)) total += font->CalcTextSizeA(px, FLT_MAX, 0, q, next(q)).x + gap;
     float x = p.x - (total - gap) * 0.5f;
-    for (const char* q = t; *q; q++) {
-        one[0] = *q;
-        c.d->AddText(font, px, ImVec2(x, p.y), col, one);
-        x += size_of(font, px, one).x + gap;
+    for (const char* q = t; *q; q = next(q)) {
+        c.d->AddText(font, px, ImVec2(x, p.y), col, q, next(q));
+        x += font->CalcTextSizeA(px, FLT_MAX, 0, q, next(q)).x + gap;
     }
 }
 /// A soft shadow under a rectangle: layers growing outwards, fading
@@ -159,7 +172,7 @@ inline void glow(Ctx& c, ImVec2 a0, ImVec2 b0) {
 inline void gold(Ctx& c, ImVec2 a0, ImVec2 b0) { c.d->AddRectFilledMultiColor(a0, b0, kGoldHi, kGoldHi, kGold, kGold); }
 
 // ---- the button prompts: the keys, or a controller's buttons by position (any layout: the dot lit) ----
-enum Glyph { kUpDown, kLeftRight, kTabs, kConfirm, kBack, kKey };
+enum Glyph { kUpDown, kLeftRight, kTabs, kConfirm, kBack, kKey, kCompact };
 struct Prompt {
     Glyph g;
     const char* what;
@@ -178,6 +191,20 @@ inline float glyph(Ctx& c, float px, ImVec2 p, const Prompt& pr, bool draw) {
         return w;
     };
     if (pr.g == kKey) return key(p.x, pr.key);
+    if (pr.g == kCompact) {
+        if (!c.pad) return key(p.x, pr.key ? pr.key : "RShift");
+        const float r = hh * 0.5f;
+        const ImVec2 m(p.x + r, my);
+        if (draw) {
+            c.d->AddCircleFilled(m, r, cap);
+            const ImVec2 at[4] = {m + ImVec2(0, -r * 0.5f), m + ImVec2(r * 0.5f, 0), m + ImVec2(-r * 0.5f, 0), m + ImVec2(0, r * 0.5f)};
+            for (int i = 0; i < 4; i++) {
+                if (i == 2) c.d->AddCircleFilled(at[i], r * 0.27f, ink);
+                else c.d->AddCircle(at[i], r * 0.22f, dim, 0, std::max(1.0f, s));
+            }
+        }
+        return 2 * r;
+    }
     if (!c.pad) {
         switch (pr.g) {
         case kUpDown:

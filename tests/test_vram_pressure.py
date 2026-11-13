@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def check_source():
     src = (ROOT / "gpu/vk/vk_memory.cpp").read_text(encoding="utf-8")
-    for needle in ('#include "vram_pressure.h"', 'getenv("RX_VK_SHADOW_RAW")',
+    for needle in ('#include "vram_pressure.h"', 'env_on("RX_VK_SHADOW_RAW")',
                    "vram_pressure::shadow_fits(n, used, allowed, block_free)",
                    "vram_pressure::shadows_go(used, allowed, block_free)"):
         if needle not in src:

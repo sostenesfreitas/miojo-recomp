@@ -13,6 +13,9 @@
    and hands it to the focus manager (*(screen+32)+96, its vtable +48), when the manager takes the player's input.
    HOS_MENU_TRACE=1: the focus changes, the screens and what the mouse does logged. */
 #include "hos.h"
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 #if defined(_WIN32)
 #include <windows.h>
 #include <ctype.h>
@@ -161,7 +164,7 @@ static struct { uint64_t screen, pane, lr; int set; } pending;
 static void focus_locked(uint64_t screen, uint64_t pane, uint64_t lr);
 void hos_oot_menu_focus(Ctx *c, uint64_t screen, uint64_t pane, uint64_t lr) {
     (void)c;
-    if (trace < 0) trace = getenv("HOS_MENU_TRACE") != NULL;
+    if (trace < 0) trace = env_on("HOS_MENU_TRACE");
     if (mouse_owner == GetCurrentThreadId()) {   /* (inside mouse_tick's setter, on its thread: the lock is this thread's) */
         focus_locked(screen, pane, lr);
         return;
@@ -757,7 +760,7 @@ static Seen *screen_seen(uint64_t screen, int64_t now) {
 
 void hos_oot_menu_tick(Ctx *c, uint64_t screen) {
     if (!screen) return;
-    if (trace < 0) trace = getenv("HOS_MENU_TRACE") != NULL;
+    if (trace < 0) trace = env_on("HOS_MENU_TRACE");
     const int64_t now = hos_now_ns();
     AcquireSRWLockExclusive(&seen_lock);
     Seen *me = screen_seen(screen, now);

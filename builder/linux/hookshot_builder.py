@@ -13,6 +13,7 @@ import queue
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -27,6 +28,7 @@ sys.path.insert(0, os.path.join(ROOT, "nx2"))
 sys.path.insert(0, os.path.join(ROOT, "third_party", "a64-kit", "tools"))
 import linux_update  # noqa: E402  (the release check and the part download)
 import make_game  # noqa: E402  (LANGUAGES, BUILD_ID)
+import pipeline_share  # noqa: E402  (Save my pipeline list: the zip for the "Submit your pipelines" issue)
 import toolchain  # noqa: E402  (default_jobs: RX_JOBS)
 
 CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "hookshot", "builder.ini")
@@ -36,19 +38,59 @@ DLSS_LICENSE = (
     "NVIDIA DLSS is NVIDIA's, not Hookshot's. With it ticked, the build downloads NVIDIA's DLSS SDK (release v310.9.16) from "
     "github.com/NVIDIA/DLSS, under NVIDIA's own license, the NVIDIA RTX SDKs license:\n\n"
     "https://github.com/NVIDIA/DLSS/blob/9981c6350dc58c0ce21f024fd65e31e851c31689/LICENSE.txt\n\n"
-    "Its files stay on this PC (in the builder's ngx-sdk folder, and libnvidia-ngx-dlss.so in the game folder's ngx folder). "
+    "Its files stay on this PC (in the builder's ngx-sdk folder, and libnvidia-ngx-dlss.so and libnvidia-ngx-dlssg.so in "
+    "the game folder's ngx folder). "
     "Hookshot never includes or shares them: never share a game folder built with them.\n\n"
     "Do you accept NVIDIA's license?"
 )
 
 
+def cache_dir():
+    """The builder's own folder on Linux, as make_game.py's work folder: $XDG_CACHE_HOME/hookshot-builder (~/.cache/...)"""
+    return os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "hookshot-builder")
+
+
 def ngx_sdk_dir():
-    """Where NVIDIA's DLSS SDK goes when the player ticks NVIDIA DLSS: beside the builder's versions, kept across updates."""
+    """Where NVIDIA's DLSS SDK goes when the player ticks NVIDIA DLSS: the builder's cache folder, as on Windows its own folder
+    (%LOCALAPPDATA%\\HookshotBuilder\\ngx-sdk). A download, fetched again by the next build with DLSS when the cache was emptied;
+    whether NVIDIA's license was accepted is kept in the builder's settings (license_accepted), not in it"""
+    return os.path.join(cache_dir(), "ngx-sdk")
+
+
+def old_ngx_sdk_dir():
+    """Where the SDK went before: the game's data folder ($XDG_DATA_HOME/hookshot/builder/ngx-sdk), beside the builder's versions"""
     return os.path.join(linux_update.data_root(), "ngx-sdk")
 
 
+def license_accepted(cfg=None):
+    """Whether the player accepted NVIDIA's license here: the builder's settings say so (nvidia_license=1), or the SDK it was
+    accepted for is still where builders before the record kept it"""
+    cfg = load_config() if cfg is None else cfg
+    return cfg.get("nvidia_license") == "1" or os.path.isfile(os.path.join(old_ngx_sdk_dir(), "LICENSE.txt"))
+
+
+def move_old_ngx_sdk():
+    """(once) The SDK a builder before kept in the game's data folder moved to the cache folder, and the license it was accepted
+    under recorded in the settings. When it cannot move it is left: the next build with DLSS downloads it again"""
+    old, new = old_ngx_sdk_dir(), ngx_sdk_dir()
+    if not os.path.isfile(os.path.join(old, "LICENSE.txt")):
+        return
+    cfg = load_config()
+    if cfg.get("nvidia_license") != "1":
+        cfg["nvidia_license"] = "1"
+        save_config(cfg)
+    if os.path.exists(new):
+        shutil.rmtree(old, ignore_errors=True)
+        return
+    try:
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        shutil.move(old, new)
+    except OSError:
+        pass
+
+
 def folder_has_dlss(folder):
-    """Whether a game folder was built with NVIDIA DLSS (its runtime in ngx/, and NVIDIA's license in ngx-sdk)."""
+    """Whether a game folder was built with NVIDIA DLSS: its runtime in ngx/, and NVIDIA's license accepted here."""
     if not folder:
         return False
     ngx_dir = os.path.join(os.path.expanduser(folder), "ngx")
@@ -56,7 +98,7 @@ def folder_has_dlss(folder):
         has_runtime = any(name.startswith("libnvidia-ngx-dlss.so") for name in os.listdir(ngx_dir))
     except OSError:
         return False
-    return has_runtime and os.path.isfile(os.path.join(ngx_sdk_dir(), "LICENSE.txt"))
+    return has_runtime and license_accepted()
 
 
 def dlss_args(dlss):
@@ -85,6 +127,9 @@ def left_text(seconds):
     return "about %d h %d min left" % (minutes // 60, minutes % 60) if minutes >= 60 else "about %d minutes left" % minutes
 
 
+TRACK_NAMES = {"release": "Release", "rc": "Release candidate", "nightly": "Nightly"}
+
+
 def load_config():
     cfg = {}
     try:
@@ -107,6 +152,85 @@ def game_ready(folder):
     return linux_update.game_exe(folder) is not None
 
 
+def read_cgroup(path):
+    """The unified control group, or "" when /proc is unavailable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return next((line.rstrip("\n")[3:] for line in f if line.startswith("0::")), "")
+    except OSError:
+        return ""
+
+
+def own_scope(env, cgroup="/proc/self/cgroup", which=shutil.which, run=subprocess.run):
+    """What goes before the game's command so that it outlives this window's systemd service, or [] when nothing has to.
+    A desktop that starts each launcher as a service of its own (app-hookshot@<id>.service: COSMIC, GNOME, KDE) stops that
+    service, and everything in its control group, when its main process ends; start_new_session leaves the session, not the
+    control group, so Play then closing the window had systemd stop the game too, with SIGKILL 90 s later (#2529). In a scope
+    of its own it stays. A terminal, a scope or no systemd: nothing to do, and the game starts as before"""
+    unit = read_cgroup(cgroup)
+    if not unit.rpartition("/")[2].endswith(".service"):
+        return []
+    tool = which("systemd-run", path=env.get("PATH"))
+    if not tool:
+        return []
+    scope = [tool, "--user", "--scope", "--collect", "--quiet", "--"]
+    # (once first with true: a user manager that cannot be reached would otherwise leave Play starting nothing)
+    try:
+        ok = run(scope + ["true"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                 timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return scope if ok else []
+
+
+def wait_scope(process, proc_root="/proc", clock=time.monotonic, sleep=time.sleep, timeout=2):
+    """Wait only until the real runner leaves this service, not until its game ends."""
+    parent = read_cgroup(os.path.join(proc_root, "self", "cgroup"))
+    if not parent:
+        return False
+    deadline = clock() + timeout
+    while process.poll() is None:
+        child = read_cgroup(os.path.join(proc_root, str(process.pid), "cgroup"))
+        if child and child != parent and not child.startswith(parent + "/"):
+            return True
+        left = deadline - clock()
+        if left <= 0:
+            break
+        sleep(min(0.01, left))
+    return False
+
+
+def start_scoped(scope, command, options, wait=wait_scope):
+    """Start once: a runner that times out cannot later start a second game beside the plain fallback."""
+    process = None
+    try:
+        gate, go = socket.socketpair()
+        with gate, go:
+            # stdout is normally discarded. Use it as a gate until /proc proves the runner has escaped;
+            # the shell restores /dev/null before exec, leaving the diagnostics' stdin/stderr sockets alone.
+            script = 'IFS= read -r ready <&1 || exit 1\n[ "$ready" = go ] || exit 1\nexec >/dev/null\nexec "$@"'
+            process = subprocess.Popen(scope + ["/bin/sh", "-c", script, "hookshot-scope"] + command,
+                                       **dict(options, stdout=gate))
+            gate.close()
+            if wait(process):
+                go.sendall(b"go\n")
+                return True
+    except OSError:
+        pass
+    # No "go" was sent. Closing the gate above forbids a late exec, even if the move races this cancellation.
+    if process is not None:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:   # (a stuck runner still cannot pass its closed gate)
+            pass
+    return False
+
+
 def play(folder):
     """the game, on its own (it outlives this window), from its folder. The launcher already asked about updates."""
     exe = linux_update.game_exe(folder)
@@ -114,8 +238,55 @@ def play(folder):
         return
     env = make_game.game_env()   # (as make_game's shader preparation and hookshot-launch: the game's own SDL, the system's libraries)
     env["HOOKSHOT_NO_UPDATE_CHECK"] = "1"
-    subprocess.Popen([exe], cwd=folder, env=env, start_new_session=True,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    exe = os.path.abspath(exe)
+    options = dict(cwd=folder, env=env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    scope = own_scope(env)   # (out of the launcher's systemd service, when it runs in one: #2529)
+    try:
+        with open(os.path.join(HERE, "play-diagnostics.sh"), encoding="utf-8") as script:
+            command = ["/bin/sh", "-c", script.read(), "hookshot-play", exe]
+        # (stderr a socket, not a pipe: the game takes a socket, as the journal's where a desktop launcher sends it, for nowhere to
+        # log, and writes hookshot_log.txt; a pipe it takes for a reader and writes no log file (host/posix/win32_posix.c GetFileType).
+        # The script reads the other end: what the game prints before its log opens)
+        reading, writing = socket.socketpair()
+        with reading, writing:
+            launch_options = dict(options, stdin=reading, stderr=writing)
+            if not scope or not start_scoped(scope, command, launch_options):
+                if scope:
+                    command.append("Hookshot: systemd scope hand-off failed; started without a separate scope.")
+                subprocess.Popen(command, **launch_options)
+    except OSError:
+        if not scope or not start_scoped(scope, [exe], options):
+            subprocess.Popen([exe], **options)
+
+
+def share_pipeline_list(folder, out_dir=None, copy=None, open_path=None):
+    """Save my pipeline list (as the game's menu does it, nx2/pipeline_share.py): the game folder's pipeline list and the issue's
+    template, filled in, zipped into the Downloads folder; then the template to copy, the folder and the issue to open. Nothing is
+    uploaded. What happened, in the player's words"""
+    opener = open_path or (lambda p: subprocess.Popen(["xdg-open", p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+    try:
+        path, text, n = pipeline_share.make_zip(folder, out_dir)
+    except pipeline_share.ShareError as e:
+        return str(e)
+    except OSError as e:
+        return "The zip could not be written: %s" % e
+    copied = False
+    if copy:
+        try:
+            copy(text)
+            copied = True
+        except Exception:   # (no clipboard: the template is in the zip too)
+            pass
+    opened = True
+    for target in (os.path.dirname(path), pipeline_share.ISSUE_URL):
+        try:
+            opener(target)
+        except OSError:
+            opened = False
+    return ("Saved %s (%d pipelines) in %s. %s%s the zip to a comment, then paste the report and say where you played." %
+            (os.path.basename(path), n, os.path.dirname(path), "The report is copied. " if copied else "The report is in the zip. ",
+             "Issue #%d is open in your browser: attach" % pipeline_share.ISSUE if opened else
+             "Open %s and attach" % pipeline_share.ISSUE_URL))
 
 
 def desktop_exec(path):
@@ -322,25 +493,31 @@ def _arg(name):
 
 
 class Builder(tk.Tk):
-    def __init__(self, launch=None, update=None, fetched=False, tag=None):
+    def __init__(self, launch=None, update=None, fetched=False, tag=None, allow_downgrade_from=None):
         super().__init__()
         self.title("Hookshot Builder")
         self.apply_scale()
         self.apply_theme()
         self.minsize(self.px(760), self.px(520))
+        move_old_ngx_sdk()   # (before the settings are read: it may record the license in them)
         self.cfg = load_config()
         self.proc = None
+        self.stop_update = threading.Event()   # (Cancel while an update downloads: its thread ends the download)
         self.lines = queue.Queue()
         self.started = 0.0
         self.launch_folder = launch
         self.update_folder = update
         self.fetched = fetched
         self.update_tag = tag
+        self.allow_downgrade_from = allow_downgrade_from
         self.mode = "build"
         self.latest = None
         self.source_picked = False
         self.dlss_toggled = False
         self.tools = linux_update.tools_tag(linux_update.running_root() or ROOT)
+        # (the update track: the one chosen in the Track menu, saved; by default these tools' own)
+        own = linux_update.track_of(self.tools)
+        self.track = tk.StringVar(value=TRACK_NAMES[self.cfg.get("track") if self.cfg.get("track") in linux_update.TRACKS else own])
         self.status = tk.StringVar()
         self.kind = tk.StringVar(value=self.cfg.get("kind", "nup"))
         self.nup = tk.StringVar(value=self.cfg.get("nup", ""))
@@ -676,8 +853,11 @@ class Builder(tk.Tk):
         ttk.Label(f, text="Pick your game files and where the game goes. Hookshot does the rest, once.", style="Sub.TLabel",
                   wraplength=px(800)).grid(row=1, column=0, columnspan=3, sticky="w", pady=(px(6), 0))
         if game_ready(self.cfg.get("out")):
-            ttk.Button(f, text="Play the game built in %s" % self.cfg["out"], command=lambda: self.play_and_close(self.cfg["out"])).grid(
-                row=2, column=0, columnspan=3, sticky="w", pady=(px(16), 0))
+            played = ttk.Frame(f)
+            played.grid(row=2, column=0, columnspan=3, sticky="w", pady=(px(16), 0))
+            ttk.Button(played, text="Play the game built in %s" % self.cfg["out"],
+                       command=lambda: self.play_and_close(self.cfg["out"])).pack(side="left")
+            self.share_row(played, self.cfg["out"], wrap=px(360)).pack(side="left", padx=(px(12), 0))
         self.section(f, "Game files", 3, columnspan=3)
         kinds = ttk.Frame(f, style="Card.TFrame", padding=px(5))
         kinds.grid(row=4, column=0, columnspan=3, sticky="we")
@@ -706,16 +886,26 @@ class Builder(tk.Tk):
         self.path_row(out, 0, None, self.out, lambda: self.pick_dir(self.out), button="Change")
         ttk.Combobox(f, textvariable=self.language, values=[n for _, n in make_game.LANGUAGES], state="readonly",
                      font="HsNote", cursor="hand2").grid(row=8, column=2, sticky="we")
+        # (the update track: Release, Release candidate or Nightly; the builder updates from it, saved once chosen)
 
         options = ttk.Frame(f)
-        options.grid(row=9, column=0, columnspan=3, sticky="we", pady=(px(22), 0))
+        options.grid(row=9, column=0, sticky="we", pady=(px(22), 0))
+        # (the update track: Release, Release candidate or Nightly. The builder updates from it; saved once chosen)
+        tracks = ttk.Frame(f)
+        tracks.grid(row=9, column=2, sticky="nwe", pady=(px(22), 0))
+        tracks.columnconfigure(0, weight=1)
+        self.section(tracks, "Update track", 0, top=0)
+        track = ttk.Combobox(tracks, textvariable=self.track, values=list(TRACK_NAMES.values()), state="readonly", font="HsNote",
+                             cursor="hand2")
+        track.grid(row=1, column=0, sticky="we")
+        track.bind("<<ComboboxSelected>>", self.on_track_changed)
         ttk.Checkbutton(options, text="Prepare shaders now", variable=self.prepare, cursor="hand2").pack(anchor="w")
         ttk.Label(options, text="A few minutes at the end of the build. Unticked, the game prepares them at its first start, "
-                  "behind a black window.", style="Small.TLabel", wraplength=px(660)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
+                  "behind a black window.", style="Small.TLabel", wraplength=px(540)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
         ttk.Checkbutton(options, text="NVIDIA DLSS (downloads NVIDIA's SDK under NVIDIA's license)", variable=self.dlss,
                         command=self.on_dlss_changed, cursor="hand2").pack(anchor="w", pady=(px(12), 0))
         ttk.Label(options, text="For NVIDIA RTX graphics cards. NVIDIA's files stay on this PC: never share a game folder built with them.",
-                  style="Small.TLabel", wraplength=px(660)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
+                  style="Small.TLabel", wraplength=px(540)).pack(anchor="w", padx=(px(26), 0), pady=(px(2), 0))
 
         f.rowconfigure(10, weight=1, minsize=px(18))
         ttk.Label(f, textvariable=self.status, style="Status.TLabel", wraplength=px(800)).grid(
@@ -733,6 +923,32 @@ class Builder(tk.Tk):
         self.out.trace_add("write", lambda *a: self.update_space())
         self.update_space()
         self.apply_mode()
+
+    def share_row(self, parent, folder, wrap=None):
+        """Save my pipeline list (share_pipeline_list), and under it what it did"""
+        box = ttk.Frame(parent)
+        said = tk.StringVar(value="")
+        note = ttk.Label(box, textvariable=said, style="Small.TLabel", wraplength=wrap or self.px(600), justify="center")
+
+        def save():
+            button.state(["disabled"])   # (one save at a time)
+            said.set("Saving...")
+            note.pack(pady=(self.px(2), 0))
+            self.update_idletasks()
+            try:
+                said.set(share_pipeline_list(folder, copy=self.copy_text))
+            finally:
+                button.state(["!disabled"])
+
+        button = ttk.Button(box, text="Save my pipeline list (helps remove stutter)", style="Link.TButton", cursor="hand2",
+                            command=save)
+        button.pack()
+        return box
+
+    def copy_text(self, text):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.update()   # (the clipboard is the window's: kept while the builder is open)
 
     def path_row(self, f, row, label, var, browse, button="Browse…"):
         if label:
@@ -774,6 +990,8 @@ class Builder(tk.Tk):
             self.dlss.set(False)
         else:
             self.dlss_toggled = True
+            if self.dlss.get():
+                self.cfg["nvidia_license"] = "1"   # (kept apart from the SDK, which is in the cache: folder_has_dlss)
         self.cfg["dlss"] = "1" if self.dlss.get() else "0"
         save_config(self.cfg)
         self.apply_mode()
@@ -798,8 +1016,9 @@ class Builder(tk.Tk):
     def lookup_latest(self):
         def run():
             forced = os.environ.get("HOOKSHOT_LATEST_TAG")
-            tag = None if forced == "none" else (forced or linux_update.latest_tag())
+            tag = None if forced == "none" else (forced or linux_update.latest_tag(track=track))
             self.lines.put(("latest", tag or ""))
+        track = self.track_id()
         threading.Thread(target=run, daemon=True).start()
 
     def apply_mode(self):
@@ -809,7 +1028,7 @@ class Builder(tk.Tk):
         folder = self.out.get().strip()
         expanded = os.path.expanduser(folder) if folder else ""
         game, kept = linux_update.game_version(expanded) if expanded else (None, False)
-        self.mode = linux_update.choose_mode(game, self.tools, self.latest, self.source_picked, kept)
+        self.mode = linux_update.choose_mode(game, self.tools, self.latest, self.source_picked, kept, self.switching())
         dlss_changed = bool(kept and game and not self.source_picked and getattr(self, "dlss_toggled", False) and
                             hasattr(self, "dlss") and bool(self.dlss.get()) != folder_has_dlss(expanded))
         if self.mode == "up-to-date" and dlss_changed:
@@ -830,19 +1049,22 @@ class Builder(tk.Tk):
                 about.configure(text="About 45 min" if self.mode == "build" else "")
         except tk.TclError:
             pass
-        target = linux_update.update_target(self.latest, self.tools)
+        target = linux_update.update_target(self.latest, self.tools, self.switching())
         if self.mode == "update-game" and dlss_changed and game == target:
             self.status.set("Update builds your game again %s NVIDIA DLSS."
                             % ("with" if self.dlss.get() else "without"))
         elif self.mode == "update-game":
             self.status.set("Hookshot %s is available. Your game is %s. Update downloads only what changed, then compiles what changed."
                             % (target, game))
+        elif self.mode == "up-to-date" and linux_update.older_version(target, game):
+            self.status.set("Your game is %s, newer than this builder's update target %s. Play keeps this version; "
+                            "choose another update track to change versions." % (game, target))
         elif self.mode == "up-to-date" and self.latest is None:
             self.status.set("Your game is %s, as this builder. GitHub did not answer, so newer versions could not be checked." % game)
         elif self.mode == "up-to-date":
             self.status.set("%s is the latest version." % game)
         elif self.mode == "update-builder":
-            self.status.set("Hookshot Builder %s is available (this one is %s). Update it first, then build." % (self.latest, self.tools or "this one"))
+            self.status.set("Hookshot Builder %s is available (this one is %s). Update it first, then build." % (target, self.tools or "this one"))
         else:
             self.status.set("")
 
@@ -850,9 +1072,11 @@ class Builder(tk.Tk):
         if not self.launch_folder or not hasattr(self, "launch_status"):
             return
         game, kept = linux_update.game_version(self.launch_folder)
-        target = linux_update.update_target(self.latest, self.tools)
+        target = linux_update.update_target(self.latest, self.tools, self.switching())
         show = False
-        if target and game and game != target and kept:
+        if not self.switching() and linux_update.older_version(target, game):
+            self.launch_status.set("Your game is %s, newer than this builder's update target %s. Play keeps this version." % (game, target))
+        elif target and game and game != target and kept:
             self.launch_status.set("Update available: %s" % target)
             show = True
         elif target and game and game != target:
@@ -892,39 +1116,81 @@ class Builder(tk.Tk):
                    command=lambda: self.play_and_close(folder)).pack(side="right", padx=px(4))
         ttk.Button(f, text="Open the game folder", style="Link.TButton", cursor="hand2",
                    command=lambda: subprocess.Popen(["xdg-open", folder])).pack(pady=(px(22), 0))
+        self.share_row(f, folder).pack(pady=(px(4), 0))
         self.lookup_latest()
 
+    def track_id(self):
+        return next((k for k, v in TRACK_NAMES.items() if v == self.track.get()), "release")
+
+    def switching(self):
+        """(a Track other than these tools' own: its newest is installed, even an older version)"""
+        return self.track_id() != linux_update.track_of(self.tools)
+
+    def on_track_changed(self, _event=None):
+        self.cfg["track"] = self.track_id()
+        save_config(self.cfg)
+        self.latest = None
+        self.apply_mode()
+        self.lookup_latest()
+
+    def older_ok(self, target, have):
+        """Ask before any known downgrade, including a rebuild after changing DLSS on the same track."""
+        if not linux_update.older_version(target, have):
+            return True
+        return messagebox.askyesno("Hookshot", "%s is older than %s, the version you have now. Install %s?" % (target, have, target))
+
     def begin_update(self, folder=None):
+        folder = self.update_folder if folder is None else folder
+        target = self.update_tag or linux_update.update_target(self.latest, self.tools, self.switching())
+        have = linux_update.game_version(folder)[0] if folder else None
+        approved = bool(have and self.fetched and self.tools == self.update_tag == target and
+                        getattr(self, "allow_downgrade_from", None) == have)
+        if folder and not approved and not self.older_ok(target, have):
+            return   # (before changing pages or starting any download/build, including the launcher button)
+        self.allow_downgrade_from = None   # (the handoff's consent is for this attempt and these two versions)
+        downgrade_from = have if linux_update.older_version(target, have) else None
         if folder is not None:
             self.update_folder = folder
         self.show_progress("Updating your game" if self.update_folder else "Updating Hookshot Builder")
         folder = self.update_folder
         # (a game older than this builder is built again with it: nothing to download, and GitHub need not answer. So is one
         # from a builder that is not an older release, e.g. from the Actions tab: issue 902)
-        target = self.update_tag or linux_update.update_target(self.latest, self.tools)
         fetched = self.fetched or bool(folder and self.tools and target == self.tools)
+        stop = self.stop_update
+        stop.clear()
 
         def run():
             try:
+                if fetched and target and self.tools != target:
+                    raise RuntimeError("This Builder is %s, not the requested %s. Start that version's Builder to update." %
+                                       (self.tools or "unversioned", target))
                 if not fetched:
                     root = linux_update.running_root()
                     if root is None:
                         raise RuntimeError("These tools are a source checkout, so they cannot download a release. Start the AppImage to update.")
-                    manifest = linux_update.startup_manifest(root)
+                    # (another track's build, or a Track switch: that version's own list)
+                    named = target if target and (self.switching() or linux_update.track_of(target) != "release") else None
+                    manifest = linux_update.startup_manifest(root, get=lambda url: linux_update.fetch_bytes(url, 30, stop),
+                                                             tag=named)
+                    # The API and its download list can disagree right after a release. Check even when the list
+                    # names the running tools: otherwise a newer target silently rebuilds with those older tools.
+                    if target and manifest.tag != target:
+                        raise RuntimeError("GitHub offered %s, not %s: its download links can lag right after a release. "
+                                           "Try Update again in a few minutes." % (manifest.tag, target))
                     if manifest.tag != linux_update.tools_tag(root):
-                        # (as Windows does: GitHub's latest list lags right after a publish, and installing it would put
-                        # the release before the one asked for over these tools)
-                        if self.update_tag and manifest.tag != self.update_tag:
-                            raise RuntimeError("GitHub offered %s, not %s: its download links can lag right after a release. "
-                                               "Try Update again in a few minutes." % (manifest.tag, self.update_tag))
                         source =linux_update.read_manifest(root)
-                        apprun = linux_update.install(manifest, root, source, note=lambda message: self.lines.put(("note", message)))
+                        apprun = linux_update.install(manifest, root, source, note=lambda message: self.lines.put(("note", message)),
+                                                      stop=stop)
                         for name in ("APPDIR", "APPIMAGE", "ARGV0", "OWD", "LD_LIBRARY_PATH"):
                             os.environ.pop(name, None)
                         args = [apprun]
                         if folder:
                             args += ["--update", folder, "--tag", manifest.tag, "--fetched"]
+                            if downgrade_from:
+                                args += ["--allow-downgrade-from", downgrade_from]
                         os.execv(apprun, args)
+                if stop.is_set():
+                    raise linux_update.Cancelled()
                 self.lines.put(("do-build", folder or ""))
             except Exception as error:
                 self.lines.put(("update-error", str(error)))
@@ -956,6 +1222,9 @@ class Builder(tk.Tk):
             if game_ready(folder):
                 self.play_and_close(folder)
             return
+        if mode == "update-builder":
+            if not self.older_ok(linux_update.update_target(self.latest, self.tools, self.switching()), self.tools):
+                return
         if mode == "update-game":
             self.fetched = False
             self.begin_update(os.path.expanduser(self.out.get().strip()))
@@ -1001,6 +1270,7 @@ class Builder(tk.Tk):
         self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, bufsize=1, encoding="utf-8", errors="replace", start_new_session=True, **env_kw)
         threading.Thread(target=self.read, args=(self.proc,), daemon=True).start()
+        self.tick()
 
     def read(self, proc):
         for line in proc.stdout:
@@ -1015,6 +1285,7 @@ class Builder(tk.Tk):
         self.compile_started = None
         self.times = None
         self.shaders_later = False
+        self.built = self.error = None   # (this run's own: what make_game.py says, or Cancel)
         px = self.px
         page = self.page = ttk.Frame(self)
         page.pack(fill="both", expand=True)
@@ -1053,7 +1324,6 @@ class Builder(tk.Tk):
         self.buttons.grid(row=4, column=0, sticky="e", pady=(px(14), 0))
         ttk.Button(self.buttons, text="Cancel", command=self.cancel, cursor="hand2").pack(side="right")
         self.stage_text.set("Starting")
-        self.tick()
 
     def tick(self):
         if self.proc and self.proc.poll() is None:
@@ -1077,10 +1347,13 @@ class Builder(tk.Tk):
                     self.latest = v or None
                     self.apply_mode()
                 elif kind == "note":
-                    if hasattr(self, "stage_text"):
+                    if hasattr(self, "stage_text") and not self.stop_update.is_set():
                         self.stage_text.set(v)
                 elif kind == "do-build":
-                    self.start_make_update(v)
+                    if self.stop_update.is_set():   # (Cancel after the thread's last look at it: no make_game.py)
+                        self.lines.put(("update-error", str(linux_update.Cancelled())))
+                    else:
+                        self.start_make_update(v)
                 elif kind == "update-error":
                     if hasattr(self, "stage_text"):
                         self.stage_text.set(v + " Your game folder is unchanged.")
@@ -1156,6 +1429,7 @@ class Builder(tk.Tk):
 
     def on_exit(self, code):
         self.proc = None
+        self.time_text.set("")   # (the clock and its countdown are a running build's; the line above says how it ended)
         for w in self.buttons.winfo_children():
             w.destroy()
         folder = getattr(self, "built", None)
@@ -1183,7 +1457,7 @@ class Builder(tk.Tk):
             self.stage_label.configure(style="Go.Stage.TLabel")
             self.set_step(2)
         else:
-            self.stage_text.set("The build stopped: %s" % getattr(self, "error", "see the lines above"))
+            self.stage_text.set("The build stopped: %s" % (getattr(self, "error", None) or "see the lines above"))
             ttk.Button(self.buttons, text="Back", command=self.show_form, cursor="hand2").pack(side="right", padx=self.px(4))
             self.heading.configure(text="The build stopped")
             self.stage_label.configure(style="Bad.Stage.TLabel")
@@ -1192,6 +1466,9 @@ class Builder(tk.Tk):
         if self.proc and self.proc.poll() is None:
             os.killpg(self.proc.pid, signal.SIGTERM)
             self.error = "Build cancelled. You can start again from the same folder."
+        elif self.proc is None:   # (an update still downloading: there is no make_game.py yet, its thread ends the download)
+            self.stop_update.set()
+            self.stage_text.set("Stopping the update")
 
     def play_and_close(self, folder):
         play(folder)
@@ -1214,7 +1491,8 @@ def main():
     launch = _arg("--launch")
     update = _arg("--update")
     if update is not None:
-        Builder(update=update, fetched="--fetched" in sys.argv[1:], tag=_arg("--tag")).mainloop()
+        Builder(update=update, fetched="--fetched" in sys.argv[1:], tag=_arg("--tag"),
+                allow_downgrade_from=_arg("--allow-downgrade-from")).mainloop()
     elif launch:
         Builder(launch=launch).mainloop()
     else:

@@ -36,7 +36,7 @@ def main():
 #include <mutex>
 #include <vector>
 #define CHECK(x) do { if(!(x)){std::fprintf(stderr,"FAIL:%d %s\\n",__LINE__,#x);std::exit(1);} }while(0)
-struct Pool { uint64_t lo=0,hi=0,range_lo=0,range_hi=0,address=0; bool prefetched=false; };
+struct Pool { uint64_t lo=0,hi=0,range_lo=0,range_hi=0,address=0; bool prefetched=false,gpu_only=false,gpu_written=false; uint8_t trims=0; uint64_t trim_epoch=0; };
 struct GuestPool { uint64_t lo,hi; };
 std::vector<GuestPool> guest_pools;
 std::map<uint64_t,Pool> imported;
@@ -56,6 +56,7 @@ thread_local bool import_cooling = false;
 thread_local int import_result = 0;
 bool import_on_hold(uint64_t, uint64_t) { import_cooling = false; return false; }
 void import_remember_failure(uint64_t, uint64_t) {}
+bool mirror_on() { return true; } // (import_chunk's default: 4 MB with VRAM mirrors, 16 without)
 '''+guard+'''
     p.lo=lo;p.hi=hi;imports++;return true;
 }

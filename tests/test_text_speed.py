@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "nx2"))
 import oot_patches  # noqa: E402
 
 # (the shape of the lifted function, build e0f3ccfa: the call that reaches the block, the block's head; the block's
-# backward goto carries the interrupt poll (nx2/poll.py), and a --no-polls build has it bare: both shapes are patched)
+# backward goto carries the interrupt poll (nx2/poll.py), and a lift by hand with nx2/lift.py --no-polls has it bare: both shapes are patched)
 LIFTED = '''#include "a64.h"
 void f_80b1e140(Ctx *A64_NOESC c);
 void f_80b1e140(Ctx *__restrict A64_NOESC c) {

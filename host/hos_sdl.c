@@ -22,8 +22,10 @@ static struct {
     void *PadOpen, *PadClose, *PadConnected, *PadsUpdate, *PadButton, *PadAxis, *PadName, *PadRumble;
     void *PadType, *PadEffect;   /* (optional: HD rumble, host/pad_sdl.c) */
     void *PadHasSensor, *PadSensorEnable, *PadSensorData;   /* (motion: optional, NULL in an SDL without them) */
+    void *PadVendor, *PadSteamHandle, *SetHintPriority;   /* (Steam's stand-in pads: optional, host/steam_pads.h) */
+    void *JoystickGUID, *PadMapping;   /* (optional connection diagnostics: no serial number or device path) */
     void *GetGamepads, *GetGamepadID, *Free;   /* (SDL3) */
-    void *NumJoysticks, *IsGameController, *DeviceInstanceID, *GetJoystick, *JoystickInstanceID;   /* (SDL2) */
+    void *NumJoysticks, *IsGameController, *DeviceInstanceID, *GetJoystick, *JoystickInstanceID;   /* (SDL2; GetJoystick also SDL3's diagnostics) */
 } f;
 #define CALL(type, fn) ((type)f.fn)
 
@@ -71,7 +73,15 @@ static int get_all(HMODULE m, int three) {
     *(FARPROC *)&f.PadHasSensor = GetProcAddress(m, three ? "SDL_GamepadHasSensor" : "SDL_GameControllerHasSensor");
     *(FARPROC *)&f.PadSensorEnable = GetProcAddress(m, three ? "SDL_SetGamepadSensorEnabled" : "SDL_GameControllerSetSensorEnabled");
     *(FARPROC *)&f.PadSensorData = GetProcAddress(m, three ? "SDL_GetGamepadSensorData" : "SDL_GameControllerGetSensorData");
+    /* (Steam's stand-in pads told apart from the real ones: SDL 2.30 on and SDL3 3.2 on; without them Steam's
+       controller ignore list stays as Steam set it) */
+    *(FARPROC *)&f.PadVendor = GetProcAddress(m, three ? "SDL_GetGamepadVendor" : "SDL_GameControllerGetVendor");
+    *(FARPROC *)&f.PadSteamHandle = GetProcAddress(m, three ? "SDL_GetGamepadSteamHandle" : "SDL_GameControllerGetSteamHandle");
+    *(FARPROC *)&f.SetHintPriority = GetProcAddress(m, "SDL_SetHintWithPriority");
+    *(FARPROC *)&f.JoystickGUID = GetProcAddress(m, three ? "SDL_GetJoystickGUID" : "SDL_JoystickGetGUID");
+    *(FARPROC *)&f.PadMapping = GetProcAddress(m, three ? "SDL_GetGamepadMapping" : "SDL_GameControllerMapping");
     if (three) {
+        *(FARPROC *)&f.GetJoystick = GetProcAddress(m, "SDL_GetGamepadJoystick");   /* (optional: diagnostics only) */
         GET(SetWindowPosition, "SDL_SetWindowPosition");
         GET(GetPrimaryDisplay, "SDL_GetPrimaryDisplay");
         GET(OpenAudioDeviceStream, "SDL_OpenAudioDeviceStream");
@@ -86,6 +96,7 @@ static int get_all(HMODULE m, int three) {
         *(FARPROC *)&f.GetWindowDisplay = GetProcAddress(m, "SDL_GetDisplayForWindow");   /* (the refresh: hos_sdl_refresh_mhz) */
         *(FARPROC *)&f.GetCurrentDisplayMode = GetProcAddress(m, "SDL_GetCurrentDisplayMode");
     } else {
+        *(FARPROC *)&f.Free = GetProcAddress(m, "SDL_free");   /* (optional: do not request an allocated mapping without it) */
         *(FARPROC *)&f.GetWindowDisplay = GetProcAddress(m, "SDL_GetWindowDisplayIndex");   /* (the refresh: hos_sdl_refresh_mhz) */
         *(FARPROC *)&f.GetCurrentDisplayMode = GetProcAddress(m, "SDL_GetCurrentDisplayMode");
         GET(OpenAudioDevice, "SDL_OpenAudioDevice");
@@ -123,6 +134,13 @@ void hos_sdl_hint(const char *name, const char *value) {
     if (!hos_sdl_load()) return;
     if (version == 3) CALL(_Bool (*)(const char *, const char *), SetHint)(name, value);
     else CALL(int (*)(const char *, const char *), SetHint)(name, value);
+}
+/* (hookshot) a hint over the environment's own (SDL_HINT_OVERRIDE, 2 in both): a variable Steam sets for the games it
+   starts wins over SDL_SetHint. 0 when the SDL has no SDL_SetHintWithPriority */
+int hos_sdl_hint_override(const char *name, const char *value) {
+    if (!hos_sdl_load() || !f.SetHintPriority) return 0;
+    if (version == 3) return CALL(_Bool (*)(const char *, const char *, int), SetHintPriority)(name, value, 2);
+    return CALL(int (*)(const char *, const char *, int), SetHintPriority)(name, value, 2) != 0;
 }
 void hos_sdl_identity(const char *name, const char *app_id) {
     if (!hos_sdl_load()) return;
@@ -163,6 +181,9 @@ void hos_sdl_relative_mouse(void *window, int on) {
     else CALL(int (*)(int), SetRelativeMouseMode)(on);
 }
 int hos_sdl_desktop_size(int *width, int *height) {
+    /* (hookshot) no SDL loaded (a windowless start: HOS_HEADLESS), so the screen is unknown. The menu asks while it runs
+       (MkwVkHost.screen_size, rx_backend.c), and SDL2's branch below would call an empty slot */
+    if (!version) return 0;
     if (version == 3) {   /* (SDL_DisplayMode: displayID, format, w and h at 8 and 12 in screen units, pixel_density at
                              16: in pixels, as SDL2 gave them) */
         const uint8_t *m = CALL(const uint8_t *(*)(uint32_t), GetDesktopDisplayMode)(CALL(uint32_t (*)(void), GetPrimaryDisplay)());
@@ -599,6 +620,49 @@ const char *hos_sdl_pad_name(void *pad) {
     const char *n = CALL(const char *(*)(void *), PadName)(pad);
     return n ? n : "?";
 }
+/* SDL_GUID / SDL_JoystickGUID: the same 16-byte hardware identifier in both ABIs, not the device's serial number. */
+typedef struct { uint8_t data[16]; } HosSdlGuid;
+void hos_sdl_pad_log_connection(void *pad, int motion, int steam) {
+    char guid[33] = "unavailable";
+    if (f.GetJoystick && f.JoystickGUID) {
+        void *joystick = CALL(void *(*)(void *), GetJoystick)(pad);
+        if (joystick) {
+            const HosSdlGuid id = CALL(HosSdlGuid (*)(void *), JoystickGUID)(joystick);
+            static const char hex[] = "0123456789abcdef";
+            unsigned any = 0;
+            for (int i = 0; i < 16; i++) {
+                guid[2 * i] = hex[id.data[i] >> 4], guid[2 * i + 1] = hex[id.data[i] & 15];
+                any |= id.data[i];
+            }
+            guid[32] = 0;
+            if (!any) strcpy(guid, "unknown");
+        }
+    }
+    /* The active mapping may be from a database, the driver or a user override: SDL does not report its origin.
+       NULL is not evidence that SDL chose a default. The returned string belongs to SDL's allocator. */
+    const int can_map = f.PadMapping && f.Free;
+    char *mapping = can_map ? CALL(char *(*)(void *), PadMapping)(pad) : NULL;
+    const char *status = !can_map ? "unavailable" : mapping ? "available" : "none";
+    const char *name = mapping ? strchr(mapping, ',') : NULL;
+    int name_len = 1;
+    if (name) {
+        name++;
+        for (name_len = 0; name_len < 128 && name[name_len] && name[name_len] != ','; name_len++) {}
+    } else name = "?";
+    int mapping_len = 0;
+    if (mapping)
+        while (mapping_len < 1024 && mapping[mapping_len]) mapping_len++;
+    hos_log("hid: controller \"%.128s\" connected (SDL)%s%s; guid=%s; mapping=%s; mapping-name=\"%.*s\"",
+            hos_sdl_pad_name(pad), motion ? ", with a gyroscope" : "", steam ? ", Steam Input's" : "",
+            guid, status, name_len, name);
+    /* hos_log has a 1024-byte message buffer: keep the capped mapping intact in labelled 512-byte parts. */
+    for (int at = 0; at < mapping_len; at += 512) {
+        const int n = mapping_len - at < 512 ? mapping_len - at : 512;
+        hos_log("hid: guid=%s; mapping-string[%d/%d]=\"%.*s\"%s", guid, at / 512 + 1, (mapping_len + 511) / 512,
+                n, mapping + at, at + n == mapping_len && mapping[mapping_len] ? " (truncated)" : "");
+    }
+    if (mapping) CALL(void (*)(void *), Free)(mapping);
+}
 int32_t hos_sdl_pad_id(void *pad) {
     return version == 3 ? (int32_t)CALL(uint32_t (*)(void *), GetGamepadID)(pad)
                         : CALL(int32_t (*)(void *), JoystickInstanceID)(CALL(void *(*)(void *), GetJoystick)(pad));
@@ -629,5 +693,12 @@ int hos_sdl_pad_sensor(void *pad, int type, float *data, int n) {
     if (!f.PadSensorData) return 0;
     return version == 3 ? CALL(_Bool (*)(void *, int, float *, int), PadSensorData)(pad, type, data, n)
                         : CALL(int (*)(void *, int, float *, int), PadSensorData)(pad, type, data, n) == 0;
+}
+/* (Steam's stand-in pads, host/steam_pads.h) whether the SDL tells them apart; a pad's USB vendor (0 unknown); its
+   Steam Input handle, not 0 for a Steam stand-in pad */
+int hos_sdl_knows_steam_pads(void) { return f.PadVendor && f.PadSteamHandle && f.SetHintPriority; }
+uint16_t hos_sdl_pad_vendor(void *pad) { return f.PadVendor ? CALL(uint16_t (*)(void *), PadVendor)(pad) : 0; }
+uint64_t hos_sdl_pad_steam_handle(void *pad) {
+    return f.PadSteamHandle ? CALL(uint64_t (*)(void *), PadSteamHandle)(pad) : 0;
 }
 #undef CALL

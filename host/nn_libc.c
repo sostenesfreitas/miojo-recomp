@@ -1,10 +1,13 @@
 #include "hos.h"
 #include <stdlib.h>
 #include <string.h>
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 
 static int guest_libc(void) {
     static int v = -1;
-    if (v < 0) v = getenv("HOS_GUEST_LIBC") != NULL;
+    if (v < 0) v = env_on("HOS_GUEST_LIBC");
     return v;
 }
 

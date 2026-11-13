@@ -47,7 +47,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="hookshot-log-batch-") as temp:
         c_file, exe = Path(temp) / "fixture.c", Path(temp) / "fixture.exe"
         c_file.write_text(fixture, encoding="utf-8")
-        cmd = [a.cc, "-std=gnu11", "-O1", "-Wall", "-Wextra", "-Werror", str(c_file), "-o", str(exe)]
+        cmd = [a.cc, "-std=gnu11", "-O1", "-Wall", "-Wextra", "-Werror", "-include", str(ROOT / "gpu/vk/compat/hookshot_env.h"),
+               str(c_file), "-o", str(exe)]   # (env_on, the switches' rule)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode:
             print(result.stdout + result.stderr)

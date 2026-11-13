@@ -1,10 +1,11 @@
-"""A BC texture can be rendered and cleared through a raw (one texel a block) view, sized in blocks, and OoT's noise pass runs
-where those views can be made.
+"""Render and clear BC textures in blocks. A 3D BC slice uses an uncompressed attachment and copies its blocks back.
 
 OoT renders the slices of two 64^3 BC4 noise volumes as RGBA16UI targets while an area loads (program 53509044401d78d2).
 BC images had no colour attachment usage, so those views were not made; the pass ran over no target at the texels' 64 x 64,
 and it was left out by default after it lost the device on first starts. The volumes stayed zero and the foliage's dithered
 LOD crossfade, which reads them, left trees bare at mid distance (issue 1151).
+Attaching a raw view of a 3D BC image still loses the device on Pascal even with the right extent. Drawing to a
+separate attachment preserves the pass and the compressed sampling format.
 
 python -I -B tests/test_bc_raw_targets.py
 """
@@ -32,12 +33,15 @@ class BcRawTargetTests(unittest.TestCase):
         cls.draw = (ROOT / "gpu" / "vk" / "vk_draw.cpp").read_text(encoding="utf-8")
         cls.xfer = (ROOT / "gpu" / "vk" / "vk_xfer.cpp").read_text(encoding="utf-8")
 
-    def test_bc_images_take_colour_attachment_usage_asked_with_the_3d_flags(self):
+    def test_bc_volumes_are_not_used_as_direct_colour_attachments(self):
         raw = self.tex.index("Raw storage views address one compressed block per texel")
         branch = self.tex[raw:self.tex.index("CUBE_COMPATIBLE_BIT", raw)]
-        self.assertIn("VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT", branch)
+        self.assertRegex(branch, r"if \(x\.type != VK_IMAGE_TYPE_3D && .*VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT")
         self.assertRegex(branch, r"x\.usage \|= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;")
-        self.assertIn("VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT | (dev.view_2d_of_3d", branch)
+        attachment = block(self.tex, "TextureAttachment texture_attachment(")
+        self.assertIn("ci.format = format;", attachment)
+        self.assertIn("ci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;", attachment)
+        self.assertIn("vi.image = attachment->image;", attachment)
 
     def test_a_refused_bc_image_is_made_again_without_the_attachment_usage_first(self):
         fallback = self.tex.index("// (a compressed image refused:")
@@ -60,6 +64,13 @@ class BcRawTargetTests(unittest.TestCase):
         self.assertIn("raw ? (lw + 3) / 4 : lw", clear)
         self.assertIn("ri.renderArea = {{0, 0}, {aw, ah}};", clear)
         self.assertIn("const VkClearRect rect{{{rx, ry}, {rw, rh}}, 0, 1};", clear)
+
+    def test_volume_attachments_are_loaded_before_rendering_and_stored_after(self):
+        begin = block(self.draw, "void begin_pass(")
+        self.assertLess(begin.index("copy_block_attachment("), begin.index("vkCmdBeginRendering("))
+        end = block(self.draw, "void end_pass(")
+        self.assertLess(end.index("vkCmdEndRendering("), end.index("copy_block_attachment("))
+        self.assertLess(end.index("copy_block_attachment("), end.index("probe_image("))
 
     def test_the_noise_pass_is_left_out_only_while_its_targets_have_no_view(self):
         line = re.search(r'const char\* list = .*RX_VK_SKIP_PROG.*;', self.draw).group(0)

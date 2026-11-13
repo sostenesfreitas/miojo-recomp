@@ -11,7 +11,7 @@ and the play profile (addresses and counts made on the development PC).
         llvm-mingw as scripts/make_setup_parts.py names it (its official release, SHA-256 checked) unpacked into <folder>;
         prints its folder. --name: only prints its name (a cache key)
     python -I scripts/release_parts.py package <out folder> --publish <dotnet publish folder> --setup <setup exe>
-                                       [--list <setup list>] [--python-packages <requirements>]
+                                       [--list <setup list>] [--python-packages <requirements>] [--cpm-add <CPM folder>]
         the package folder make_setup_parts.py splits: the published builder, the setup, LICENSE, the tracked gpu, host, nx2
         and scripts under tools/, the pipeline state list's sources (assets/pipeline_states/, which must be there and read),
         tools/work (the profile) and tools/third_party: the tracked files and, from the list's
@@ -19,7 +19,9 @@ and the play profile (addresses and counts made on the development PC).
         zbic.dll; rebuilt on the player's PC when their sources' stamps differ). Python, emsdk, CPM and wgpu-native are not
         in it: make_setup_parts.py --reuse takes their parts from the list. --python-packages: when the list's Python part
         lacks one of those pinned packages, the part goes into tools/python with them installed (by this Python's pip, for
-        the part's version), and make_setup_parts.py makes a new Python part of it
+        the part's version), and make_setup_parts.py makes a new Python part of it. --cpm-add: when the list's CPM part
+        lacks one of the folder's <package>/<version> (dav1d, scripts/windows/dav1d.sh), the part goes into tools/cpm with
+        them added, and make_setup_parts.py makes a new CPM part of it
 
 GitHub's API is read with $GH_TOKEN when it is set. Downloads are retried (GitHub answers 5xx now and then). Progress goes to
 stderr: what a command prints on stdout is its answer.
@@ -207,6 +209,8 @@ def package(a):
             print("%d prebuilt third_party files from %s" % (n, os.path.basename(tp)))
         if a.python_packages and python_packages(a.list, a.python_packages, tools) != 0:
             return 1
+        if a.cpm_add and cpm_add(a.list, a.cpm_add, tools) != 0:
+            return 1
     else:
         print("no setup list: the package has no play profile and no prebuilt third_party files")
     if state_list(tools) != 0:
@@ -265,6 +269,30 @@ def python_packages(list_path, requirements, tools):
     return 0
 
 
+def cpm_add(list_path, add, tools):
+    """The list's CPM part with the packages of the CPM folder `add` (<name>/<version>/...: dav1d for the AV1 movies,
+    scripts/windows/dav1d.sh) into tools/cpm, if it lacks one of them: make_setup_parts.py then makes a new CPM part of it"""
+    want = sorted((n, v) for n in os.listdir(add) if os.path.isdir(os.path.join(add, n))
+                  for v in os.listdir(os.path.join(add, n)) if os.path.isdir(os.path.join(add, n, v)))
+    if not want:
+        sys.exit("%s: no <package>/<version> folders" % add)
+    part = named_part(list_path, "cpm")
+    if not part:
+        sys.exit("no cpm part in %s" % list_path)
+    with zipfile.ZipFile(part) as z:
+        have = {tuple(m.split("/")[3:5]) for m in z.namelist() if m.startswith("HookshotBuilder/tools/cpm/")}
+    missing = [nv for nv in want if nv not in have]
+    if not missing:
+        print("the CPM part has %s" % ", ".join("/".join(nv) for nv in want))
+        return 0
+    cpm = os.path.join(tools, "cpm")
+    n = extract(part, "HookshotBuilder/tools/cpm/", cpm)
+    for name, version in missing:
+        shutil.copytree(os.path.join(add, name, version), os.path.join(cpm, name, version))
+    print("%d files of %s into %s, with %s" % (n, os.path.basename(part), cpm, ", ".join("/".join(nv) for nv in missing)))
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -284,6 +312,7 @@ def main():
     s.add_argument("--setup", required=True)
     s.add_argument("--list")
     s.add_argument("--python-packages")
+    s.add_argument("--cpm-add")
     a = p.parse_args()
     return {"previous": previous, "profile": profile, "llvm-mingw": llvm_mingw, "package": package}[a.cmd](a)
 

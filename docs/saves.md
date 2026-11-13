@@ -27,7 +27,7 @@ Only the folder they are in differs.
 | Program | Linux | Windows | How sure |
 |---|---|---|---|
 | Hookshot | `~/.local/share/hookshot/save/<user id>/` | `<game folder>\user\save\<user id>\` | Hookshot's source; Linux tested |
-| [Lichii](https://github.com/zortos293/Lichii) | `~/.local/share/eden/` + Eden's save path below | `%APPDATA%\eden\` + Eden's save path | Lichii's source; Linux tested, Windows not |
+| [Lichii](https://github.com/zortos293/Lichii) | `~/.local/share/lichii/` + Eden's save path below (before build 150: `~/.local/share/eden/`) | `%APPDATA%\lichii\` + Eden's save path (before build 150: `%APPDATA%\eden\`) | Lichii's source; the older folder tested on Linux, the new one and Windows not |
 | [Frizti (Fritchii)](https://github.com/Frizti/Lichii), a Lichii fork | (Windows only) | `%APPDATA%\eden\` + Eden's save path | its source (`fritchii-v5.5`); not tried |
 | [Orchid](https://github.com/MythosOfs/Orchid) | `~/.local/share/eden/` + Eden's save path | `%APPDATA%\eden\` + Eden's save path | its source; not tried |
 | [PokeDinner](https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork) | `~/.local/share/eden/` + Eden's save path | `%APPDATA%\eden\` + Eden's save path | its source; not tried |
@@ -38,8 +38,10 @@ Eden's save path, under that data folder: `nand/user/save/0000000000000000/<prof
 
 - `0400486024DEC000` is the game's title id. Eden's `<profile id>` is the Switch user profile you play with;
   Hookshot's `<user id>` and NX2navi's `<account>` are one folder with a 32-character hex name.
-- **Lichii, Frizti, Orchid and PokeDinner share one folder**, Eden's (`eden`): a save there is the same save in all of
-  them. Eglantine has its own (`eglantine`).
+- **Frizti, Orchid and PokeDinner share one folder**, Eden's (`eden`): a save there is the same save in all of
+  them. Eglantine has its own (`eglantine`), and so has Lichii (`lichii`) since its build 150 (2026-11-10), which can
+  import Eden's data into it. A Lichii from before that build shares Eden's folder: the script looks in `lichii` first
+  and uses `eden` when there is no save in it.
 - The emulators use a `user` folder beside the program (Linux: in the folder you start it from) instead of the paths
   above when that folder exists (their "portable" mode). Point the script at it with `--from`/`--to`.
 - Newer Eden code also reads a save from `nand/user/save/account/<profile>/0400486024DEC000/0/` when that folder

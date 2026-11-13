@@ -29,6 +29,9 @@ HEAD = r"""
 #include <mutex>
 #include <setjmp.h>
 #include <signal.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 using VkResult = int;
 using VkPipeline = uintptr_t;
 using VkPipelineCache = uintptr_t;
@@ -43,12 +46,14 @@ static int calls;
 static constexpr VkResult DRIVER_FAULT = -77;
 static int logged;
 void logf(const char *, ...) { ++logged; }
+static int faults_noted;
+void note_driver_fault() { ++faults_noted; }   /* (vk_draw.cpp: the preparation's watchdog counts them) */
 static void fault_now() { *(volatile int *)0x40 = 1; }
 VkResult vkCreateComputePipelines(uintptr_t device, VkPipelineCache cache, unsigned count,
                                   const VkComputePipelineCreateInfo *ci, const void *allocator, VkPipeline *out) {
     if (device != dev.device || cache != 0 || count != 1 || !ci || allocator || !out) return -1;
     ++calls;
-    if (mode == 1) fault_now();
+    if (mode == 1) { *out = 0xdead; fault_now(); }   /* (a handle written, then the fault: not a pipeline) */
     *out = 0xcafe;
     return VK_SUCCESS;
 }
@@ -56,7 +61,7 @@ VkResult vkCreateGraphicsPipelines(uintptr_t device, VkPipelineCache cache, unsi
                                    const VkGraphicsPipelineCreateInfo *ci, const void *allocator, VkPipeline *out) {
     if (device != dev.device || cache != 0 || count != 1 || !ci || allocator || !out) return -1;
     ++calls;
-    if (mode == 2) fault_now();
+    if (mode == 2) { *out = 0xdead; fault_now(); }
     *out = 0xbeef;
     return VK_SUCCESS;
 }
@@ -64,6 +69,9 @@ VkResult vkCreateGraphicsPipelines(uintptr_t device, VkPipelineCache cache, unsi
 
 MAIN = r"""
 int main(int argc, char **argv) {
+#ifdef __linux__
+    prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);   // (fault-outside ends it by SIGSEGV on purpose: without a core dump, a crash report)
+#endif
     const char *what = argc > 1 ? argv[1] : "ok";
     if (!std::strcmp(what, "fault-outside")) { fault_now(); std::printf("fail: the fault returned\n"); return 8; }
     VkComputePipelineCreateInfo ci;
@@ -81,7 +89,7 @@ int main(int argc, char **argv) {
         if (pl != VK_NULL_HANDLE) { std::printf("fail: a pipeline was published\n"); return 6; }
     } else if (!std::strcmp(what, "fault-graphics")) {
         mode = 2;
-        if (guarded_graphics(0, &gci, &gpl) != VK_ERROR_UNKNOWN) { std::printf("fail: the fault was not reported\n"); return 5; }
+        if (guarded_graphics(0, &gci, &gpl) != DRIVER_FAULT) { std::printf("fail: the fault was not reported\n"); return 5; }
         if (gpl != VK_NULL_HANDLE) { std::printf("fail: a pipeline was published\n"); return 6; }
     } else {
         std::printf("fail: unknown case %s\n", what);

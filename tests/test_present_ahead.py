@@ -2,8 +2,8 @@
 
 Each frame's copy into the window used to be submitted at its time, behind the game's next frame on the same queue, so the
 game's own frames reached the screen ~3 ms after the made ones: 5.7 and 11 ms apart instead of 8.3, and a VRR display's
-refresh changed every frame. Present ahead runs only for a paced set of two, only where the swapchain can hold two images
-acquired at once (an acquire past its spare images has to time out), and RX_VK_PRESENT_AHEAD=0 turns it off.
+refresh changed every frame. Present ahead runs for a paced set of two or more, only where the swapchain can hold all of its
+images acquired at once (an acquire past its spare images has to time out), and RX_VK_PRESENT_AHEAD=0 turns it off.
 
 python -I -B tests/test_present_ahead.py [--cxx g++]
 """
@@ -68,10 +68,13 @@ int main() {
     CHECK(!present_ahead_wanted(false, true, 2, 2));   /* RX_VK_PRESENT_AHEAD=0 */
     CHECK(!present_ahead_wanted(true, false, 2, 2));   /* frame pacing off: frames go out as they come */
     CHECK(!present_ahead_wanted(true, true, 1, 2));    /* no made frame */
-    CHECK(!present_ahead_wanted(true, true, 3, 4));    /* 3x and up: one at a time, as before */
+    CHECK(present_ahead_wanted(true, true, 3, 3));     /* 3x on a swapchain with three spare images (5 of min 2) */
+    CHECK(present_ahead_wanted(true, true, 4, 4));     /* 4x with four */
+    CHECK(!present_ahead_wanted(true, true, 3, 2));    /* 3x on a chain made for 2x (the menu changed after it): one at a time */
+    CHECK(!present_ahead_wanted(true, true, 4, 3));
     CHECK(!present_ahead_wanted(true, true, 2, 1));    /* one spare image: a second acquire would have to time out */
     CHECK(!present_ahead_wanted(true, true, 2, 0));
-    std::printf("PASS: present ahead only for a paced 2x set on a swapchain with two images to spare\n");
+    std::printf("PASS: present ahead for a paced set on a swapchain with a spare image for each of its frames\n");
 }
 '''
     with tempfile.TemporaryDirectory(prefix="present-ahead-") as tmp:

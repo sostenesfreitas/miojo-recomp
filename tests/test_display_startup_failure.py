@@ -6,6 +6,9 @@ import shutil
 import subprocess
 import tempfile
 
+# (env_on, the switches' rule, before the code cut out of the sources: gpu/vk/compat/hookshot_env.h)
+ENV_ON_H = str(Path(__file__).resolve().parents[1] / "gpu" / "vk" / "compat" / "hookshot_env.h")
+
 RUN_ALL_ARGS = ["--cxx", "{cxx}"]
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,7 +48,9 @@ def main():
     loop = function(display, "void hos_display_loop(void)")
     loop = loop[:loop.index("    vk_window.window = window;")] + "    ++visible_window_started;\n}\n"
     app_main = function(host, "int main(int argc, char **argv)").replace("int main(", "int app_main(", 1)
-    actual = "\n\n".join([function(display, "int hos_display_init(void)"),
+    # Include the real title helper used by both initialization and window creation.
+    actual = "\n\n".join([function(display, "static const char *window_title("),
+                             function(display, "int hos_display_init(void)"),
                              function(display, "void hos_display_start(void)"), loop, app_main])
     flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
     env = dict(os.environ)
@@ -54,7 +59,7 @@ def main():
         tmp = Path(folder)
         (tmp / "display_startup_actual.inc").write_text(actual + "\n", encoding="utf-8")
         exe = tmp / ("display_start.exe" if os.name == "nt" else "display_start")
-        command = [cxx, "-std=c++20", "-O0", "-Wall", "-Wextra", "-Werror", "-D_CRT_SECURE_NO_WARNINGS",
+        command = [cxx, "-std=c++20", "-include", ENV_ON_H, "-O0", "-Wall", "-Wextra", "-Werror", "-D_CRT_SECURE_NO_WARNINGS",
                    "-I" + str(tmp), str(ROOT / "tests/display_startup_failure_test.cpp"), "-o", str(exe)]
         result = subprocess.run(command, cwd=tmp, env=env, capture_output=True, text=True, timeout=60,
                                 creationflags=flags)

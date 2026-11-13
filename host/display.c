@@ -20,6 +20,9 @@
 void rx_close_asked(void);   /* host/rx_backend.c */
 #include "../gpu/vk/vk_api.h"
 #include "display_pointer.h"
+#ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
+#include "../gpu/vk/compat/hookshot_env.h"
+#endif
 
 void hos_relaunch_ask(void);        /* (host/hos_relaunch.c) */
 void hos_window_closed_exit(void);
@@ -137,7 +140,7 @@ static void set_fullscreen(HWND w, int on) {
 }
 
 static void dpi_aware_thread(void) {
-    if (getenv("HOS_DPI_UNAWARE")) return;
+    if (env_on("HOS_DPI_UNAWARE")) return;
     typedef void *(WINAPI * SetCtx)(void *);
     SetCtx set = (SetCtx)(void *)GetProcAddress(GetModuleHandleA("user32.dll"), "SetThreadDpiAwarenessContext");
     if (set) set((void *)(intptr_t)-4);
@@ -210,8 +213,10 @@ static void menus_mouse(HWND w, int insert_open, int game_open) {
     hos_pointer_reset(&game_pointer);
     pointer_update(w, 0, 0);
 }
-static void menu_mouse(HWND w, int open) {
-    if (open != menu_open) menus_mouse(w, open, game_menu_open);
+static void menu_mouse(HWND w, int open, int opened_by_escape) {
+    if (open == menu_open) return;
+    if (!opened_by_escape) esc_had_capture = 0;
+    menus_mouse(w, open, game_menu_open);
 }
 
 /* (host/oot_menu.c, the game's thread) one of the game's menus ran this frame */
@@ -301,7 +306,7 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         pointer_update(w, 0, 0);
         return 0;
     case WM_APP + 8:   /* (the Insert menu opened or closed: gpu/vk/vk_menu.cpp) */
-        menu_mouse(w, (int)wp);
+        menu_mouse(w, (int)wp, wp && lp);
         return 0;
     case WM_APP + 10:   /* (a game menu opened: hos_mouse_game_menu) */
         if (!game_menu_open) menus_mouse(w, menu_open, 1);
@@ -391,6 +396,7 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_KILLFOCUS:
     case WM_CANCELMODE:
+        esc_had_capture = 0;
         mouse_capture(w, 0);
         hos_pointer_reset(&pointer);
         hos_pointer_reset(&game_pointer);
@@ -463,7 +469,7 @@ static DWORD WINAPI display_main(void *p) {
     }
     RECT r = {0, 0, win_w, win_h};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    const int noactivate = getenv("HOS_WINDOW_NOACTIVATE") != NULL;
+    const int noactivate = env_on("HOS_WINDOW_NOACTIVATE");
     hwnd = CreateWindowA("Hookshot", HOS_GAME_TITLE, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
                          CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, NULL, NULL, wc.hInstance, NULL);
     if (!hwnd) display_start_failed("CreateWindowA");
@@ -503,7 +509,7 @@ void hos_renderer_wait(void) {
 }
 
 void hos_display_start(void) {
-    if (getenv("HOS_HEADLESS")) {   /* no window: the renderer still draws, offscreen (screenshots, frame dumps) */
+    if (env_on("HOS_HEADLESS")) {   /* no window: the renderer still draws, offscreen (screenshots, frame dumps) */
         rx_start(NULL);
         return;
     }

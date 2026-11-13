@@ -1,6 +1,9 @@
 """A build on a hard drive warns that an SSD is much faster and goes ahead: nx2/disk.py's answer for a drive, the Linux sysfs
 walk behind it (a partition, and a device-mapper disk through its slaves), and make_game.py's one warning line.
 
+A folder on Btrfs has a device number no disk has (one of Btrfs's own making, a subvolume), so the walk had nowhere to start
+and a Btrfs hard drive never warned: MountTests keep its disks found through the mount, on a copy of what /proc and /sys say.
+
 python -I -B tests/test_disk_warning.py
 """
 import contextlib
@@ -53,6 +56,12 @@ class DriveTypeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="hookshot-disk-") as tmp:
             self.assertIsNone(disk._device_rotational(os.path.join(tmp, "nowhere")))
 
+    def test_only_a_block_device_file_has_a_node(self):
+        with tempfile.TemporaryDirectory(prefix="hookshot-disk-") as tmp:
+            put(os.path.join(tmp, "tmpfs"), "")   # (a mount's source is a name as often as a file: "tmpfs", "tank/games")
+            self.assertIsNone(disk._block_node(os.path.join(tmp, "tmpfs")))
+            self.assertIsNone(disk._block_node(os.path.join(tmp, "nowhere")))
+
     def test_spinning_picks_the_system_reader(self):
         with tempfile.TemporaryDirectory(prefix="hookshot-disk-") as tmp:
             with mock.patch.object(disk.os, "name", "nt"), \
@@ -71,6 +80,76 @@ class DriveTypeTests(unittest.TestCase):
     def test_a_folder_made_later_is_measured_at_its_existing_parent(self):
         with tempfile.TemporaryDirectory(prefix="hookshot-disk-") as tmp:
             self.assertEqual(disk.existing_parent(os.path.join(tmp, "Games", "Hookshot")), os.path.abspath(tmp))
+
+
+@unittest.skipUnless(hasattr(os, "major"), "device numbers as Linux has them")
+class MountTests(unittest.TestCase):
+    """A PC with its system on an SSD (ext4) and a Btrfs mounted at "My Games", as /proc/self/mountinfo and /sys show them"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="hookshot-disk-")
+        self.addCleanup(tmp.cleanup)
+        self.tmp = os.path.realpath(tmp.name)
+        self.sysfs = os.path.join(self.tmp, "sys")
+        self.games = os.path.join(self.tmp, "My Games")
+        os.makedirs(os.path.join(self.games, "Hookshot"))
+        os.makedirs(os.path.join(self.sysfs, "dev", "block"))   # (no node in it for the folders' own device number)
+        self.nodes = {}
+        patch = mock.patch.object(disk, "_block_node", side_effect=lambda device, sysfs="/sys": self.nodes.get(device))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def disk(self, name, rotational, part):
+        """A disk and one partition of it in the copy of sysfs; /dev/<part> is its device file"""
+        folder = os.path.join(self.sysfs, "devices", "pci", "block", name)
+        put(os.path.join(folder, "queue", "rotational"), "%d\n" % rotational)
+        os.makedirs(os.path.join(folder, part))
+        self.nodes["/dev/" + part] = os.path.join(folder, part)
+
+    def mounts(self, *lines):
+        """mountinfo with the system's own mount first; a line is (mount point, type, source)"""
+        path = os.path.join(self.tmp, "mountinfo")
+        rows = [("/", "ext4", "/dev/nvme0n1p2")] + list(lines)
+        text = "".join("%d 1 0:%d / %s rw,relatime shared:%d - %s %s rw\n" % (30 + i, 30 + i, point.replace(" ", "\\040"), i, kind, source)
+                       for i, (point, kind, source) in enumerate(rows))
+        Path(path).write_text(text, encoding="utf-8")
+        return path
+
+    def spinning(self, folder, mountinfo):
+        return disk._linux_spinning(folder, mountinfo, self.sysfs)
+
+    def test_a_btrfs_hard_drive_is_found_through_its_mount(self):
+        self.disk("nvme0n1", 0, "nvme0n1p2")
+        self.disk("sdb", 1, "sdb1")
+        mountinfo = self.mounts((self.games, "btrfs", "/dev/sdb1"))
+        self.assertIs(self.spinning(os.path.join(self.games, "Hookshot"), mountinfo), True)
+        self.assertIs(self.spinning(self.games, mountinfo), True)   # (the mount point itself, its space written \040)
+        self.assertIs(self.spinning(self.tmp, mountinfo), False)    # (beside it: the system's SSD)
+
+    def test_the_mount_on_top_is_the_one_read(self):
+        self.disk("nvme0n1", 0, "nvme0n1p2")
+        self.disk("sdb", 1, "sdb1")
+        mountinfo = self.mounts((self.games, "btrfs", "/dev/sdb1"), (self.games, "btrfs", "/dev/nvme0n1p2"))
+        self.assertIs(self.spinning(os.path.join(self.games, "Hookshot"), mountinfo), False)
+
+    def test_a_btrfs_over_two_disks_reads_both(self):
+        self.disk("nvme0n1", 0, "nvme0n1p2")
+        self.disk("nvme1n1", 0, "nvme1n1p1")
+        self.disk("sdb", 1, "sdb1")
+        devices = os.path.join(self.sysfs, "fs", "btrfs", "0f5c2a1e-6d0b-4c57-9d57-1f6f3a0c9b11", "devices")
+        os.makedirs(devices)
+        try:   # (as sysfs has it: a link a disk of the file system, to the partition's folder)
+            for part in ("nvme1n1p1", "sdb1"):
+                os.symlink(self.nodes["/dev/" + part], os.path.join(devices, part), target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("this PC does not let a test make the symlink sysfs uses")
+        mountinfo = self.mounts((self.games, "btrfs", "/dev/nvme1n1p1"))   # (the mount names the first disk only)
+        self.assertIs(self.spinning(os.path.join(self.games, "Hookshot"), mountinfo), True)
+
+    def test_a_mount_from_no_disk_is_not_guessed(self):
+        self.disk("nvme0n1", 0, "nvme0n1p2")
+        mountinfo = self.mounts((self.games, "zfs", "tank/games"))
+        self.assertIsNone(self.spinning(os.path.join(self.games, "Hookshot"), mountinfo))
 
 
 class WarningTests(unittest.TestCase):

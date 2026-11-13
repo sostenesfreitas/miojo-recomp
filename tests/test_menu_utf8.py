@@ -77,7 +77,7 @@ int main() {
     CHECK(key2.size() <= kMicNameKept && whole(key2) && key2.size() == 59);
     CHECK(mic_key(nullptr).empty() && mic_key("USB Mic") == "USB Mic");
     // (a device's name with a line break would have added lines to hookshot_options.ini)
-    CHECK(mic_key("Mic\noutput_res=2\r") == "Mic output_res=2 ");
+    CHECK(mic_key("Mic\noutput_res=2\r") == "Mic output_res=2");   // (the line break a space, the end trimmed)
     std::printf("PASS: the menu's text cut and slid by whole UTF-8 characters\n");
 }
 '''

@@ -23,11 +23,17 @@ for module in build-f2i/modules/*.spv; do
 done
 ```
 
+It also takes literal inputs through F2I.S32.TRUNC from F32 and I2FP.F32.U32.RZ and
+evaluates the IR the production passes leave (a small evaluator in the fixture): F2I
+must saturate 2^31, 2^32, the largest float and +inf to INT32_MAX without handing
+OpConvertFToS a value out of its range, and I2F must round toward zero (0xffffffff
+to 0x4f7fffff), not to nearest as OpConvertUToF does.
+
 The unmodified `232eecb` lowerer fails the first authored immediate case with
 `unsupported native opcode`. The fixture tests the conversion path and its IR
 controls; SPIR-V validation does not establish numerical results on a GPU or a
-fix for any particular visible game symptom. In particular, it does not change
-or independently certify existing register-path saturation at numeric limits.
+fix for any particular visible game symptom. The value checks are of the IR as
+SPIR-V defines its instructions, not of a driver's results.
 
 Encoding reference: [Mesa NAK, pinned sm70_encode.rs](https://chromium.googlesource.com/external/gitlab.freedesktop.org/mesa/mesa/+/b1fe47e94409d81924c8663f58fac97e66ab4527/src/nouveau/compiler/nak/sm70_encode.rs#2134)
 (`OpF2I`, `encode_alu_base` and `encode_alu_imm`). The `0x105` base plus immediate

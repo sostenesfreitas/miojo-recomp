@@ -1,39 +1,97 @@
 #version 450
-// (hookshot) HDR10 out (the Insert menu's HDR): the game's finished picture, SDR and sRGB-encoded, to PQ in Rec. 2020 for an HDR10
-// swapchain. White in the picture is shown at the paper white (nits); its highlights are expanded towards the peak brightness, the
-// brightest part of the picture reaching the peak, the rest at the paper white as the game made it. Scaled from its crop as the blit was.
+// (hookshot) HDR10 out (the Insert menu's HDR): the game's picture to PQ in Rec. 2020 for an HDR10 swapchain, graded by the HDR
+// contrast row on the way. Scaled from its crop as the blit was.
+//  mode 0 (Expanded): the game's finished picture, SDR and sRGB-encoded. White in it is shown at the paper white (nits); its
+//         highlights are expanded towards the peak brightness, the brightest part of the picture reaching the peak, the rest at
+//         the paper white as the game made it.
+//  mode 1 (Native): the game's own HDR10 picture (PQ, Rec. 2020), decoded to light. At contrast and exposure 1 its PQ codes are
+//         written as they are, with no decode and encode in between (the pass still runs, as it reads the picture through the
+//         view in the game's format: vk_replay.cpp present_image).
+// Then, for both, the contrast (and an exposure factor) as the RenoDX HDR mods grade it: on the luminance relative to the paper
+// white, around mid grey 0.18 of it, the hue kept. A contrast above 1 lifts the picture's top, the peak, far past it (150%: an
+// 800-nit top to about 3500 nits), and a plain limit there cut every highlight flat, so above a knee the graded light eases
+// back onto the peak instead (shoulder). With the top its own target the shoulder is nothing at 100%, so the grade moves on
+// smoothly from the picture as it is.
+//  Expanded: its white is expanded to the peak, and last the display's peak is the limit (by luminance, the hue kept).
+//  Native: the peak is the one the game is told (the HDR peak row, Hookshot's answer to its display query), which its own
+//         light stays under; the grade is fitted under it. Light the game puts above it is not limited by the pass, as at 100%.
+// At contrast and exposure 1 nothing of it runs. Then PQ again.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D src;
 layout(binding = 1, rgb10_a2) uniform writeonly image2D dst;
 layout(push_constant) uniform P {
-    vec4 uv;       // the source's crop: x0, y0, x1, y1 (0 to 1)
-    float white;   // paper white, nits
-    float peak;    // peak brightness, nits
-    float knee;    // where the highlights start to be expanded (0 to 1 of the picture's white)
-    float pad;
+    vec4 uv;          // the source's crop: x0, y0, x1, y1 (0 to 1)
+    float white;      // paper white, nits
+    float peak;       // peak brightness, nits
+    float knee;       // (mode 0) where the highlights start to be expanded (0 to 1 of the picture's white)
+    float mode;       // 0 the SDR picture expanded, 1 the game's PQ picture
+    float contrast;   // around mid grey: 1 none
+    float exposure;   // a factor on the light: 1 none
+    float pad0, pad1;
 } pc;
+const float m1 = 0.1593017578125, m2 = 78.84375, c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+const vec3 Y2020 = vec3(0.2627, 0.6780, 0.0593);
 // (a 2.2 power, not sRGB's piecewise curve: an SDR display shows the game's picture with about 2.2, and the piecewise curve's
 // linear toe lifts the shadows above that, which read as a washed-out picture on an HDR display)
 vec3 srgb_to_linear(vec3 c) {
     return pow(c, vec3(2.2));
 }
 vec3 pq(vec3 nits) {
-    const float m1 = 0.1593017578125, m2 = 78.84375, c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
     const vec3 l = pow(clamp(nits / 10000.0, 0.0, 1.0), vec3(m1));
     return pow((c1 + c2 * l) / (1.0 + c3 * l), vec3(m2));
+}
+vec3 pq_decode(vec3 e) {
+    const vec3 p = pow(clamp(e, 0.0, 1.0), vec3(1.0 / m2));
+    return 10000.0 * pow(max(p - c1, 0.0) / (c2 - c3 * p), vec3(1.0 / m1));
+}
+/// RenoDX's contrast: light relative to the paper white, around mid grey
+float grade(float y) { return pow(max(y * pc.exposure / 0.18, 0.0), pc.contrast) * 0.18; }
+/// Above the knee k, graded light [k, m] onto [k, p]: m the picture's highest light graded, p the peak, both relative to the
+/// paper white. The curve meets the graded light at k with its slope and reaches p at m (Reinhard's rational shape,
+/// t (1 + b) / (t + b), rising for any slope)
+float shoulder(float x, float m, float p) {
+    const float k = min(1.0, 0.5 * min(m, p));
+    const float s = (m - k) / (p - k);   // (its slope at k in t: above 1 it compresses, below 1 it expands)
+    if (x <= k || abs(s - 1.0) < 1e-4) return x;
+    const float t = (x - k) / (m - k);
+    if (t >= 1.0) return p + (x - m);    // (past the picture's top: rising still; Expanded's peak limit after it)
+    const float b = 1.0 / (s - 1.0);     // (s > 1: b > 0; s < 1: b < -1, so t + b is never 0 for t < 1)
+    return k + (p - k) * t * (1.0 + b) / (t + b);
 }
 void main() {
     const ivec2 size = imageSize(dst);
     const ivec2 at = ivec2(gl_GlobalInvocationID.xy);
     if (at.x >= size.x || at.y >= size.y) return;
     const vec2 t = (vec2(at) + 0.5) / vec2(size);
-    const vec3 lin = srgb_to_linear(clamp(textureLod(src, mix(pc.uv.xy, pc.uv.zw, t), 0.0).rgb, 0.0, 1.0));
-    // (the highlights: past the knee the light rises with the square of how far it is past it, to the peak at the picture's white)
-    const float y = dot(lin, vec3(0.2126, 0.7152, 0.0722));
-    const float over = clamp((y - pc.knee) / max(1.0 - pc.knee, 1e-3), 0.0, 1.0);
-    const float gain = 1.0 + (pc.peak / pc.white - 1.0) * over * over;
-    // (Rec. 709 primaries to Rec. 2020's, ITU-R BT.2087)
-    const mat3 to2020 = mat3(0.6274, 0.0691, 0.0164, 0.3293, 0.9195, 0.0880, 0.0433, 0.0114, 0.8956);
-    const vec3 nits = max(to2020 * lin, vec3(0.0)) * pc.white * gain;
-    imageStore(dst, at, vec4(pq(nits), 1.0));
+    const vec3 c = textureLod(src, mix(pc.uv.xy, pc.uv.zw, t), 0.0).rgb;
+    if (pc.mode >= 0.5 && pc.contrast == 1.0 && pc.exposure == 1.0) {   // (Native, ungraded: the game's codes as they are)
+        imageStore(dst, at, vec4(c, 1.0));
+        return;
+    }
+    vec3 nits;
+    if (pc.mode < 0.5) {
+        const vec3 lin = srgb_to_linear(clamp(c, 0.0, 1.0));
+        // (the highlights: past the knee the light rises with the square of how far it is past it, to the peak at the picture's
+        // white)
+        const float y = dot(lin, vec3(0.2126, 0.7152, 0.0722));
+        const float over = clamp((y - pc.knee) / max(1.0 - pc.knee, 1e-3), 0.0, 1.0);
+        const float gain = 1.0 + (pc.peak / pc.white - 1.0) * over * over;
+        // (Rec. 709 primaries to Rec. 2020's, ITU-R BT.2087)
+        const mat3 to2020 = mat3(0.6274, 0.0691, 0.0164, 0.3293, 0.9195, 0.0880, 0.0433, 0.0114, 0.8956);
+        nits = max(to2020 * lin, vec3(0.0)) * pc.white * gain;
+    } else {
+        nits = pq_decode(c);
+    }
+    // (the contrast row: the luminance graded, its highlights eased back onto the peak, the colour scaled with it. For Native the
+    // peak the game is told: the grade fitted under it, the game's light above it rising on past it)
+    const float y = dot(nits, Y2020) / pc.white;
+    if (y > 1e-6 && (pc.contrast != 1.0 || pc.exposure != 1.0)) {
+        const float top = pc.peak / pc.white;
+        nits *= shoulder(grade(y), grade(top), top) / y;
+    }
+    // (Expanded: the display's peak, past it the light scaled down as a whole, the hue kept. Native is not limited by the pass:
+    // light the game puts above the peak is left as at 100%)
+    const float yn = dot(nits, Y2020);
+    if (pc.mode < 0.5 && yn > pc.peak) nits *= pc.peak / yn;
+    imageStore(dst, at, vec4(pq(max(nits, vec3(0.0))), 1.0));
 }

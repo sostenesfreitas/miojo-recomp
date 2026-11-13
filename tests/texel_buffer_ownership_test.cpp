@@ -56,6 +56,7 @@ struct Pool {
 Pool first_pool{0x1000, 0x2000, 0, 0, handle<VkBuffer>(1), {}, {}, 0x100000};
 Pool second_pool{0x2000, 0x3000, 0, 0, handle<VkBuffer>(2), {}, {}, 0x200000};
 std::mutex pools_mu;
+void note_in_place_read(bool = false) {}   // (the readback's part wait: tests/test_readback_part.py)
 Pool* pool_of(uint64_t guest, uint64_t) {
     lookups++;
     return guest < second_pool.lo ? &first_pool : &second_pool;
@@ -82,9 +83,11 @@ std::deque<DeadMirror> dead_mirrors;
 /* DEAD IMPORT */
 std::deque<DeadImport> dead_imports;
 uint64_t st_retired_imports_freed = 0, st_retired_import_bytes_freed = 0;
+uint64_t dead_import_bytes = 0;   // Retired allocations still count until their GPU work completes.
 std::deque<std::map<uint64_t, Pool>::node_type> evicted_pools;
 void logf(const char*, ...) {}
 const char* getenv(const char*) { return nullptr; }   // (unrelated diagnostic toggle in reap_mirrors)
+bool env_on(const char* name) { const char* v = getenv(name); return v && !env_value_off(v); }   // (the switches through the stand-in)
 VkDeviceAddress vkGetBufferDeviceAddress(VkDevice, const VkBufferDeviceAddressInfo*) { return 0; }
 void destroy_buffer(VkBuffer, VmaAllocation) {}
 void vkDestroyBuffer(VkDevice, VkBuffer buffer, const VkAllocationCallbacks*) {
@@ -187,9 +190,12 @@ void run(const std::string& test) {
             create_result = VK_SUCCESS; mapping = second_pool.lo; assert(get(tex)); assert(creates == 3);
         } else if (test == "retirement" || test == "reuse-handle") {
             dead_imports.push_back({first_pool.buffer, {}, 4, 64, {}});
+            dead_import_bytes = 64;
             mem_completed = 3; reap_mirrors(); assert(live.count(first) && destroyed_buffers == 0);
+            assert(dead_import_bytes == 64);
             mem_completed = 4; reap_mirrors();
             assert(live.empty() && destroyed_buffers == 1 && destroyed_views == 1);
+            assert(dead_import_bytes == 0);
             assert(destruction_order == std::vector<char>({'V', 'B'}));
             if (test == "reuse-handle") { auto next = get(tex); assert(next && next != first && creates == 2); }
         } else if (test == "eviction") {

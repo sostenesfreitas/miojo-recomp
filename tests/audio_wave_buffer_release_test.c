@@ -24,6 +24,7 @@ static void au_lock(void) { CHECK(lock_depth++ == 0); }
 static void au_unlock(void) { CHECK(--lock_depth == 0); }
 static const char *fixture_getenv(const char *name) { (void)name; return NULL; }
 #define getenv fixture_getenv
+#define env_on(name) (getenv(name) && !env_value_off(getenv(name)))   /* (the switches read through the stand-in above) */
 
 #include "actual_audio_wave_buffers.inc"
 
