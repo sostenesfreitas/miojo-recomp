@@ -1157,7 +1157,7 @@ bool rt_note_shadow_draw(const RtDraw* k, bool skinned, uint64_t camera, uint64_
 
 bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h) {
     Rt& r = rt();
-    if (!r.ok || (opts.ao <= 0 && opts.ambient <= 0 && !opts.pt) || !out || !w || !h) return false;
+    if (!r.ok || (opts.ao <= 0 && opts.ambient <= 0) || !out || !w || !h) return false;
     static const bool off = getenv("RX_VK_RT_AO_POST") != nullptr;   // (a test: the multiply over the picture, as it was)
     if (off) return false;
     std::lock_guard lk(r.mu);
@@ -1169,7 +1169,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     // a flash of light over the whole picture)
     if (!r.top.as || !r.prev_depth || now - r.prev_frame > 2 || !make_atlas(r, cmd)) {
         static int told = 0;   // (a test: why a frame went to the game's own)
-        if ((getenv("RX_VK_RT_AO_WHY") && told++ < 400) || (opts.pt && r.prev_frame && told++ < 40))   // (with Path tracing such a frame is a flash: the log says why)
+        if (getenv("RX_VK_RT_AO_WHY") && told++ < 400)
             logf("vk: rt: ao-why f%llu top %d depth %d age %lld", (unsigned long long)now, r.top.as ? 1 : 0, r.prev_depth ? 1 : 0, (long long)(now - r.prev_frame));
         return false;
     }
@@ -1207,7 +1207,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
         int32_t rays;
         float skin;
         float ambient, sky_reach;
-        float physical, pad[2];   // (to_sun is a vec4 in the block: at a multiple of 16)
+        float pad[3];   // (to_sun is a vec4 in the block: at a multiple of 16)
         float to_sun[4];
         uint64_t light_list;
         int32_t light_count;
@@ -1221,8 +1221,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     pc.size[0] = (int32_t)w, pc.size[1] = (int32_t)h;
     pc.strength = (float)opts.ao / 50.0f;   // (the row's 50%: a ray's hit counts whole)
     static const float sky_reach = getenv("RX_VK_RT_AMBIENT_FAR") ? (float)atof(getenv("RX_VK_RT_AMBIENT_FAR")) : 40.0f;
-    pc.ambient = opts.pt ? 1.0f : std::clamp((float)opts.ambient / 100.0f, 0.0f, 1.0f), pc.sky_reach = sky_reach;
-    pc.physical = opts.pt ? 1.0f : 0.0f;   // (the Path tracing row: rt_ao.comp)
+    pc.ambient = std::clamp((float)opts.ambient / 100.0f, 0.0f, 1.0f), pc.sky_reach = sky_reach;
     if (pc.ambient > 0.0f) {   // (the game's sun, as rt_frame reads it for the bounce: the lit draws' frame buffer at 0x40)
         float f[7];   // (its colour too, at 0x50: a third of what it gives a surface stands for the sky's light)
         if (memory_read_as_submitted(r.local_frame_buffer.load(std::memory_order_relaxed) + 0x40, f, sizeof f)) {
@@ -1231,18 +1230,14 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                 for (int i = 0; i < 3; i++) pc.to_sun[i] = -f[i] / len;
                 pc.to_sun[3] = 1.0f;
                 // (the lamps are weighed against the sky. A place with no sun, a cave, has none to weigh by: the last
-                // place's stands, so its lamps still light its walls; and with Path tracing no sun is asked for there)
+                // place's stood, see below)
                 static float sky_level = 0.0f;
                 const float sun = (0.2126f * f[4] + 0.7152f * f[5] + 0.0722f * f[6]) / 3.14159265f;
                 // (Goron City's cave gives a sun of 0 0 0, read in the log: no sky level to weigh its lamps by, and they
                 // and the fairy's light went out of the traced ambient. A quarter stands there, about what the open
                 // air has: 0.19 at night in Kakariko, 0.33 by day on the trail.
                 // ponytail: a guess; the cave's own ambient level in the game's buffers for it)
-                if (sun > 1e-4f && sun < 1e4f) sky_level = sun / 3.0f;
-                else {
-                    sky_level = 0.25f;
-                    if (opts.pt) pc.to_sun[3] = 0.0f;
-                }
+                sky_level = sun > 1e-4f && sun < 1e4f ? sun / 3.0f : 0.25f;
                 // (the sun's colour here is as the picture has it, the exposure in already: 0.98 over pi by day with an
                 // exposure of 0.001, read in the log. So not by the exposure again, as it was for a build: that weighed
                 // the lamps 64 times their light at night)
@@ -1250,7 +1245,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                     static float told_sun = -1.0f, told_exposure = -1.0f;
                     static int told = 0;
                     const auto far_from = [](float a, float b) { return std::fabs(a - b) > 0.25f * std::max(std::fabs(a), std::fabs(b)); };
-                    if (opts.pt && told < 60 && (far_from(sun, told_sun) || far_from(r.lamps_exposure, told_exposure)))
+                    if (getenv("RX_VK_RT_AO_WHY") && told < 60 && (far_from(sun, told_sun) || far_from(r.lamps_exposure, told_exposure)))
                         told++, told_sun = sun, told_exposure = r.lamps_exposure,
                         logf("vk: rt: light f%llu: sun %.4g %.4g %.4g (over pi %.4g), exposure %.4g, sky kept %.4g, %d lamps", (unsigned long long)now,
                              f[4], f[5], f[6], sun, r.lamps_exposure, sky_level, r.lamps_count);
@@ -1259,7 +1254,7 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                     static bool had = false;
                     static int told_none = 0;
                     const bool has = now - r.lamps_frame <= 2 && r.lamps_count > 0;
-                    if (opts.pt && had != has && told_none++ < 60)
+                    if (getenv("RX_VK_RT_AO_WHY") && had != has && told_none++ < 60)
                         logf("vk: rt: lamps f%llu: %s (the list's frame %llu, %d in it)", (unsigned long long)now, has ? "back" : "none",
                              (unsigned long long)r.lamps_frame, r.lamps_count);
                     had = has;
@@ -1585,7 +1580,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
         {   // (a line when the scene's instances change by a fifth in one frame: a frame with a wall out is a flash of sky)
             static uint32_t last_n = 0;
             static int told_n = 0;
-            if (opts.pt && told_n < 80 && last_n > 20 && (n * 10 < last_n * 8 || n * 8 > last_n * 10))
+            if (getenv("RX_VK_RT_AO_WHY") && told_n < 80 && last_n > 20 && (n * 10 < last_n * 8 || n * 8 > last_n * 10))
                 told_n++, logf("vk: rt: instances f%llu: %u after %u, missing %u", (unsigned long long)now, n, last_n, missing);
             last_n = n;
         }
@@ -1671,7 +1666,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     pc.ao = ao, pc.radius = radius, pc.seed = seed, pc.rays = ao > 0.0f || gi > 0.0f || debug ? rays : 0;
     static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     if (!dlss_math::reprojection(view_proj, identity, pc.inv)) return;   // (identity * inverse(view_proj))
-    if (lamps && (lights || gi > 0.0f || opts.ambient > 0 || opts.pt) && (r.light_list.buffer || make_buf(r.light_list, kRing * kLights * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true))) {
+    if (lamps && (lights || gi > 0.0f || opts.ambient > 0) && (r.light_list.buffer || make_buf(r.light_list, kRing * kLights * 80, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true))) {
         // (the game's lights, 96 bytes each, as its lighting shader reads them: the type at 16 (1 a spot, 100 a point
         // light), the colour at 32 with one over its reach after it, the place at 48 with a spot's cone's inner cosine
         // after it, the falloff's constant, linear and square terms at 64 with the cone's outer cosine after them, a
