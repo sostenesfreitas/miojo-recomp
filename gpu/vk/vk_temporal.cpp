@@ -133,6 +133,8 @@ struct Camera {
     uint32_t width = 0, height = 0;
     Texture* depth = nullptr;
     uint64_t depth_gen = 0;   // (texture_destroy_generation when taken: a depth texture destroyed since is not used)
+    uint64_t depth_at = 0;    // (the depth texture's address and creation number, for texture_alive)
+    uint32_t depth_id = 0;
     uint64_t frame = 0;       // (texture_frame_no when taken)
     bool valid = false;
 };
@@ -790,6 +792,7 @@ void temporal_note_scene_draw(const Texture* color0, uint32_t width, uint32_t he
     k.fov_y = plain ? 2.0f * std::atan(1.0f / p11) : 0.0f;
     k.proj[0] = c[0x70 / 4], k.proj[1] = p11, k.proj[2] = p22, k.proj[3] = p23;
     k.width = width, k.height = height, k.depth = depth, k.depth_gen = texture_destroy_generation(), k.frame = now;
+    k.depth_at = depth ? depth->gpu : 0, k.depth_id = depth ? depth->id : 0;
     k.valid = true;
 }
 
@@ -1012,7 +1015,12 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     s.asked = texture_frame_no(), s.holding = true;   // (not after a failure: what it holds is let go, temporal_idle)
     if (!in || !in_view || !out || !out_view) return fail("no input or output view");
     if (!cam.valid || texture_frame_no() - cam.frame > 1) return fail("no scene camera this frame");
-    if (cam.depth_gen != texture_destroy_generation()) return fail("the scene depth may be gone");
+    // (any texture destroyed since the camera was noted used to send the frame to the game's own upscale: the game lets
+    // textures go every few frames while new ones stream in (a turn of the camera in Kakariko's potion shop), and each
+    // was a frame without the temporal upscaler, and with Ray tracing a frame without its light shadows and bounce, then
+    // the game's own occlusion: shadows that flickered. Now only when the depth texture itself is gone)
+    if (cam.depth_gen != texture_destroy_generation() && !texture_alive(cam.depth, cam.depth_at, cam.depth_id))
+        return fail("the scene depth is gone");
     const uint32_t rw = in->width, rh = in->height;
     const uint32_t ow = std::max(1u, out->width >> out_level), oh = std::max(1u, out->height >> out_level);
     if (rw != cam.width || rh != cam.height) return fail("the input is not the scene's size");

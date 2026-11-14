@@ -51,6 +51,8 @@ struct Camera {
     uint32_t width = 0, height = 0;
     Texture* depth = nullptr;
     uint64_t depth_gen = 0;   // (texture_destroy_generation when taken: a depth texture destroyed since is not used)
+    uint64_t depth_at = 0;    // (the depth texture's address and creation number, for texture_alive)
+    uint32_t depth_id = 0;
     uint64_t frame = 0;       // (texture_frame_no when taken)
     bool valid = false;
 };
@@ -230,6 +232,7 @@ void note_scene_draw(const Texture* color0, uint32_t width, uint32_t height, Tex
     // (the offset sead's projection gave the frustum, in its third column: 2 * offset, which moves the picture by -that)
     k.jitter[0] = -c[0x78 / 4], k.jitter[1] = -c[0x88 / 4];
     k.width = width, k.height = height, k.depth = depth, k.depth_gen = texture_destroy_generation(), k.frame = now;
+    k.depth_at = depth ? depth->gpu : 0, k.depth_id = depth ? depth->id : 0;
     k.valid = true;
 }
 
@@ -249,7 +252,12 @@ bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out) 
     if (!in || !in_view) return fail("no input view");
     const uint64_t now = texture_frame_no();
     if (!cam.valid || now - cam.frame > 1) return fail("no scene camera this frame");
-    if (cam.depth_gen != texture_destroy_generation()) return fail("the scene depth may be gone");
+    // (any texture destroyed since the camera was noted used to send the frame to the game's own upscale: the game lets
+    // textures go every few frames while new ones stream in (a turn of the camera in Kakariko's potion shop), and each
+    // was a frame without the temporal upscaler, and with Ray tracing a frame without its light shadows and bounce, then
+    // the game's own occlusion: shadows that flickered. Now only when the depth texture itself is gone)
+    if (cam.depth_gen != texture_destroy_generation() && !texture_alive(cam.depth, cam.depth_at, cam.depth_id))
+        return fail("the scene depth is gone");
     const uint32_t rw = in->width, rh = in->height;
     if (rw != cam.width || rh != cam.height) return fail("the input is not the scene's size");
     if (cam.depth->width != rw || cam.depth->height != rh || !(cam.depth->usage & VK_IMAGE_USAGE_SAMPLED_BIT) ||

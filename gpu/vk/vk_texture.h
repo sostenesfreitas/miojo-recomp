@@ -146,6 +146,9 @@ int texture_segment_end(int index);
 uint32_t texture_epoch();
 /// Changes whenever a texture is destroyed (pointers to textures kept elsewhere go stale)
 uint64_t texture_destroy_generation();
+/// (hookshot) Whether t is still in the registry at gpu as the texture made as id: not destroyed since. Where
+/// texture_destroy_generation moved for any texture at all, this tells one texture apart (a pointer alone could be a new one's)
+bool texture_alive(const Texture* t, uint64_t gpu, uint32_t id);
 // (hookshot, RX_VK_FRAME_TRACE: time no other column has; totals in ns, the trace takes their differences)
 int64_t texture_readback_wait_ns();   // (a read-back's submit and wait for the GPU: the write-backs before an eviction)
 int64_t texture_frame_ns();           // (texture_frame as a whole: each present's eviction, compaction and sweeps)

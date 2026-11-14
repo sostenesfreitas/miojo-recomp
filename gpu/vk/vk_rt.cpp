@@ -1173,7 +1173,9 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     // drop_image). This used to give the frame to the game's own occlusion whenever any texture had been destroyed since:
     // walking, the game lets textures go about every 20 frames, and each time one frame had the game's lighter occlusion,
     // a flash of light over the whole picture)
-    if (!r.top.as || !r.prev_depth || now - r.prev_frame > 2 || !make_atlas(r, cmd)) {
+    // (up to 4 frames old: the upscaler can skip a frame or two (the scene depth gone, rarely), and the game's own occlusion
+    // for the frame after was a flash of light over the whole picture, where the kept depth is still there to trace from)
+    if (!r.top.as || !r.prev_depth || now - r.prev_frame > 4 || !make_atlas(r, cmd)) {
         static int told = 0;   // (a test: why a frame went to the game's own)
         if (env_on("RX_VK_RT_AO_WHY") && told++ < 400)
             logf("vk: rt: ao-why f%llu top %d depth %d age %lld", (unsigned long long)now, r.top.as ? 1 : 0, r.prev_depth ? 1 : 0, (long long)(now - r.prev_frame));
@@ -1230,9 +1232,26 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
     pc.ambient = std::clamp((float)opts.ambient / 100.0f, 0.0f, 1.0f), pc.sky_reach = sky_reach;
     if (pc.ambient > 0.0f) {   // (the game's sun, as rt_frame reads it for the bounce: the lit draws' frame buffer at 0x40)
         float f[7];   // (its colour too, at 0x50: a third of what it gives a surface stands for the sky's light)
-        if (memory_read_as_submitted(r.local_frame_buffer.load(std::memory_order_relaxed) + 0x40, f, sizeof f)) {
-            const float len = std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
-            if (std::fabs(len - 1.0f) < 0.02f) {
+        // (a frame whose read of the sun fails, or gives no direction, takes the last one that did. It used to run the
+        // traced ambient with no sun and no lamps, and indoors, where the place has no sun and the traced ambient is off,
+        // switch it on: one dark frame now and then, the potion shop's walls and floor flickering)
+        static float last_sun[4] = {0, 0, 0, 0};
+        static bool sunny = false;
+        static float last_sky = 0.0f;
+        static int misses = 0, frames = 0;
+        const bool read = memory_read_as_submitted(r.local_frame_buffer.load(std::memory_order_relaxed) + 0x40, f, sizeof f);
+        const float len = read ? std::sqrt(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]) : 0.0f;
+        const bool known = read && std::fabs(len - 1.0f) < 0.02f;
+        misses += !known, frames++;
+        if (frames == 600) {
+            if (misses && env_on("RX_VK_RT_AO_WHY")) logf("vk: rt: the sun not read in %d of 600 frames (the last one kept)", misses);
+            misses = frames = 0;
+        }
+        if (!known) {
+            if (!sunny) pc.ambient = 0.0f;
+            else std::memcpy(pc.to_sun, last_sun, sizeof last_sun);
+        }
+        if (known) {
                 for (int i = 0; i < 3; i++) pc.to_sun[i] = -f[i] / len;
                 pc.to_sun[3] = 1.0f;
                 // (the lamps are weighed against the sky. A place with no sun, a cave, has none to weigh by: the last
@@ -1247,7 +1266,9 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                 // (and the traced ambient is not for such a place: it scales the game's ambient light by how much sky a
                 // place sees, and a cave's ambient is not the sky's but a level set by hand for it. Scaled, Goron City
                 // went to its fifth, a third darker over the whole picture and its creases black. Left as the game has it)
-                if (!(sun > 1e-4f && sun < 1e4f)) pc.ambient = 0.0f;
+                sunny = sun > 1e-4f && sun < 1e4f;
+                if (!sunny) pc.ambient = 0.0f;
+                std::memcpy(last_sun, pc.to_sun, sizeof last_sun);
                 // (the sun's colour here is as the picture has it, the exposure in already: 0.98 over pi by day with an
                 // exposure of 0.001, read in the log. So not by the exposure again, as it was for a build: that weighed
                 // the lamps 64 times their light at night)
@@ -1271,7 +1292,9 @@ bool rt_ao_replace(VkCommandBuffer cmd, VkImageView out, uint32_t w, uint32_t h)
                 }
                 if (sky_level > 0.0f && now - r.lamps_frame <= 2 && r.lamps_count > 0)
                     pc.sky = sky_level, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;
-            }
+                last_sky = sky_level;
+        } else if (sunny && last_sky > 0.0f && now - r.lamps_frame <= 2 && r.lamps_count > 0) {
+            pc.sky = last_sky, pc.light_list = r.lamps_at, pc.light_count = r.lamps_count;   // (the lamps as the last frame read)
         }
     }
     // (the same noise every frame: with another each frame, what a few rays found in a narrow place (under a rug's edge)
