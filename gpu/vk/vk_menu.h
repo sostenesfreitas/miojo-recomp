@@ -137,6 +137,7 @@ int menu_setting_set(const char* key, int value, MkwVkSetting* out);
 int menu_heart_protection();
 int menu_player_flight();
 int menu_infinite_ammo();
+int menu_infinite_rupees();
 int menu_time_lock();
 int menu_moon_jump();
 int menu_free_camera();

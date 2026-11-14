@@ -769,6 +769,39 @@ static void oot_infinite_ammo(Ctx *c, int64_t now) {
     }
 }
 
+/* The Cheats page's Infinite rupees: twice a second the wallet is filled to what it holds, through the game's own
+   OneshotIncreaseRupee (f_82982fc0: the rupees the pouch has, f_80a87c30(pouch, 1); adds them, f_833c6d70; the wallet's
+   limit, f_80a876a0(pouch); and the counter on the screen), as the event it is, its first argument the amount. */
+static void oot_infinite_rupees(Ctx *c, int64_t now) {
+    int rx_option(int id, int otherwise);
+    static int64_t next;
+    if (rx_option(HOS_OPT_CHEAT_RUPEES, 0) <= 0 || now < next) return;
+    next = now + 500000000LL;
+    const uint64_t holder = recomp_load64(c, 0x84c9e0d0ULL);   /* (the pouch, as the action loads it) */
+    const uint64_t pouch = holder ? recomp_load64(c, holder) : 0;
+    A64Fn have_fn = a64_lookup(0x80a87c30ULL), limit_fn = a64_lookup(0x80a876a0ULL), add_fn = a64_lookup(0x82982fc0ULL);
+    if (!pouch || !have_fn || !limit_fn || !add_fn) return;
+    const Ctx saved = *c;
+    const uint64_t frame = (c->x[31] - 0x100) & ~0xfULL;
+    c->x[31] = frame, c->x[0] = pouch, c->x[1] = 1;
+    have_fn(c);
+    const int have = (int)(int32_t)c->x[0];
+    *c = saved;
+    c->x[31] = frame, c->x[0] = pouch;
+    limit_fn(c);
+    const int limit = (int)(int32_t)c->x[0];
+    *c = saved;
+    if (have < 0 || limit <= have || limit > 100000) return;
+    memset(A64_PTR(frame), 0, 0x100);
+    recomp_store64_sp(c, frame + 0x20, frame + 0x80);   /* (the event's first argument: a pointer to the amount) */
+    recomp_store32_sp(c, frame + 0x80, (uint32_t)(limit - have));
+    c->x[31] = frame, c->x[0] = frame;
+    add_fn(c);
+    *c = saved;
+    static int logged;   /* (the first fills only: a test run reads them, play would fill the log) */
+    if (logged < 6) logged++, hos_log("cheats: infinite rupees: %d -> %d", have, limit);
+}
+
 static void oot_set_time(Ctx *c, unsigned hour) {
     // ExecuteWmSetTime passes seconds since midnight to the world manager.
     const uint64_t singleton = recomp_load64(c, 0x84c9e898ULL);
@@ -806,17 +839,17 @@ static void oot_lock_time(Ctx *c, int64_t now) {
     if (!told) told = 1, hos_log("cheats: clock held at %02d:00", hour);
 }
 
-/* Ctrl+1 hearts, Ctrl+3 ammo, Ctrl+4 moon jump, Ctrl+5 lock time: each switches its row while the game is in front. */
+/* Ctrl+1 hearts, Ctrl+3 ammo, Ctrl+4 moon jump, Ctrl+5 lock time, Ctrl+6 rupees: each switches its row while the game is in front. */
 static void oot_cheat_hotkeys(void) {
     void rx_option_set(int id, int value);
     int rx_option(int id, int otherwise);
-    static const int keys[] = {'1', '3', '4', '5'};
-    static const int ids[] = {HOS_OPT_CHEAT_HEARTS, HOS_OPT_CHEAT_AMMO, HOS_OPT_CHEAT_MOONJUMP, HOS_OPT_CHEAT_TIMELOCK};
-    static int held[4];
+    static const int keys[] = {'1', '3', '4', '5', '6'};
+    static const int ids[] = {HOS_OPT_CHEAT_HEARTS, HOS_OPT_CHEAT_AMMO, HOS_OPT_CHEAT_MOONJUMP, HOS_OPT_CHEAT_TIMELOCK, HOS_OPT_CHEAT_RUPEES};
+    static int held[5];
     DWORD foreground = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
     const int ctrl = foreground == GetCurrentProcessId() && !rx_option(1, 0) && GetAsyncKeyState(VK_CONTROL) < 0;
-    for (unsigned i = 0; i < 4; i++) {
+    for (unsigned i = 0; i < 5; i++) {
         const int down = ctrl && GetAsyncKeyState(keys[i]) < 0;
         if (down && !held[i]) rx_option_set(ids[i], 1), hos_log("cheats: Ctrl+%c switched a row", keys[i]);
         held[i] = down;
@@ -1375,6 +1408,7 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     oot_inventory_refresh(c, now);
     oot_player_speed(c, components);
     oot_infinite_ammo(c, now);
+    oot_infinite_rupees(c, now);
     oot_lock_time(c, now);
     oot_cheat_hotkeys();
     oot_map_refresh(c, now);
