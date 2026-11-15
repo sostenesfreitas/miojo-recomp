@@ -44,7 +44,7 @@ struct Choice {
 
 // (upscaler_rows.h's, kept here so the rules compile on their own; the test checks they agree)
 enum { GAME = 0, DLSS = 1, FSR4 = 4 };
-enum { RES_QUALITY = 3, RES_PERFORMANCE = 4, RES_BALANCED = 5 };
+enum { RES_QUALITY = 3, RES_PERFORMANCE = 4, RES_BALANCED = 5, RES_ULTRA_PERFORMANCE = 6 };
 
 // The Render resolution each preset sets (vk_menu.cpp apply_preset; tests/test_auto_settings.py checks they agree): the tier's
 // own, with the game's own upscaler
@@ -96,6 +96,12 @@ inline Choice choose(const Hardware& h) {
     } else {
         add(c, h.rtx && !h.dlss_built ? "the game's own upscaler (this build has no DLSS)"
                : h.rdna4 && !h.fsr4_built ? "the game's own upscaler (this build has no FSR 4)" : "the game's own upscaler");
+    }
+    // (an integrated GPU beside 4 threads or fewer: Minimum's 50% was 60-220 ms of GPU time a frame in Kokiri Forest on an
+    // i3-1115G4's UHD Graphics (2 cores, 4 threads, 16 GB), 3-5 fps. A third of each side is a ninth of the pixels)
+    if (h.integrated && h.threads > 0 && h.threads <= 4) {
+        c.resolution = RES_ULTRA_PERFORMANCE;
+        add(c, "4 threads or fewer: the game's own at 33%");
     }
     return c;
 }

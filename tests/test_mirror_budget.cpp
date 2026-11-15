@@ -21,7 +21,7 @@ int main() {
     CHECK(budget_bytes(1536 * MB, true, 6 * GB) == 1536 * MB);  // (Low on a 6 GB card)
     CHECK(budget_bytes(1536 * MB, true, 4 * GB) == 512 * MB);   // (Low on a 4 GB card: where it was)
     CHECK(budget_bytes(256 * MB, true, 4 * GB) == 256 * MB);    // (Minimum: its own, smaller)
-    CHECK(budget_bytes(1024 * MB, true, 8 * GB) == 1024 * MB);  // (Balanced on an 8 GB card: its own)
+    CHECK(budget_bytes(2048 * MB, true, 8 * GB) == 2048 * MB);  // (Balanced on an 8 GB card: its own, Auto's quarter)
     CHECK(budget_bytes(3072 * MB, true, 16 * GB) == 3072 * MB); // (Ultra on a 16 GB card)
     CHECK(budget_bytes(1536 * MB, false, 4 * GB) == 512 * MB);  // (3.6 GB chosen on the row on a 4 GB card: 512, as before)
     CHECK(budget_bytes(3072 * MB, false, 4 * GB) == 512 * MB);  // (11 GB chosen on the row on a 4 GB card: Auto's too)

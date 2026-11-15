@@ -16,8 +16,13 @@
 // it: temporal accumulation without motion vectors smears everything that moves (see the clamp above).
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D src;
+#ifdef TAAU_RGBA16F
+layout(binding = 1, rgba16f) uniform writeonly image2D dst;
+layout(binding = 2, rgba16f) uniform image2D hist;
+#else
 layout(binding = 1, r11f_g11f_b10f) uniform writeonly image2D dst;
 layout(binding = 2, r11f_g11f_b10f) uniform image2D hist;
+#endif
 layout(push_constant) uniform P { ivec2 size; int valid; } pc;
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 // (FXAA 3.11's quality variant: the edge's orientation from the 3x3 neighbourhood, a search along it for its

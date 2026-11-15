@@ -95,12 +95,14 @@ void jobs_push(std::function<void()> fn, bool urgent, const std::atomic<bool>* f
     work_cv.notify_one();
 }
 // (issue 496) Intel A750: four of the game's big compute pipelines built at once by Intel's compiler (up to 58 s each) froze
-// the whole PC. One thread builds them one at a time there, below normal priority, beside the shared workers
-void jobs_push_serial(std::function<void()> fn, std::function<void()> on_failure) {
+// the whole PC. One thread builds them one at a time there, below normal priority, beside the shared workers.
+// (hookshot) Between two of its builds no compute build is under way: the moment Intel's pipeline cache fetch waits for
+// (pipeline_cache_between_builds). first: the front lane, in order among its own
+void jobs_push_serial(std::function<void()> fn, std::function<void()> on_failure, bool first) {
     fn = with_failure(std::move(fn), std::move(on_failure));
     static std::mutex smu;
     static std::condition_variable scv;
-    static std::deque<std::function<void()>> sq;
+    static std::deque<std::function<void()>> sq, sq_first;
     static bool sstarted = false;
     std::lock_guard lk(smu);
     if (!sstarted) {
@@ -113,17 +115,20 @@ void jobs_push_serial(std::function<void()> fn, std::function<void()> on_failure
                 std::function<void()> fn;
                 {
                     std::unique_lock lk(smu);
-                    scv.wait(lk, [] { return !sq.empty(); });
-                    fn = std::move(sq.front());
-                    sq.pop_front();
+                    scv.wait(lk, [] { return !sq.empty() || !sq_first.empty(); });
+                    auto& q = sq_first.empty() ? sq : sq_first;
+                    fn = std::move(q.front());
+                    q.pop_front();
                 }
                 run_guarded(fn);
                 jobs_notify();
+                std::function<void()> between = pipeline_cache_between_builds;
+                run_guarded(between);
             }
         }).detach();
-        logf("vk: compute pipelines are built one at a time");
+        logf("vk: compute pipelines are built one at a time (the game's dispatches before the mesh fallback's)");
     }
-    sq.push_back(std::move(fn));
+    (first ? sq_first : sq).push_back(std::move(fn));
     scv.notify_one();
 }
 void jobs_notify() {

@@ -73,6 +73,15 @@ int main() {
         warm.secs = 3, warm.stage = 2, warm.done = 100, warm.total = 3822;
         v = startup_view(warm);
         CHECK(v.step.empty() && v.title == "Loading pipelines" && v.hint.empty());
+        // every pipeline counted, the start not over yet: what it still does, not "a few seconds left" for as long as that
+        // takes (#714)
+        warm.done = 3822, warm.left = 0;
+        v = startup_view(warm);
+        CHECK(v.pct == "100%" && v.right == "Getting the game ready");
+        warm.saving = true;
+        CHECK(startup_view(warm).right == "Saving the pipeline cache");
+        warm.saving = false, warm.done = 100, warm.left = 4;
+        CHECK(startup_view(warm).right == "a few seconds left");
         warm.finished = true;
         CHECK(startup_view(warm).title == "Starting the game");
         warm.secs = 0.4;   // (over before the first second: the wordmark alone, no flash of text)
@@ -150,6 +159,10 @@ int main() {
         st.total = 0;   // (the prediction deciding: the bar stays, with the whole's share)
         v = startup_view(st);
         CHECK(v.fraction == 0.5 && v.left == "Reading the pipeline notes");
+        st.total = 45882, st.done = 45882, st.whole = 1;   // (the whole bar full: what is left is not counted, #714)
+        CHECK(startup_view(st).right == "Getting the game ready");
+        st.whole = 0.9, st.left = 3;   // (this part counted, the whole not: the time left)
+        CHECK(startup_view(st).right == "a few seconds left");
         // a start with nothing to prepare: the pipelines alone fill the bar
         PrepareBar w;
         w.guess(0, 38809), w.guess(1, 38809), w.guess(2, 100);

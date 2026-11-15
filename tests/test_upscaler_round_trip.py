@@ -109,6 +109,11 @@ struct Host { int (*binding)(int, int, int); float (*aspect_ratio)(); } *host = 
 bool can_bind() { return false; }
 // No hardware profile or measured tuning owns the manual round trips.
 uint64_t auto_for = 0, auto_fp = 0, auto_tuned = 0;
+#include "gpu_choice.h"   // (the GPU device row saved as the card itself, which save() writes)
+namespace gpu_choice = mkwvk::gpu_choice;
+std::vector<gpu_choice::Card> gpu_device_cards;
+std::string gpu_saved_card;
+bool gpu_card_missing = false;
 ::auto_settings::Choice auto_choice{};
 ::auto_settings::Tuning auto_tuning{};
 /* SAVE */

@@ -7,9 +7,9 @@ namespace mkwvk {
 
 bool framegen_on();
 /// Records the frame's processing into the present's recording (src: the window texture's view, sw x sh, the crop
-/// x, y, w, h; cover: wide_sides_tick's, this frame's); false when interpolation cannot run (the present goes to the window
-/// as without it)
-bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4], float cover);
+/// x, y, w, h; cover: wide_sides_tick's, this frame's; native_pq: the encoding of that captured present); false when
+/// interpolation cannot run (the present goes to the window as without it)
+bool framegen_record(VkCommandBuffer cmd, VkImageView src, uint32_t sw, uint32_t sh, const int crop[4], float cover, bool native_pq);
 /// (hookshot) Who made the made frames of the sets shown lately (the last 64, about a second at 60): what the Insert menu's
 /// Frame generation by row and the FPS counter name. None: none made (Off, nothing to blend from, none for half a second)
 enum class FgMaker { None, BuiltIn, Dlss, Fsr3 };

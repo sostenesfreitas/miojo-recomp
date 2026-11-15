@@ -53,6 +53,12 @@ struct Program {
     VkPipeline compute_pipeline = VK_NULL_HANDLE;
     // (the compute pipeline's build: 0 not started, 1 on a worker, 2 done (compute_pipeline made, or failed): vk_draw.cpp dispatch)
     std::atomic<int> compute_state{0};
+    // (hookshot) the optimizer's build of a compute_pipeline made without it first (Intel's one-at-a-time builds), bound in its
+    // place once made: vk_draw.cpp compute_optimize. compute_pipeline stays for the session (a recording may hold it)
+    std::atomic<VkPipeline> compute_optimized{VK_NULL_HANDLE};
+    // (hookshot) compute_pipeline was made without the optimizer before play (precompile_run, precompile_compute_quick): its first
+    // dispatch queues compute_optimize. Not before: a first start makes every kept compute program's, most never dispatched
+    std::atomic<bool> optimize_owed{false};
     mutable std::atomic<bool> dispatched{false};   // (hookshot) noted in hookshot_computes.bin (vk_draw.cpp compute_note)
     bool push = false;             // its set is pushed (VK_KHR_push_descriptor)
     VkShaderStageFlags push_stages = 0;

@@ -22,7 +22,7 @@ GRAPHICS = [
     ("HDR", ["HDR", "HDR paper white", "HDR peak brightness", "HDR contrast", "HDR tone mapper"]),
     ("Detail", ["Texture detail", "Anisotropic filtering"]),
     ("Ray traced lighting", ["Ray tracing", "Ambient occlusion", "Sun shadows", "Light shadows", "Traced ambient", "Bounce light"]),
-    ("GPU and memory", ["GPU device", "VRAM budget"]),
+    ("GPU and memory", ["GPU device", "Threaded rendering", "VRAM budget"]),
 ]
 
 

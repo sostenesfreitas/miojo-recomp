@@ -62,7 +62,7 @@ class MissingNupTests(unittest.TestCase):
         argv = [str(SOURCE), "--jobs", "1", "--nup", str(self.package), "--out", str(self.out), "--work", str(self.work)]
         output = io.StringIO()
         with contextlib.ExitStack() as stack:
-            for name in ("check_windows_sdk", "check_cpu", "stop_stray_compilers", "drop_stale_objects", "no_throttle"):
+            for name in ("check_windows_sdk", "stop_stray_compilers", "drop_stale_objects", "no_throttle"):
                 stack.enter_context(mock.patch.object(make_game, name))
             stack.enter_context(mock.patch("ctypes.WinDLL", create=True))   # No Windows power-state change.
             blocked = [stack.enter_context(mock.patch.object(make_game.subprocess, "Popen", side_effect=AssertionError("process launched"))),

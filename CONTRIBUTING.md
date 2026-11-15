@@ -17,7 +17,11 @@ never will. That includes:
 - `work/` and everything in it: the extracted dump, `image.bin`, the lifted C, test builds, runs and screenshots;
 - `hookshot.exe`, `hookshot_vk.dll` and other build output, and the game folder's `cache/` (`hookshot_programs.bin` and
   its `.idx`, `hookshot_pipelines.bin`, `hookshot_vk_pipelines.bin`);
-- saves (`user/`), `hookshot_options.ini`, `hookshot_env.txt` and `language.txt`.
+- saves (`user/`), `hookshot_options.ini`, `hookshot_env.txt` and `language.txt`. The one exception: scrubbed saves
+  under `assets/saves/` ([the rules](assets/saves/README.md)): one slot each (`progress.sav` and `caption.sav` only),
+  its picture made grey and its date reset by `scripts/oot_saves.py scrub`, passing `check-repo-saves`, made fresh
+  for the farm (never someone's own adventure), and added through a pull request two maintainers approve.
+  `account.sav`, `option.sav`, `hookshot_options.ini`, `hookshot_env.txt` and the rest of `user/` stay banned.
 
 Do not open an issue or a PR asking where to get the game, how to decrypt it, or for someone else's files. A
 screenshot, a video and `hookshot_log.txt` are fine and often necessary; the log holds no game data.

@@ -804,6 +804,7 @@ bool fsr3_wanted() { return !fsr3_on_chain() && fsr3_chosen(); }
 // network's output with dlss_out.comp, as fsr3_upscale's own last pass does.
 // With the game's native HDR the chain gives it linear light past 1 instead, and takes its picture back linear (chain_hdr):
 // the passes are built for HDR colour (FFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT) and work out their own exposure.
+// (PsychoV35's linear HDR path writes it unchanged into a matching RGBA16F output.)
 namespace {
 struct ChainState {
     std::chrono::steady_clock::time_point last{};
@@ -883,7 +884,11 @@ bool chain_evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
 void chain_release() { fsr3::release(); }   // (the passes stay; their images are made again when FSR 3.1 draws next)
 uint64_t chain_memory() { return fsr3::memory(); }   // (its internal images, for the chain's status line)
 /// It takes HDR colour while the game presents its native HDR (chain_prepare): the chain gives it linear light, unclamped
-bool chain_hdr() { return chain_state().hdr; }
+// (and, from upstream, PsychoV35's linear HDR path while the scene's tone mapping runs: its compatibility is on by default)
+bool chain_hdr() {
+    static const bool psycho = upscaler_rows::psychov35_compatibility(env_switch("RX_VK_PSYCHOV35_DLSS"));
+    return chain_state().hdr || (psycho && scene_tonemap_on());
+}
 // (hdr: linear light past 1 with the game's native HDR, chain_hdr; fsr_depth: its passes are built with
 // FFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH, scripts/fsr3_shaders.py; retry: an
 // evaluation that fails (no room for its constants in the frame's stream) leaves that frame to the network, and the next one
@@ -900,10 +905,10 @@ bool fsr3_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, Vk
     const bool upscaling = fsr3_wanted();
     if (!upscaling && !fsr3_inputs::wanted()) return false;
     if (!in || !in_view || !out || !out_view) return false;
+    if (!fsr3_inputs::colour_pair(in->format, out->format)) return false;
     // (another network of the upscale's shape, as temporal_upscale takes them: only the scene into the picture. The gameplay
     // networks sample the scene's B10G11R11 colour and write the B10G11R11 picture)
-    if (!known && (in->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || out->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 ||
-                   (out->width >> out_level) <= in->width || !fsr3_inputs::is_scene(in)))
+    if (!known && ((out->width >> out_level) <= in->width || !fsr3_inputs::is_scene(in)))
         return false;
     fsr3_inputs::Frame f;
     if (!fsr3_inputs::prepare(cmd, in, in_view, f)) return upscaling ? fail("its inputs could not be made") : false;

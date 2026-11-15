@@ -1,5 +1,5 @@
-"""The game's CPU target follows the PC that builds it, and the AppImage says up front when its renderer cannot run
-(nx2/host_cpu.py, nx2/make_game.py's check_cpu; issue 363). Game-free.
+"""The game's CPU target follows the PC that builds it, the Vulkan back end's too: the AppImage carries no renderer built for
+x86-64-v3, so a CPU without AVX2 builds and plays, and nothing refuses it (nx2/host_cpu.py). Game-free.
 
 python -I -B tests/test_cpu_target.py
 """
@@ -70,8 +70,10 @@ class HostMarch(unittest.TestCase):
         build = (ROOT / "nx2" / "build.py").read_text(encoding="utf-8")
         self.assertIn("from host_cpu import host_march", build)
         self.assertIn('MARCH = os.environ.get("RX_MARCH") or host_march()', build)
+        # (the AppImage builds no renderer for a fixed level: a player's build compiles it, for that player's CPU)
         appimage = (ROOT / "scripts" / "linux" / "appimage.sh").read_text(encoding="utf-8")
-        self.assertIn("RX_MARCH=x86-64-v3 RX_VK_ONLY=1", appimage)   # (its prebuilt renderer: not the CI runner's CPU)
+        self.assertNotIn("RX_VK_ONLY", appimage)
+        self.assertNotIn("-I nx2/build.py", appimage)
 
     def test_build_message_names_the_cause(self):
         """'this CPU has no AVX2' only when the CPU chose the level: an RX_MARCH of znver2 (AVX2 and more) said it too"""
@@ -149,56 +151,16 @@ class NativeCpu(unittest.TestCase):
         self.assertNotIn("host_mtune", build)
 
 
-class AppImageCheck(unittest.TestCase):
-    """make_game.py stops before reading the game when the AppImage's x86-64-v3 renderer meets a CPU without AVX2"""
+class NoCpuRefusal(unittest.TestCase):
+    """make_game.py refused a CPU without AVX2 in the AppImage, whose prebuilt renderer was x86-64-v3's. That
+    renderer is gone (every build compiles its own, for its CPU), and the refusal with it"""
 
-    def setUp(self):
-        self.make_game = load("make_game_cpu_test", ROOT / "nx2" / "make_game.py")
-
-    def run_check(self, env, march, fsr=False):
-        fake = mock.MagicMock(host_march=mock.MagicMock(return_value=march))
-        with mock.patch.dict(os.environ, {}, clear=False), mock.patch.dict(sys.modules, {"host_cpu": fake}), \
-                contextlib.redirect_stdout(io.StringIO()) as out:
-            for k in ("HOOKSHOT_VK_PREBUILT", "RX_MARCH", "HOOKSHOT_FSR"):
-                os.environ.pop(k, None)
-            os.environ.update(env)
-            try:
-                self.make_game.check_cpu(fsr)
-            except SystemExit as stopped:
-                return stopped.code, out.getvalue()
-        return None, out.getvalue()
-
-    def test_appimage_without_avx2_stops(self):
-        code, out = self.run_check({"HOOKSHOT_VK_PREBUILT": "/x/hookshot_vk.so"}, "x86-64-v2")
-        self.assertEqual(code, 1)
-        self.assertIn("AVX2", out)
-
-    def test_appimage_with_avx2_goes_on(self):
-        self.assertIsNone(self.run_check({"HOOKSHOT_VK_PREBUILT": "/x/hookshot_vk.so"}, "x86-64-v3")[0])
-
-    def test_fsr_build_without_avx2_goes_on(self):
-        # (AMD FSR 4: the build compiles its own Vulkan back end for this PC, so the prebuilt one's AVX2 does not matter)
-        self.assertIsNone(self.run_check({"HOOKSHOT_VK_PREBUILT": "/x/hookshot_vk.so"}, "x86-64-v2", fsr=True)[0])
-
-    def test_fsr_in_the_shell_is_not_the_builds(self):
-        # (HOOKSHOT_FSR=1 left in the shell, a build without --fsr: it uses the prebuilt back end, so the check still stops)
-        code, out = self.run_check({"HOOKSHOT_VK_PREBUILT": "/x/hookshot_vk.so", "HOOKSHOT_FSR": "1"}, "x86-64-v2")
-        self.assertEqual(code, 1)
-        self.assertIn("AVX2", out)
-
-    def test_source_build_without_avx2_goes_on(self):
-        self.assertIsNone(self.run_check({}, "x86-64-v2")[0])
-
-    def test_rx_march_is_the_players_choice(self):
-        env = {"HOOKSHOT_VK_PREBUILT": "/x/hookshot_vk.so", "RX_MARCH": "x86-64-v2"}
-        self.assertIsNone(self.run_check(env, "x86-64-v2")[0])
-
-    def test_checked_before_the_game_is_read(self):
+    def test_make_game_refuses_no_cpu(self):
         src = (ROOT / "nx2" / "make_game.py").read_text(encoding="utf-8")
-        main = src[src.index("def main("):]
-        self.assertLess(main.index("check_cpu(fsr)"), main.index("drop_stale_objects(work)"))
-        check = src[src.index("def check(a, work):"):]
-        self.assertLess(check.index("check_cpu()"), check.index("if a.nup:"))
+        self.assertNotIn("def check_cpu(", src)
+        self.assertNotIn("check_cpu(", src)
+        self.assertNotIn("no AVX2", src)
+        self.assertNotIn("HOOKSHOT_VK_PREBUILT", src)
 
 
 if __name__ == "__main__":

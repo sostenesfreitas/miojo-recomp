@@ -118,6 +118,17 @@ int main() {
     CHECK(!hold_met(5600 * MB, 100 * MB, 400 * MB, 5000 * MB));   // (100 MB still to go)
     CHECK(hold_met(5600 * MB, 200 * MB, 400 * MB, 5000 * MB));
     CHECK(hold_met(300 * MB, 200 * MB, 200 * MB, 0));             // (more chosen than the textures hold, their sum having drifted)
+    // the room in VMA's blocks that makes the count line's squeeze wait: on a dedicated card within the allowance only, and never
+    // on an integrated GPU (the UHD Graphics: 6,709 of 7,172 MB used, 1,121 MB free in the blocks)
+    CHECK(room_in_blocks(6709 * MB, 7172 * MB, 1121 * MB, false));
+    CHECK(!room_in_blocks(6709 * MB, 7172 * MB, 1121 * MB, true));
+    CHECK(!room_in_blocks(7602 * MB, 6982 * MB, 1649 * MB, false));   // (#2156: past the allowance the driver pages)
+    CHECK(!room_in_blocks(6709 * MB, 7172 * MB, 800 * MB, false));    // (less than an eighth free)
+    // what a pipeline refused for want of memory asks: the excess over the line, and kShortGive at least
+    CHECK(short_excess(6600 * MB, 6450 * MB) == kShortGive);           // (150 MB over: kShortGive)
+    CHECK(short_excess(6709 * MB, 6450 * MB) == 259 * MB);
+    CHECK(short_excess(7680 * MB, 6450 * MB) == 1230 * MB);            // (7.5 of 7.0 GB: the whole excess)
+    CHECK(short_excess(5000 * MB, 6450 * MB) == kShortGive);           // (under the line: refused all the same)
     std::printf("PASS: the compaction's rules\n");
     return 0;
 }

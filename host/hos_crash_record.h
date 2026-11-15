@@ -25,6 +25,16 @@ void hos_crash_record_start(const char *dir, const char *version, const char *lo
 /* Explicit process-exit sites (ExitProcess/_exit do not run atexit). Never removes
    a report; only this process's running marker and its empty staging file. */
 void hos_crash_clean_end(void);
+/* The player asked to quit (host/rx_backend.c rx_close_asked): a note in the marker, so an end while closing is no crash. */
+void hos_crash_quit_asked(void);
+/* The crash window (host/hos_crash_dialog.c): this run's id, log path ("" for none) and game folder; NULL when not recording. */
+const char *hos_crash_record_run(void);
+const char *hos_crash_record_log(void);
+const char *hos_crash_record_dir(void);
+/* The crash window's helper, after its game ended: a start's recovery, without a marker of its own. */
+int hos_crash_record_recover(const char *dir);
+/* A run's marker: 0 gone, 1 this run's, 2 there but unreadable (locked by its live owner), 3 another run's. */
+int hos_crash_record_marker(const char *dir, uint64_t pid, const char *run_id);
 /* Normal startup, after the version/run-id banner: at most one fixed pruning warning. */
 void hos_crash_record_log_notes(void);
 /* Failing-thread path: fixed buffers, OS reads/writes, no allocation or stdio.

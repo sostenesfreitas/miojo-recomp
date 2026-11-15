@@ -912,7 +912,10 @@ class Window(QWidget):
         import threading
 
         def run():
-            found = core.find_dumps()
+            try:
+                found = core.find_dumps()
+            except Exception:   # (the page goes on without them: the file can still be picked or dropped)
+                found = []
             self.post(self.found_files, found)
         threading.Thread(target=run, daemon=True).start()
 

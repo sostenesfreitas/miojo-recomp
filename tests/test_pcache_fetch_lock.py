@@ -126,6 +126,17 @@ def main():
     # (the users wait bounded only with the lock on, polled or queued: off, the close waits for the builds as before)
     assert "const bool bounded = pcache_fetch_lock_on() && wait_ms >= 0;" in cut(draw, "void play_cache_save(", "\n}\n")
     assert save.count("return put_off_now();") == 2, "a save whose data fetch was put off is lost without a log line"
+    # (Intel's serial compute builds left no moment without a build for a whole run: a save put off is owed to that thread,
+    # which runs it between two of its builds, queued, at once)
+    assert "if (serial_builds_on()) pcache_save_owed = true;" in save, "a save put off is not owed to the serial builds' thread"
+    assert "const bool queue = force || between ||" in save and "if (force || between) save();" in save
+    between = cut(draw, "void pipeline_cache_between_builds() {", "\n}\n")
+    assert "pcache_save_owed.exchange(false)" in between and "pcache_save_between = true;" in between
+    jobs = (ROOT / "gpu/vk/vk_jobs.cpp").read_text(encoding="utf-8")
+    serial = cut(jobs, "void jobs_push_serial(", "\n}\n")
+    assert serial.index("run_guarded(fn);") < serial.index("pipeline_cache_between_builds") < serial.index("}).detach();"), \
+        "the serial builds' thread does not run the owed save after a build"
+    assert "if (serial) jobs_push_serial(std::move(build), failed, true);" in draw, "the game's dispatches are not built first"
     assert "create_cached(guarded_graphics_held, ci, pl)" in draw and "create_cached(guarded_compute_held, ci, pl)" in draw
     assert "guarded_compute(pcache," not in draw, "a build with pcache that does not hold it from a fetch"
     with tempfile.TemporaryDirectory(prefix="pcache-fetch-") as tmp:

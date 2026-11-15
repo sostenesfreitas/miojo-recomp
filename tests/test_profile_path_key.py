@@ -6,6 +6,7 @@ python -I -B tests/test_profile_path_key.py
 """
 import importlib.util
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -26,9 +27,12 @@ class ProfilePathTests(unittest.TestCase):
 
     def test_the_hot_flags_name_the_profiles_contents_wherever_they_name_its_path(self):
         src = (ROOT / "nx2" / "build.py").read_text(encoding="utf-8")
-        uses = [line for line in src.splitlines() if '"-fprofile-instr-use=" +' in line]
+        # (the game's hot pieces' profile, HOOKSHOT_PROFILE_SHA1, and the renderer's, HOOKSHOT_VK_PROFILE_SHA1: the flag naming
+        # the contents is in the same list, on that line or the next)
+        lines = src.splitlines()
+        uses = [lines[i] + lines[i + 1] for i, line in enumerate(lines[:-1]) if '"-fprofile-instr-use=" +' in line]
         self.assertTrue(uses)
-        self.assertTrue(all("-DHOOKSHOT_PROFILE_SHA1=" in line for line in uses), uses)
+        self.assertTrue(all(re.search(r"-DHOOKSHOT_(VK_)?PROFILE_SHA1=", line) for line in uses), uses)
 
 
 if __name__ == "__main__":

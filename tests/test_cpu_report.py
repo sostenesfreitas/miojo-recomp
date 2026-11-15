@@ -156,10 +156,10 @@ def main():
             failures.append("without --guest-map lifted code should be the game/lifted category")
     sys.path.insert(0, str(ROOT / "scripts"))
     rep = importlib.import_module("cpu_report")
-    with tempfile.TemporaryDirectory(prefix="cpu-calls-") as t:   # (HOS_HLE_STATS summaries: the last blocks only)
+    with tempfile.TemporaryDirectory(prefix="cpu-calls-") as t:   # (HOS_HLE_STATS summaries: the last blocks only; rows end in ";")
         (Path(t) / "game.log").write_text(
-            "[hos host] hle: 900 calls of 2 functions in 5 s\n[hos host] hle: 800 _ZN2nn2os9LockMutexEPNS0_9MutexTypeE; 100 nvnQueueSubmitCommands\n"
-            "[hos host] hle: 60 calls of 2 functions in 5 s\n[hos host] hle: 50 _ZN2nn2os9LockMutexEPNS0_9MutexTypeE; 10 nvnQueueSubmitCommands\n"
+            "[hos host] hle: 900 calls of 2 functions in 5 s\n[hos host] hle: 800 _ZN2nn2os9LockMutexEPNS0_9MutexTypeE;\n[hos host] hle: 100 nvnQueueSubmitCommands;\n"
+            "[hos host] hle: 60 calls of 2 functions in 5 s\n[hos host] hle: 50 _ZN2nn2os9LockMutexEPNS0_9MutexTypeE;\n[hos host] hle: 10 nvnQueueSubmitCommands;\n"
             "[hos host] vk: something else\n", encoding="utf-8")
         cps, secs = rep.hle_calls(t, blocks=1)
         if secs != 5.0 or cps.get("_ZN2nn2os9LockMutexEPNS0_9MutexTypeE") != 10.0 or cps.get("nvnQueueSubmitCommands") != 2.0:

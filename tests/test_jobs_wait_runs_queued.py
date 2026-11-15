@@ -34,6 +34,7 @@ inline void logf(const char*, ...) {}
 STUB_DRAW = """#pragma once
 namespace mkwvk {
 inline void ub_thread_off() {}
+inline void pipeline_cache_between_builds() {}
 }
 """
 

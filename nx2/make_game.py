@@ -53,6 +53,7 @@ sys.path[:0] = [HERE, os.path.join(ROOT, "third_party", "a64-kit", "tools")]   #
 import toolchain as _toolchain
 import disk as _disk
 import object_store as _object_store
+import lift_store as _lift_store
 # (hookshot) RX_TARGET=windows on Linux: the Windows game, with llvm-mingw's Linux release (HOOKSHOT_MINGW, or llvm-mingw
 # beside the builder), to run under Proton or copy to a Windows PC
 LINUX, CROSS = not _toolchain.windows(), _toolchain.windows() and os.name != "nt"
@@ -588,24 +589,8 @@ def check_cache_paths(out, paths):
                  "Choose a different output folder." % path)
 
 
-def check_cpu(fsr=False):
-    """(linux) The AppImage's Vulkan back end (HOOKSHOT_VK_PREBUILT) is built for x86-64-v3 elsewhere
-    (scripts/linux/appimage.sh), while the game follows this PC (nx2/host_cpu.py): on a CPU without AVX2 it would stop at
-    its start. Said now, before the game is read, not 40 minutes in (issue 363). fsr: this build has AMD FSR 4, which compiles its
-    own back end (nx2/build.py prebuilt_renderer), for this PC"""
-    if not os.environ.get("HOOKSHOT_VK_PREBUILT") or os.environ.get("RX_MARCH") or fsr:
-        return
-    sys.path.insert(0, HERE)
-    from host_cpu import host_march
-    m = host_march()
-    if m != "x86-64-v3":
-        fail("Your processor has no AVX2 (it runs %s), and the AppImage's renderer needs it. Build Hookshot from source "
-             "instead (see the readme): a source build follows your processor." % m)
-
-
 def check(a, work):
     check_windows_sdk(work)   # (first: said in plain words when the game is chosen, not after it has been read)
-    check_cpu()
     if a.nup:
         probe = os.path.join(work, "probe")
         shutil.rmtree(probe, ignore_errors=True)
@@ -728,25 +713,18 @@ def check_linux_prerequisites(work=None):
                 if pin and importlib.util.find_spec(pin[1]) is None:
                     missing.append("Python module %s (not on %s's isolated import path; install requirements.txt "
                                    "with that Python)" % (pin[1], sys.executable))
-    prebuilt = build.prebuilt_renderer()
-    if prebuilt:
-        if not os.path.isfile(prebuilt):
-            missing.append("Vulkan renderer %s (HOOKSHOT_VK_PREBUILT)" % prebuilt)
-    else:
-        for (name, package, probe, env), found in zip(build.VK_HEADERS, build.vulkan_headers(work)):
-            if not found:
-                missing.append("%s header %s (CPM package %s: RX_CPM, clone/cpm, work/eg/.cache/cpm, then sibling "
-                               "mkw-recomp/Eglantine caches; then %s, package root or include/; then /usr/local, /usr)"
-                               % (name, probe, package, env))
-        if build.FSR and not os.path.isfile(os.path.join(build.FSR_HEADERS, "api", "include", "ffx_api.h")):
-            missing.append("AMD's FSR API headers in %s (AMD FSR 4: third_party/fidelityfx; or build without --fsr)"
-                           % os.path.normpath(build.FSR_HEADERS))
+    # (the Vulkan back end is compiled by every build, the AppImage's too: its headers, and clang++ for it and a64emit)
+    for (name, package, probe, env), found in zip(build.VK_HEADERS, build.vulkan_headers(work)):
+        if not found:
+            missing.append("%s header %s (CPM package %s: RX_CPM, clone/cpm, work/eg/.cache/cpm, then sibling "
+                           "mkw-recomp/Eglantine caches; then %s, package root or include/; then /usr/local, /usr)"
+                           % (name, probe, package, env))
+    if build.FSR and not os.path.isfile(os.path.join(build.FSR_HEADERS, "api", "include", "ffx_api.h")):
+        missing.append("AMD's FSR API headers in %s (AMD FSR 4: third_party/fidelityfx; or build without --fsr)"
+                       % os.path.normpath(build.FSR_HEADERS))
     build.ffmpeg_linux(missing)
     cc = build.toolchain.find("clang")
-    # A source checkout also builds a64emit with clang++, even with a prebuilt renderer.
-    tools = [("clang", cc)]
-    if source_build or not prebuilt:
-        tools.append(("clang++", build.toolchain.find("clang++")))
+    tools = [("clang", cc), ("clang++", build.toolchain.find("clang++"))]
     for name, path in tools:
         if not os.path.isfile(path):
             missing.append("%s compiler %s (EMSDK/upstream/bin, else ~/emsdk/upstream/bin, then PATH; "
@@ -1039,6 +1017,38 @@ def _cleanup_build_child(child, parent):
     script, options = c
     return ("--standalone" in options and
             (_cleanup_path(script) == _cleanup_path(expected) or ntpath.normcase(script) == "nx2\\build.py"))
+
+
+WORK_LOCK = "make_game.lock"   # (in the work folder: held by the build using it, lock_work)
+_WORK_LOCK = []   # ([its path, the open lock file], kept open for the whole run: closing it, or the process ending, lets it go)
+
+
+def lock_work(work):
+    """One build at a time in a work folder. Two builds in one share its lift, its object cache and its lists: a player's second
+    build, started 7.5 minutes after the first into the same work folder, found the lift done and compiled again every object the
+    first had not cached yet (197 of 480 files, 451 s of compiling, the two ending 19 s apart), and one can delete or cut short the
+    other's files (issue 1197). The second now stops at once, saying so. A lock, not a file that says so: it goes with the process
+    that held it, however that ended, so a stopped build never keeps the next one out. A second main() in the same process (the
+    tests) keeps the lock it holds on that folder, and lets go of one on another"""
+    path = os.path.join(os.path.abspath(work), WORK_LOCK)
+    if _WORK_LOCK and _WORK_LOCK[0] == path:
+        return
+    if _WORK_LOCK:
+        _WORK_LOCK[1].close()
+        _WORK_LOCK.clear()
+    f = open(path, "a+b")
+    try:
+        f.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        fail("Another build is using the work folder %s. Wait for it to end (or stop it), then build again." % work)
+    _WORK_LOCK[:] = [path, f]
 
 
 def stop_stray_compilers(work, default_work):
@@ -1509,10 +1519,11 @@ def build_language(a, out):
     return a.language or kept or (system_language() if a.prepare else None) or "en-US"
 
 
-def profile_readable(prof):
+def profile_readable(prof, any_os=False):
     """(linux) the profile is made by a recent clang (the Windows tools'): an older one, the system's, cannot read it and stops the
-    build. Then the game is built without it (a little slower in play), not at all"""
-    if not LINUX:
+    build. Then the game is built without it (a little slower in play), not at all. any_os: asked on Windows too (the renderer's
+    committed profile is recorded on Linux, and llvm-mingw's clang is another LLVM)"""
+    if not LINUX and not any_os:
         return True
     sys.path.insert(0, os.path.join(ROOT, "third_party", "a64-kit", "tools"))
     import toolchain
@@ -1520,12 +1531,46 @@ def profile_readable(prof):
         src = os.path.join(d, "t.c")
         with open(src, "w") as f:
             f.write("int f(int x) { return x + 1; }" + chr(10))
+        quiet = {"creationflags": 0x08000000} if os.name == "nt" else {}   # (CREATE_NO_WINDOW: no console from the launcher)
         r = subprocess.run([toolchain.find("clang"), "-O2", "-Wno-everything", "-fprofile-instr-use=" + prof, "-c", src, "-o",
-                            os.path.join(d, "t.o")], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                            os.path.join(d, "t.o")], capture_output=True, text=True, encoding="utf-8", errors="replace", **quiet)
     if r.returncode:
         print("this compiler cannot read the play profile (%s): building without it" % (r.stderr.strip().splitlines() or ["?"])[-1],
               flush=True)
     return r.returncode == 0
+
+
+VK_PROFILE = "hookshot_vk.profdata"   # (the renderer's play profile, llvm-profdata's merge of an RX_VK_PGO=gen run's counters)
+# (the one every build uses: committed, xz, with its note in assets/profiles/README.md; unpacked into the work folder under its
+# own name, so a developer's work/hookshot_vk.profdata copied there earlier is never mistaken for it)
+VK_PROFILE_SHIPPED = os.path.join("assets", "profiles", VK_PROFILE + ".xz")
+VK_PROFILE_UNPACKED = "hookshot_vk.shipped.profdata"
+
+
+def vk_profile_for(work, environ, readable=None, root=ROOT):
+    """The renderer's profile nx2/build.py is given (RX_VK_PGO), or None. The checkout's work/hookshot_vk.profdata when it has one
+    (a developer's recording, copied to <work> by main), else the committed assets/profiles/hookshot_vk.profdata.xz, unpacked
+    into <work>; either only when this compiler reads it (on every system: the committed one comes from another LLVM than
+    llvm-mingw's). Not when RX_VK_PGO is set already (gen, or another profile: the developer's choice stands); with neither file
+    the renderer is built as it always was. After ProjectReLink's make_game.py"""
+    if environ.get("RX_VK_PGO"):
+        return None
+    own = os.path.join(work, VK_PROFILE)
+    if os.path.exists(os.path.join(root, "work", VK_PROFILE)) and os.path.exists(own):
+        prof = own
+    elif os.path.exists(os.path.join(root, VK_PROFILE_SHIPPED)):
+        import lzma
+        with lzma.open(os.path.join(root, VK_PROFILE_SHIPPED)) as f:
+            data = f.read()
+        prof = os.path.join(work, VK_PROFILE_UNPACKED)
+        # (written only when it differs: the object keys are its contents, and a compiler still ending from a cancelled build
+        # keeps the file mapped on Windows, WinError 1224)
+        if not os.path.exists(prof) or open(prof, "rb").read() != data:
+            with open(prof, "wb") as f:
+                f.write(data)
+    else:
+        return None
+    return prof if (readable or (lambda p: profile_readable(p, any_os=True)))(prof) else None
 
 
 def copy_writable(src, dst):
@@ -1650,8 +1695,9 @@ def note_shader_list(work, romfs, out):
 LIFT_KEY = ".lift_key"   # (in <work>/sa/gen: what the lifted C there was made from)
 # (the compile's own switches, read by nx2/build.py alone: the hot pieces' level and their profile. They are not the lift's, so a
 # development build at RX_HOT_OPT=O1 keeps the lifted C instead of translating the game again; tests/test_lift_cache.py checks
-# that nothing else the key covers reads them)
-COMPILE_ONLY_ENV = ("RX_HOT_OPT", "RX_PGO")
+# that nothing else the key covers reads them. The renderer's profile too, after ProjectReLink: a renderer profile made, changed or
+# taken away does not translate the game again)
+COMPILE_ONLY_ENV = ("RX_HOT_OPT", "RX_PGO", "RX_VK_PGO", "RX_VK_PGO_FILE")
 
 
 LIFT_SCRIPTS = ("lift.py", "split_hot.py")   # (in nx2/: the two steps of the lift)
@@ -1696,13 +1742,14 @@ def lift_sources():
     return sorted(seen)
 
 
-def lift_key(exefs, work, env, planning=True):
+def lift_key(exefs, work, env, planning=True, paths=None):
     """What the lift's output depends on: the game's code, the translator (lift_sources: the modules the lift imports from nx2/ and
     the vendored a64-kit, and their other files), the HLE functions host/ defines (hooked in the lift; the rest of host/ is compiled
     after it, so a change there alone does not lift again), the hot list, the chunk boundaries and the hot pieces, the lift's environment and the
     Python running it. A file the lift never reads may be in it (a new build then lifts again); one it reads must be.
     planning=False: all of it but the two files the lift itself writes for the next one (image/chunks.txt, image/hot_pieces.txt),
-    to tell whether anything else it reads changed while it ran"""
+    to tell whether anything else it reads changed while it ran. paths: each of the environment's values through it
+    (lift_share_key)"""
     import kit  # noqa: F401  (a64-kit on the path, for standalone)
     import standalone
     h = hashlib.sha1(sys.version.encode(), usedforsecurity=False)
@@ -1722,8 +1769,18 @@ def lift_key(exefs, work, env, planning=True):
                 h.update(hashlib.sha1(src.read(), usedforsecurity=False).digest())
     lift_env = dict(env, **{k: v for k, v in os.environ.items() if k.startswith(("A64_", "OOT_", "RX_"))})
     lift_env = {k: v for k, v in lift_env.items() if k not in COMPILE_ONLY_ENV}
+    if paths:
+        lift_env = {k: paths(v) for k, v in lift_env.items()}
     h.update(repr(sorted(lift_env.items())).encode())
     return h.hexdigest()
+
+
+def lift_share_key(exefs, work, out, env):
+    """(HOOKSHOT_LIFT_STORE, nx2/lift_store.py) lift_key with the work and game folders' paths taken out of the lift's environment
+    (OOT_WORK, OOT_EXEFS, OOT_ROMFS, OOT_DUMP, A64_HOT_FUNCS): the files are hashed by their names in those folders already, and
+    the lifted C holds no folder path, so two work folders with the same share key lift the same C"""
+    w, o = os.path.abspath(work), os.path.abspath(out)
+    return lift_key(exefs, work, env, paths=lambda v: v.replace(w, "<work>").replace(o, "<out>"))
 
 
 def gen_print(gen):
@@ -1885,7 +1942,7 @@ def ngx_script():
     """scripts/ngx_sdk.py: NVIDIA's DLSS SDK, its file table and where each file goes"""
     import importlib.util
     path = os.path.join(ROOT, "scripts", "ngx_sdk.py")
-    if not os.path.isfile(path):   # (the AppImage carries no scripts/: its Vulkan back end comes built, without DLSS)
+    if not os.path.isfile(path):   # (a builder without scripts/ngx_sdk.py: an older AppImage carried none)
         fail("NVIDIA DLSS (HOOKSHOT_NGX_SDK) needs %s, which this builder does not carry: its renderer is built without DLSS. "
              "Unset HOOKSHOT_NGX_SDK, or build Hookshot from source for DLSS." % path)
     spec = importlib.util.spec_from_file_location("ngx_sdk", path)
@@ -2130,6 +2187,13 @@ def warn_slow_disk(*folders):
 
 
 
+def stale_copies(found, parents, visible):
+    """The copies end_stale_games ends: those with no visible window, but not the crash window's helper of a game still open
+    (host/hos_crash_dialog.c: hookshot --crash-watch, a windowless child of the game it waits on). Ending it would lose that
+    run's watcher, and the game's own window stops the update anyway; a helper showing its window is visible, so left alone"""
+    return [pid for pid in found if pid not in visible and parents.get(pid) not in visible]
+
+
 def end_stale_games(folders):
     """(Windows) The running processes whose exe is in one of folders (the game being updated): those with no visible window, a
     copy left behind (a shader preparation that hung, a game whose window closed but whose process did not end), are ended and
@@ -2155,7 +2219,7 @@ def end_stale_games(folders):
     snap = k32.CreateToolhelp32Snapshot(0x2, 0)
     if not snap or snap == wintypes.HANDLE(-1).value:
         return []
-    found = []
+    found, parents = [], {}
     try:
         e = Entry()
         e.dwSize = ctypes.sizeof(Entry)
@@ -2169,6 +2233,7 @@ def end_stale_games(folders):
                         path = os.path.normcase(buf.value)
                         if any(path.startswith(r) for r in roots) and os.path.dirname(path) + os.sep in roots:
                             found.append(e.th32ProcessID)
+                            parents[e.th32ProcessID] = e.th32ParentProcessID
                     k32.CloseHandle(h)
             ok = k32.Process32NextW(snap, ctypes.byref(e))
     finally:
@@ -2186,9 +2251,7 @@ def end_stale_games(folders):
                 visible.add(pid.value)
         return True
     u32.EnumWindows(proc(each), 0)
-    for pid in found:
-        if pid in visible:
-            continue
+    for pid in stale_copies(found, parents, visible):
         h = k32.OpenProcess(0x0001 | 0x00100000, False, pid)   # (PROCESS_TERMINATE | SYNCHRONIZE)
         if h:
             print("A copy of Hookshot left running without a window (process %d) was ended so the update can replace it" % pid,
@@ -2218,20 +2281,19 @@ def main(a=None):
         fail("needs --out, and --nup or --romfs with --exefs")
     out = os.path.abspath(a.out)
     work = os.path.abspath(a.work)
+    lock_work(work)   # (before anything is read or cleared in it: stop_stray_compilers, drop_stale_objects, the lift)
     a.language = build_language(a, out)   # (now: the folder's own language.txt is still the one the player left)
     warn_slow_disk(out, work)   # (a warning, not a stop: a hard drive still builds, only much slower)
     check_writable(out)
-    # (AMD FSR 4: the build's switch for nx2/build.py, set or cleared here, before the checks: on Linux it compiles its own
-    # Vulkan back end, as with DLSS, so the AppImage's prebuilt one is neither checked nor used. One set in the shell is not
-    # taken for this build's: --fsr, or the folder's mark, decides)
+    # (AMD FSR 4: the build's switch for nx2/build.py, set or cleared here, before the checks: the Vulkan back end is compiled
+    # with it, and its headers are checked. One set in the shell is not taken for this build's: --fsr, or the folder's mark, decides)
     fsr = fsr_wanted(a, out)
     if fsr:
         os.environ["HOOKSHOT_FSR"] = "1"
     else:
         os.environ.pop("HOOKSHOT_FSR", None)
-    check_cpu(fsr)   # (no game read yet: the AppImage on a CPU without AVX2 stops here)
     if getattr(a, "fetch_ngx_sdk", False):
-        fetch_ngx_sdk(a)   # (the SDK selects a source renderer instead of HOOKSHOT_VK_PREBUILT)
+        fetch_ngx_sdk(a)   # (the Vulkan back end is compiled with NVIDIA DLSS)
     check_windows_sdk(work)
     stop_stray_compilers(work, a.default_work)
     drop_stale_objects(work)
@@ -2243,9 +2305,6 @@ def main(a=None):
             print("--fetch-fsr-runtime: AMD publishes this runtime for Windows only; on Linux see the readme "
                   "(amd_fidelityfx_upscaler_vk.so)", flush=True)
         open(os.path.join(out, FSR_MARK), "w").close()
-        if os.environ.get("HOOKSHOT_VK_PREBUILT"):   # (the AppImage's back end, built without FSR 4: nx2/build.py prebuilt_renderer)
-            print("--fsr: the Vulkan back end is compiled here with AMD FSR 4, not the prebuilt one (HOOKSHOT_VK_PREBUILT)",
-                  flush=True)
     else:
         if os.path.isfile(os.path.join(out, FSR_MARK)):
             os.remove(os.path.join(out, FSR_MARK))
@@ -2331,7 +2390,8 @@ def main(a=None):
     check_supported_build(exefs)
 
     # (made once on the development PC: lists of addresses and counts, no game code)
-    for name in ("hot_funcs.txt", "hot_order.txt", "hookshot_pieces.prof", "hookshot.res"):
+    # (hookshot_vk.profdata: the renderer's own profile, counts over Hookshot's own code)
+    for name in ("hot_funcs.txt", "hot_order.txt", "hookshot_pieces.prof", VK_PROFILE, "hookshot.res"):
         src = os.path.join(ROOT, "work", name)
         dst = os.path.join(work, name)
         # (copied only when it differs: a compiler still ending from a cancelled build keeps the profile mapped, WinError 1224)
@@ -2346,6 +2406,9 @@ def main(a=None):
         env["A64_HOT_FUNCS"] = os.path.join(work, "hot_funcs.txt")
     if os.path.exists(os.path.join(work, "hookshot_pieces.prof")) and profile_readable(os.path.join(work, "hookshot_pieces.prof")):
         env["RX_PGO"] = os.path.join(work, "hookshot_pieces.prof")
+    vk_profile = vk_profile_for(work, os.environ)
+    if vk_profile:
+        env["RX_VK_PGO"] = vk_profile
 
     say("stage", "lift", "Translating the game to PC code")
     # (the same game, tools and settings as the lift before: its C is what this lift would write, and nothing recompiles from it. A
@@ -2386,22 +2449,35 @@ def main(a=None):
                             except OSError as e:
                                 fail("Could not remove earlier translated file %s: %s. The new translation has not started." %
                                      (os.path.join(gen_dir, f), e))
-                inputs = lift_key(exefs, work, env, planning=False)   # (what the lift reads and does not write, as it starts)
-                run(PY + ["nx2/lift.py", "--standalone", "--write", "--exefs", exefs, "--work", work], env)
-                if os.path.isfile(os.path.join(work, "sa", "gen", "code_hot.c")):
-                    run(PY + ["nx2/split_hot.py", os.path.join(work, "sa", "gen")], env)   # (eight files side by side: ~6 minutes, not 79)
-                # (the lift writes inputs of the next one: split_hot's kept pieces, image/hot_pieces.txt, which the key hashes. Its key is
-                # taken again now, from what the next build reads: taken before, in a fresh work folder (no hot_pieces.txt yet) it never
-                # matched the next build's, which translated the game again for nothing, ~5 minutes on Windows, and a player's first
-                # update after a new install did not keep the translation). Only when nothing else it reads changed while it ran: a
-                # translator file edited during the lift would otherwise stamp C made from the old one with the new one's key, and the
-                # next build would skip a lift it needs. Then the key from before stays, and the next build translates again. The key is
-                # taken before that comparison: a file edited between the two is caught by it, and one edited after it is in no key that is
-                # kept (SimonKimDev, #2686)
-                after = lift_key(exefs, work, env)
-                if lift_key(exefs, work, env, planning=False) == inputs:
-                    key = after
-                write_lift_key(work, key)
+                # (HOOKSHOT_LIFT_STORE: the lift another work folder made from the same inputs, nx2/lift_store.py. Its share key is taken
+                # before the lift, from what this one starts from, as that folder's was; the restored folder gets that lift's chunk
+                # boundaries and hot pieces too, so its key is taken again after it)
+                lifts = _lift_store.root()
+                share = lift_share_key(exefs, work, out, env) if lifts else None
+                if share and _lift_store.restore(lifts, share, work, bad=lambda: lifted_cut_short(gen_dir)):
+                    print("the game was translated with these tools in another work folder: its translation is copied (%s)" %
+                          os.path.join(lifts, share), flush=True)
+                    key = lift_key(exefs, work, env)
+                    write_lift_key(work, key)
+                else:
+                    inputs = lift_key(exefs, work, env, planning=False)   # (what the lift reads and does not write, as it starts)
+                    run(PY + ["nx2/lift.py", "--standalone", "--write", "--exefs", exefs, "--work", work], env)
+                    if os.path.isfile(os.path.join(work, "sa", "gen", "code_hot.c")):
+                        run(PY + ["nx2/split_hot.py", os.path.join(work, "sa", "gen")], env)   # (eight files side by side: ~6 minutes, not 79)
+                    # (the lift writes inputs of the next one: split_hot's kept pieces, image/hot_pieces.txt, which the key hashes. Its key is
+                    # taken again now, from what the next build reads: taken before, in a fresh work folder (no hot_pieces.txt yet) it never
+                    # matched the next build's, which translated the game again for nothing, ~5 minutes on Windows, and a player's first
+                    # update after a new install did not keep the translation). Only when nothing else it reads changed while it ran: a
+                    # translator file edited during the lift would otherwise stamp C made from the old one with the new one's key, and the
+                    # next build would skip a lift it needs. Then the key from before stays, and the next build translates again. The key is
+                    # taken before that comparison: a file edited between the two is caught by it, and one edited after it is in no key that is
+                    # kept (SimonKimDev, #2686)
+                    after = lift_key(exefs, work, env)
+                    if lift_key(exefs, work, env, planning=False) == inputs:
+                        key = after
+                        if share and not lifted_cut_short(gen_dir):   # (for other work folders: nx2/lift_store.py)
+                            _lift_store.save(lifts, share, work)
+                    write_lift_key(work, key)
             cut = lifted_cut_short(gen_dir)
             if not cut:
                 break
@@ -2562,8 +2638,10 @@ def main(a=None):
     if importlib.util.find_spec("fontTools") is None:
         shutil.rmtree(prompts, ignore_errors=True)
         print("the button prompts of other controllers were not made (no fontTools): the game shows its own", flush=True)
-    elif run(PY + [os.path.join(HERE, "prompt_assets.py"), "--romfs", romfs, "--out", prompts] +
-             ([] if launcher else ["--incremental"]), check=False, output=sys.stderr):
+    # (kept when nothing they are made from changed, in a packaged builder too: the stamp has the builder's release, so the
+    # first build after a builder update draws them again)
+    elif run(PY + [os.path.join(HERE, "prompt_assets.py"), "--romfs", romfs, "--out", prompts, "--incremental"],
+             check=False, output=sys.stderr):
         print("the button prompts of other controllers were not made: the game shows its own", flush=True)
         shutil.rmtree(prompts, ignore_errors=True)
     icon = os.path.join(ROOT, "assets", "hookshot.png")

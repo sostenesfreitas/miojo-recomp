@@ -47,11 +47,12 @@ struct Texture {
     VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
     VkImageType type = VK_IMAGE_TYPE_2D;
 };
-struct { bool sparse_images = false; VkPhysicalDevice physical{}; } dev;
+struct { bool sparse_images = false; VkPhysicalDevice physical{}; VkPhysicalDeviceProperties props{}; } dev;
 struct { int preset = 1, budget = 1, texture_detail = 0; } opts;
 constexpr int kAutoPreset = 6;   // (gpu/vk/vk_menu.h: the Quality preset Auto (this PC), its tier's budgets in budget)
-uint64_t allowed;
+uint64_t allowed, ram;
 bool query_ok;
+uint64_t system_ram_bytes() { return ram; }
 bool vram_usage(uint64_t* used, uint64_t* budget, uint64_t* = nullptr) {
     *used = 2000ull << 20; *budget = allowed; return query_ok;
 }
@@ -72,10 +73,12 @@ void check_image(const Texture& x, int skip, int width, int levels) {
     CHECK(x.levels == (uint32_t)levels);
 }
 int main(int argc, char** argv) {
-    CHECK(argc == 13);
+    CHECK(argc == 15);
     opts.preset = std::atoi(argv[1]);
     opts.budget = std::atoi(argv[12]);
     if (const char* e = std::getenv("TEST_TEXTURE_DETAIL")) opts.texture_detail = std::atoi(e);
+    dev.props.deviceType = std::atoi(argv[13]) ? VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU : VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+    ram = std::strtoull(argv[14], nullptr, 10) << 20;
     allowed = std::strtoull(argv[2], nullptr, 10) << 20;
     query_ok = std::atoi(argv[3]) != 0;
     nvn_tex t{}; t.d.samples = 1;
@@ -99,7 +102,8 @@ int main(int argc, char** argv) {
     std::printf("PASS %s\n",argv[11]);
 }
 '''.replace("@HELPERS@", helpers).replace("@POLICY@", policy).replace("@MIP@", mip)
-    # The preset: a number, its budget the same (as a preset sets it); or (preset, budget), Auto (this PC) with its tier's budgets.
+    # The preset: a number, its budget the same (as a preset sets it); or (preset, budget): Auto (this PC) with its tier's budgets,
+    # or Custom with the budgets of the preset it was turned from (kept, as the Debug tab's Set up for a weak laptop leaves them).
     # Literal outcomes: (skip, width, levels) for a 3072-square image and a
     # 1365-square, 90-layer image. No expected result calls the production policy.
     original = (0, 3072, 12, 0, 1365, 11)
@@ -112,6 +116,8 @@ int main(int argc, char** argv) {
         ("zero-budget", 1, 0, 1, {}, original, 0),
         ("failed-budget-query", 1, 3674, 0, {}, original, 0),
         ("custom-preset", 0, 3674, 1, {}, original, 0),
+        ("custom-with-minimums-budgets", (0, 1), 3674, 1, {}, minimum, 0),
+        ("custom-with-lows-budgets", (0, 2), 3674, 1, {}, original, 0),
         ("auto-at-minimum-tier", (6, 1), 3674, 1, {}, minimum, 0),
         ("auto-at-minimum-tier-large-budget", (6, 1), 7500, 1, {}, original, 0),
         ("auto-at-balanced-tier", (6, 3), 3674, 1, {}, original, 0),
@@ -137,6 +143,21 @@ int main(int argc, char** argv) {
         ("detail-medium-dimension-override", 2, 7500, 1, {"TEST_TEXTURE_DETAIL": "2", "RX_VK_TEX_MAX_DIM": "2048"},
          (1, 1536, 11, 0, 1365, 11), 0),
     ]
+    # Integrated GPUs: (name, preset, driver budget, query, overrides, expected, switch, integrated, RAM in MB). An i3-1115G4's
+    # UHD Graphics with 16 GB of RAM reported 16122 MB and was allowed 7402 MB.
+    shared = [
+        ("integrated-16gb-large-budget", 1, 7402, 1, {}, minimum, 0, 1, 16122),
+        ("integrated-16gb-failed-budget-query", 1, 0, 0, {}, minimum, 0, 1, 16122),
+        ("integrated-16gb-auto-at-minimum-tier", (6, 1), 7402, 1, {}, minimum, 0, 1, 16122),
+        ("integrated-8gb-large-budget", 1, 4900, 1, {}, minimum, 0, 1, 7900),
+        ("integrated-16gb-low-preset", 2, 7402, 1, {}, original, 0, 1, 16122),
+        ("integrated-16gb-weak-laptop-button", (0, 1), 7402, 1, {}, minimum, 0, 1, 16122),
+        ("integrated-16gb-custom-no-budget", (0, 0), 7402, 1, {}, original, 0, 1, 16122),
+        ("integrated-16gb-disabled", 1, 7402, 1, {"RX_VK_LOW_VRAM_MIPS": "0"}, original, 0, 1, 16122),
+        ("integrated-32gb-large-budget", 1, 15000, 1, {}, original, 0, 1, 32500),
+        ("integrated-unknown-ram", 1, 7402, 1, {}, original, 0, 1, 0),
+        ("discrete-16gb-large-budget", 1, 7402, 1, {}, original, 0, 0, 16122),
+    ]
     for value in ("0", "off", "false", "no", "OFF", "FaLsE", " no \t", ""):
         cases.append(("disabled-" + repr(value), 1, 3674, 1,
                       {"RX_VK_LOW_VRAM_MIPS": value}, original, 0))
@@ -153,15 +174,16 @@ int main(int argc, char** argv) {
         if a.sanitize:
             cmd += ["-fsanitize=" + a.sanitize, "-fno-omit-frame-pointer"]
         subprocess.run(cmd + [str(cpp), "-o", str(exe)], check=True)
-        for name, preset, budget, query, overrides, expected, switch in cases:
+        for name, preset, budget, query, overrides, expected, switch, integrated, ram in \
+                [c + (0, 32500) for c in cases] + shared:
             env = os.environ.copy()
             for key in ("RX_VK_LOW_VRAM_MIPS", "RX_VK_TEX_MAX_DIM", "RX_VK_TEX_MAX_MB", "RX_VK_TEX_SKIP_MB"):
                 env.pop(key, None)
             env.update(overrides)
             preset, memory_budget = preset if isinstance(preset, tuple) else (preset, preset)
-            args = [preset, budget, query, *expected, switch, name, memory_budget]
+            args = [preset, budget, query, *expected, switch, name, memory_budget, integrated, ram]
             subprocess.run([str(exe), *map(str, args)], env=env, check=True)
-    print("PASS %d mip-policy configurations" % len(cases))
+    print("PASS %d mip-policy configurations" % (len(cases) + len(shared)))
 
 
 if __name__ == "__main__":

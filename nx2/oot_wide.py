@@ -18,13 +18,17 @@ MAIN = 0x80020000   # (main's base in this image: nx2/eden_image.py)
 UI_M00, UI_M11 = "(2.0f / 3840.0f)", "(2.0f / 2160.0f)"   # (the UI's full-screen orthographic projection, 3840x2160 grid)
 # (the screens whose UI keeps the whole picture: the item-wheel and pause / system menu backgrounds redraw a capture of
 # the whole picture; the event and loading fades cover it. Bit k of host/hos_main.c's hos_wide_keep_mask keeps screen k
-# whole; the Insert menu's Ultrawide menus row clears the menus' bits 1 and 3 (vk_framegen.cpp): their layout then
-# keeps its 16:9 shape in the middle, as the HUD's does, instead of being stretched over the whole picture. Bit 0, the
-# item wheel's background (the last frame of play, blurred, HUD and all), and bit 2, the fades, keep covering it all: bit 0
-# cleared, that capture went into the middle at twice its width. Screen 3, the loading fade between two areas, is noted
-# for the host as its projection is set up, at each area change: in the middle it leaves the sides open, and the renderer
-# closes them by as much as it is closed, host/hos_main.c hos_wide_cover)
+# whole; the Insert menu's Ultrawide menus row clears bit 1, the pause / system menus, and bit 3, the loading fade
+# (vk_framegen.cpp): their layout then keeps its 16:9 shape in the middle (the loading fade's placed as the HUD's,
+# host/hos_wide_ui.c), instead of being stretched over the whole picture. Bit 0, the item wheel's background (the last
+# frame of play, blurred, HUD and all), and bit 2, the event fade, keep covering it all: bit 0
+# cleared, that capture went into the middle at twice its width. By the class each vtable's factory makes:
+# UIShortCutBGScreen, UICommonScreen, UIEventFadeScreen, UILoadingFadeScreen. Screen 3, the loading fade between two areas, is also noted for the host as its projection is set up,
+# at each area change: host/hos_main.c hos_wide_cover)
 KEEP_VTABLES = (MAIN + 0x4bed098, MAIN + 0x4be4fb0, MAIN + 0x4be61c8, MAIN + 0x4be7b30)
+# (another screen that keeps one of those bits: UISystemOverlayScreen. Squeezed, the item quick select's background
+# went into the middle 16:9 from its first opening on)
+KEEP_ALSO = ((MAIN + 0x4bef4a0, 0),)
 
 
 def _ratio(vreg, base=None):
@@ -42,14 +46,21 @@ def _size(name):
             % (name, name, name))
 
 
-HUD = ("{ extern volatile float hos_wide_squeeze; const float _q = hos_wide_squeeze; if (_q > 0.0f) { float _m00, _m11; "
+# (the UI projection of every 2D screen not kept whole (KEEP_VTABLES) scaled across and up by host/hos_wide_ui.c's hos_ui_qx
+# and hos_ui_qy for the picture's shape (before the first present: hos_wide_squeeze across), which also places the HUD's
+# panes and fits the menus. At 16:9 hos_wide_squeeze is 0 and the projection is the game's)
+HUD = ("{ extern volatile float hos_wide_squeeze; if (hos_wide_squeeze > 0.0f) { float _m00, _m11; "
        "memcpy(&_m00, c->vreg[1], 4); memcpy(&_m11, (const uint8_t *)c->vreg[4] + 4, 4); "
        "if (_m00 == %s && _m11 == %s) { const uint64_t _vt = recomp_load64(c, c->x[0] - 0x1b8); "
        "extern volatile uint32_t hos_wide_keep_mask; const uint32_t _kb = %s; "
        "if (_kb == 8u) { extern volatile uint64_t hos_wide_cover_screen; hos_wide_cover_screen = c->x[0] - 0x1b8; } "
-       "if (!(_kb & hos_wide_keep_mask)) { float _row[4]; memcpy(_row, c->vreg[1], 16); for (int _k = 0; _k < 4; _k++) _row[_k] *= _q; "
-       "memcpy(c->vreg[1], _row, 16); } } } }   /* (nx2/oot_wide.py: HUD in the middle 16:9) */"
-       % (UI_M00, UI_M11, " : ".join("_vt == 0x%xULL ? %du" % (v, 1 << k) for k, v in enumerate(KEEP_VTABLES)) + " : 0u"))
+       "if (!(_kb & hos_wide_keep_mask)) { extern volatile float hos_ui_qx, hos_ui_qy; "
+       "float _qx = hos_ui_qx, _qy = hos_ui_qy, _row[4]; if (!(_qx > 0.0f)) _qx = hos_wide_squeeze, _qy = 1.0f; "
+       "if (_qx != 1.0f) { memcpy(_row, c->vreg[1], 16); for (int _k = 0; _k < 4; _k++) _row[_k] *= _qx; memcpy(c->vreg[1], _row, 16); } "
+       "if (_qy > 0.0f && _qy != 1.0f) { memcpy(_row, c->vreg[4], 16); for (int _k = 0; _k < 4; _k++) _row[_k] *= _qy; "
+       "memcpy(c->vreg[4], _row, 16); } } } } }   /* (nx2/oot_wide.py: the HUD and menus at their 16:9 shape) */"
+       % (UI_M00, UI_M11, " : ".join(["_vt == 0x%xULL ? %du" % (v, 1 << k) for k, v in enumerate(KEEP_VTABLES)] +
+                                     ["_vt == 0x%xULL ? %du" % (v, 1 << k) for v, k in KEEP_ALSO]) + " : 0u"))
 
 MOVIE = ("{ extern volatile float hos_wide_margin; const float _m = hos_wide_margin; if (_m > 0.0f) { "
          "const uint64_t _vp = c->x[29] - 40; uint32_t _ua = (uint32_t)recomp_load32(c, _vp + 8), _ub = (uint32_t)recomp_load32(c, _vp + 16); "
@@ -71,6 +82,32 @@ THUMB = ("{ extern volatile float hos_wide_ratio; const float _r = hos_wide_rati
          "c->x[2] = (uint32_t)((306 - _h) / 2); c->x[4] = (uint32_t)_h; } } }"
          "   /* (nx2/oot_wide.py: the save's picture, the middle 16:9) */")
 
+# The HUD's layout for the screen's shape (host/hos_wide_ui.c; the sites are from https://github.com/NotRexed/Hookshot/pull/2843). A 2D layout pane's final transform is made by f_8154cab0 (main+0x152cab0) when
+# its dirty bit 6 is set (f_8154caa0 checks it and falls into it); the pane is x0 there and x19 in it. The parent it multiplies
+# by is x0 after main+0x152cdd4; main+0x152cd98 is where every path without one joins. The translation is stored at
+# main+0x152ce64, before the stored transform is read back to tell whether the children need theirs remade. f_8154ac30 reads a
+# pane's size as drawn (ldp s0, s1, [x0, #0x58]). f_8154a730, the calculate pass, skips a pane with no dirty bits at all.
+UI_FORCE = ("{ extern volatile uint32_t hos_wide_ui_force; if (hos_wide_ui_force) c->x[8] |= 0x40; }"
+            "   /* (nx2/oot_wide.py: every pane remakes its transform) */")
+# (the calculate pass, f_8154a730, returns at once for a pane with no dirty bits: a pane that never changes would never remake
+# its transform. While forced its bit 6 is set where the pass reads the bits, so it reaches f_8154caa0)
+UI_FORCE_PASS = ("{ extern volatile uint32_t hos_wide_ui_force; if (hos_wide_ui_force) { c->x[8] |= 0x40; "
+                 "recomp_store32(c, c->x[0], (uint32_t)c->x[8]); } }   /* (nx2/oot_wide.py: every pane remakes its transform) */")
+UI_PARENT = ("{ extern void hos_wide_ui_parent(uint64_t parent); hos_wide_ui_parent(%s); }"
+             "   /* (nx2/oot_wide.py: the pane's parent) */")
+UI_PLACED = ("{ extern void hos_wide_ui_placed(Ctx *c, uint64_t pane); hos_wide_ui_placed(c, c->x[19]); }"
+             "   /* (nx2/oot_wide.py: the HUD's side panes at the screen's edges) */")
+UI_SIZE = ("{ extern void hos_wide_ui_size(Ctx *c, uint64_t pane); hos_wide_ui_size(c, c->x[0]); }"
+           "   /* (nx2/oot_wide.py: spanning panes the screen's width) */")
+UI_SITES = (
+    (0x152a730, 0xb9400008, UI_FORCE_PASS),         # ldr w8, [x0]: the calculate pass's first look at the dirty bits
+    (0x152caa0, 0xb9400008, UI_FORCE),              # ldr w8, [x0]: the pane's dirty bits
+    (0x152cd98, 0xad4207e0, UI_PARENT % "0"),       # ldp q0, q1, [sp, #0x40]: no parent
+    (0x152cdd4, 0xb9403008, UI_PARENT % "c->x[0]"), # ldr w8, [x0, #0x30]: the parent's transform
+    (0x152ce64, 0xfc04c263, UI_PLACED),             # stur d3, [x19, #0x4c]: the translation stored
+    (0x152ac40, 0x2d4b0400, UI_SIZE),               # ldp s0, s1, [x0, #0x58]: the size as drawn
+)
+
 # (main offset, the original instruction word there, the C after it)
 SITES = (
     # the picture: the graphics setup and the display settings object build {2560, 1440} in x8 (mov, then this movk)
@@ -91,7 +128,7 @@ SITES = (
     (0x3b5c758, 0xa941a269, MOVIE),
     # the viewport helper's SetViewport, after the call's address is loaded (ldr x8, [x8]), before blr x8
     (0x284824, 0xf9400108, THUMB),
-)
+) + UI_SITES
 
 
 def install(lifter, img):

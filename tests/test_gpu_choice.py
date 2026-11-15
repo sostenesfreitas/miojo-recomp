@@ -40,6 +40,22 @@ def main():
     menu = (vk / "vk_menu.cpp").read_text(encoding="utf-8")
     if not preset_exempt(menu, "gpu_device"):
         raise SystemExit("vk_menu.cpp: changing the GPU row resets the quality preset (and its VRAM budget) to Custom")
+    # (the row saved as the card itself, gpu_device_id=, and found where it is in this run's list: gpu_choice.h)
+    if "gpu_device_cards.push_back({p.vendorID, p.deviceID})" not in pick or \
+            pick.index("gpu_device_cards.push_back") > pick.index("menu_set_gpu_count("):
+        raise SystemExit("pick_device: the usable GPUs' models (gpu_device_cards) are not listed before the row is counted")
+    count = menu[menu.index("void menu_set_gpu_count(int count) {"):]
+    count = count[:count.index("\n}\n")]
+    if "gpu_choice::menu_of_card(gpu_device_cards, gpu_saved_card)" not in count or \
+            count.index("menu_of_card") > count.index("r.hi = count") or count.index("menu_of_card") > count.index("restart_value"):
+        raise SystemExit("menu_set_gpu_count: the saved card is not found in the list before the row and its restart value are set")
+    save = menu[menu.index("void save() {"):]
+    save = save[:save.index("\n}\n")]
+    if 'key == "gpu_device_id"' not in save or "gpu_choice::card_id(gpu_device_cards, opts.gpu_device - 1)" not in save or \
+            'fprintf(f, "gpu_device_id=%s\\n"' not in save or "gpu_card_missing ? gpu_saved_card" not in save:
+        raise SystemExit("save: the GPU row's card is not written (gpu_device_id=), its old line kept, or a missing card dropped")
+    if 'if (!strcmp(line, "gpu_device_id")) gpu_saved_card' not in menu:
+        raise SystemExit("menu_init: gpu_device_id= is not read")
     with tempfile.TemporaryDirectory(prefix="gpu-choice-") as tmp:
         exe = Path(tmp) / "gpu-choice"
         subprocess.run([args.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror",

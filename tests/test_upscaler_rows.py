@@ -167,7 +167,8 @@ def main():
     if "temporal_off() && stretch(" not in upscale:
         raise SystemExit("temporal_upscale: the Upscaler's Off does not stretch in place of the game's network")
     stretch = function(temporal, "bool stretch(")
-    for need in ("s.linear, in_view", "s.out_layout", "c.valid", "in->width != c.width", "VK_FORMAT_B10G11R11_UFLOAT_PACK32"):
+    for need in ("s.linear, in_view", "s.out_layout", "c.valid", "in->width != c.width",
+                 "!temporal_colour_pair(in->format, out->format)", "rgba ? s.stretch_rgba : s.out"):
         if need not in stretch:
             raise SystemExit("stretch: %s is missing (Off's linear stretch of the scene only, into the picture)" % need)
     if "!temporal_wanted() && !temporal_off()" not in function(temporal, "void temporal_note_scene_draw("):

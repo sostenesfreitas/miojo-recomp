@@ -218,6 +218,14 @@ struct OfConstants {
 };
 static_assert(sizeof(OfConstants) == 32, "cbOF must match the SDK's layout");
 
+// Both SDK backends must decode the same captured present. UNORM describes storage,
+// not its transfer function: the game's Native HDR present carries PQ codes in it.
+void colour_constants(Constants& fi, OfConstants& of, bool native_pq, float max_luminance) {
+    fi.back_buffer_transfer_function = of.back_buffer_transfer_function = native_pq ? 1u : 0u;
+    fi.min_max_luminance[0] = of.min_max_luminance[0] = 0.0f;
+    fi.min_max_luminance[1] = of.min_max_luminance[1] = native_pq ? max_luminance : 1.0f;
+}
+
 /// cbOF_SPD. Only numWorkGroupOpticalFlowInputPyramid is read by the luma pyramid (its mip count is
 /// fixed at six in the shader itself), but the whole block is written because the GLSL declares it.
 struct OfSpdConstants {
@@ -306,6 +314,8 @@ struct State {
     int32_t of_frame_index = 0;
     bool first_frame = true;
     uint64_t sequence = 0;               ///< Inputs::sequence of the frame kept as the previous source
+    bool native_pq = false;
+    float max_luminance = 1.0f;
     bool in_general = false;             ///< the UNDEFINED -> GENERAL barriers have been recorded
 };
 
@@ -792,6 +802,8 @@ bool generate(VkCommandBuffer cmd, const Inputs& in) {
     if (in.color_format == VK_FORMAT_UNDEFINED) return false;
     if (!in.width || !in.height || !in.render_width || !in.render_height) return false;
     if (!(in.camera.device_to_view_depth[1] > 0.0f)) return false;   // (no camera: vk_fsr3_inputs.cpp)
+    if (in.native_pq && (!std::isfinite(in.max_luminance) || in.max_luminance <= 0.0f || in.max_luminance > 10000.0f))
+        return false;
     if (!prepare(in.width, in.height, in.render_width, in.render_height, in.color_format))
         return false;
 
@@ -835,8 +847,14 @@ bool generate(VkCommandBuffer cmd, const Inputs& in) {
                        VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
     }
 
-    const bool reset = in.reset || g.first_frame || in.sequence != g.sequence + 1;
+    const float max_luminance = in.native_pq ? in.max_luminance : 1.0f;
+    const bool reset = in.reset || g.first_frame || in.sequence != g.sequence + 1 ||
+                       g.native_pq != in.native_pq || g.max_luminance != max_luminance;
     g.first_frame = false;
+    if (g.native_pq != in.native_pq || g.max_luminance != max_luminance)
+        logf("vk: fsr3fi: captured present %s, SDK luminance maximum %.0f; colour history reset",
+             in.native_pq ? "PQ" : "sRGB", max_luminance);
+    g.native_pq = in.native_pq, g.max_luminance = max_luminance;
     g.sequence = in.sequence;   // (this frame becomes the next one's previous source below, whatever else happens)
     const int32_t rw = (int32_t)g.render_width, rh = (int32_t)g.render_height;
     const int32_t uw = (int32_t)g.width, uh = (int32_t)g.height;
@@ -867,11 +885,6 @@ bool generate(VkCommandBuffer cmd, const Inputs& in) {
     k.num_instances = 1;
     k.interpolation_rect_base[0] = 0, k.interpolation_rect_base[1] = 0;
     k.interpolation_rect_size[0] = uw, k.interpolation_rect_size[1] = uh;
-    // The colour this backend is handed is the window's, which this renderer presents as UNORM with
-    // the game's own encoding on it, so the SDK's sRGB transfer function is the right one and the
-    // luminance pair the other two functions would need is left at the SDR range.
-    k.back_buffer_transfer_function = 0;
-    k.min_max_luminance[0] = 0.0f, k.min_max_luminance[1] = 1.0f;
     // fTanHalfFOV is the *horizontal* half angle's tangent, as ffxFrameInterpolationDispatch builds it from the vertical
     // field of view and the render aspect: 1 / p[0][0] of the scene's projection (fsr3_math.h)
     k.tan_half_fov = in.camera.tan_half_fov_x;
@@ -903,8 +916,7 @@ bool generate(VkCommandBuffer cmd, const Inputs& in) {
     of.pyramid_level = 0;
     of.pyramid_level_count = kOfLevels;
     of.frame_index = g.of_frame_index;
-    of.back_buffer_transfer_function = 0;
-    of.min_max_luminance[0] = 0.0f, of.min_max_luminance[1] = 1.0f;
+    colour_constants(k, of, in.native_pq, max_luminance);
 
     uint32_t luma_groups[2], luma_offset[2], luma_mips = 0;
     // The luma pyramid's own shader hard-codes six mips, so the four the SDK asks ffxSpdSetup for

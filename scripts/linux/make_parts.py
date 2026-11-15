@@ -27,7 +27,7 @@ PARTS = (
     ("usr/lib/hookshot/emsdk", None),
     ("usr/lib/hookshot/ffmpeg", None),
     ("usr/lib/hookshot/sysroot", None),
-    ("usr/lib/hookshot", ("hookshot_vk.so", "libSDL2-2.0.so.0")),
+    ("usr/lib/hookshot", ("libSDL2-2.0.so.0",)),   # (no built Vulkan back end since 2026-11-14: every build compiles it)
 )
 
 

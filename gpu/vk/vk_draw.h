@@ -98,6 +98,8 @@ uint64_t ub_generation();
 void ub_thread_off();
 /// The pipeline cache to disk (force: whatever was built since the last save; else only after a few new ones)
 void pipeline_cache_save(bool force);
+/// (hookshot) the serial builds' thread between two builds: a save put off for builds under way, run there (vk_jobs.cpp)
+void pipeline_cache_between_builds();
 /// (hookshot) the Debug tab's Descriptor reuse and Sampler cache rows as the menu has them: they apply in play
 void menu_debug_rows(int descriptor_reuse, int sampler_cache);
 void pipeline_cache_save_play();   // what play made since the last save, into a play file now

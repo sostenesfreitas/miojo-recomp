@@ -49,6 +49,56 @@ def frame_content_size(head):
     return size + 256 if n == 2 else size
 
 
+# (Windows) a read refused because another program holds part of the file: ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+LOCKED = {32, 33}
+# (Windows) a drive that cannot give back what it holds
+DRIVE_ERRORS = {21: "the drive is not ready (unplugged, or asleep)", 23: "a read failed its data check",
+                27: "the drive could not find a sector", 30: "the drive could not read", 31: "the drive stopped responding",
+                1117: "the drive reported an I/O error", 1392: "the file is corrupted and unreadable"}
+
+
+# (Windows) the C runtime's _get_doserrno, found now: importing ctypes after a failed read runs file calls of its own, which
+# replace the error it holds
+_get_doserrno = None
+if os.name == "nt":
+    try:
+        import ctypes
+        _get_doserrno = ctypes.CDLL("ucrtbase")._get_doserrno
+    except (ImportError, OSError, AttributeError):
+        pass
+
+
+def windows_error(error):
+    """The Windows error behind an OSError, or None. A file object's read goes through the C runtime, which turns every
+    Windows error from 19 to 36 (a lock, a sharing violation, a bad sector, a drive gone) into errno 13 and keeps the error
+    itself apart (its _doserrno): read straight after the failure, before anything else can fail and replace it"""
+    code = getattr(error, "winerror", None)
+    if code is None and _get_doserrno is not None and error.errno == errno.EACCES:
+        value = ctypes.c_ulong()
+        if _get_doserrno(ctypes.byref(value)) == 0 and value.value:
+            code = value.value
+    return code
+
+
+def unreadable(path, at, size, error, code=None):
+    """What to say when the .nup could not be read at byte at, in plain words with what to do. code: the Windows error
+    (windows_error), else read from error"""
+    code = code if code is not None else windows_error(error)
+    name = os.path.basename(path)
+    where = "%s at %d of %d MB" % (name, at >> 20, size >> 20) if size else "%s at %d MB" % (name, at >> 20)
+    said = " (Windows error %d)" % code if code is not None else " (%s)" % (error.strerror or error)
+    if code in LOCKED:
+        return ("Windows would not let the build read %s: another program has that part of the file locked%s. A backup "
+                "or sync program, or a virus scan, can do this. Close it and build again, or copy the .nup to another "
+                "folder and build from the copy." % (where, said))
+    if code in DRIVE_ERRORS or code is None and error.errno == errno.EIO:
+        return ("Your drive could not read %s: %s%s. Copy the .nup to another drive and build from the copy. If Windows "
+                "cannot copy it either, that part of the drive is damaged: check the drive for errors, or dump the game "
+                "again onto another drive." % (where, DRIVE_ERRORS.get(code, "the drive reported an I/O error"), said))
+    return ("The build could not read %s%s. Close any program that may be using the file and build again, or copy the "
+            ".nup to another drive and build from the copy." % (where, said))
+
+
 class Nup:
     def __init__(self, path, *, strict=False):
         self.path = path
@@ -209,12 +259,27 @@ class Nup:
                 r = self.files[k - self.nd]
                 yield prefix + self.name(r[0], r[1]), r
 
+    def _data(self, n):
+        """Up to n bytes of the package from where it stands. A read the system refuses partway through the file (another
+        program's lock on that part of it, a drive that cannot read it back) stops with what that means and what to do, not
+        as a bare "PermissionError: [Errno 13] Permission denied" (issue 295)"""
+        at = self.f.tell()
+        try:
+            return self.f.read(n)
+        except OSError as error:
+            code = windows_error(error)   # (first: a later call that fails would replace the error it reads)
+            try:
+                size = os.fstat(self.f.fileno()).st_size
+            except OSError:
+                size = None
+            raise SystemExit(unreadable(self.path, at, size, error, code)) from error
+
     def inner_is_zstd(self, r):
         """Whether what this frame holds is itself a zstd frame"""
         import zstandard
         self.f.seek(r[3])
         try:
-            return zstandard.ZstdDecompressor().decompressobj().decompress(self.f.read(min(r[2], 1 << 20)))[:4] == ZSTD
+            return zstandard.ZstdDecompressor().decompressobj().decompress(self._data(min(r[2], 1 << 20)))[:4] == ZSTD
         except zstandard.ZstdError:   # (made with one of the game's dictionaries: the game's own file)
             return False
 
@@ -227,7 +292,7 @@ class Nup:
         if not name:
             name = self.name(r[0], r[1])
         self.f.seek(r[3])
-        head = self.f.read(18)
+        head = self._data(18)
         if head[:4] != ZSTD:
             return False
         size = frame_content_size(head)
@@ -242,7 +307,7 @@ class Nup:
         left = r[2]
         try:
             while left and got <= r[2] and not d.eof:
-                b = self.f.read(min(left, 1 << 20))
+                b = self._data(min(left, 1 << 20))
                 if not b:
                     break
                 left -= len(b)
@@ -264,7 +329,7 @@ class Nup:
             d = zstandard.ZstdDecompressor().decompressobj()
             got = 0
             while left and not getattr(d, "eof", False):
-                b = self.f.read(min(left, 8 << 20))
+                b = self._data(min(left, 8 << 20))
                 if not b:
                     break
                 left -= len(b)
@@ -284,7 +349,7 @@ class Nup:
                 raise SystemExit("a compressed file came out as %d bytes, %d expected" % (got, r[2]))
             return
         while left:
-            b = self.f.read(min(left, 8 << 20))
+            b = self._data(min(left, 8 << 20))
             if not b:
                 raise SystemExit("the .nup file ends early (short read at %d of %d MB): it is incomplete. Download or copy it again"
                                  % (self.f.tell() >> 20, os.fstat(self.f.fileno()).st_size >> 20))

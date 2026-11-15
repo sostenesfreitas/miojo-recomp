@@ -383,8 +383,13 @@ FOLDER_DOWNLOADS = _guid("374DE290-123F-4565-9164-39C4925E467B")
 FOLDER_PROGRAMS = _guid("A77F5D77-2E2B-44C3-A6A2-ABA601054A51")
 
 
+DUMP_SEARCH_BUDGET = 8.0   # (seconds: DumpSearch.Budget. Long enough for a sleeping USB drive to spin up)
+
+
 def find_dumps():
-    """.nup files in Downloads, Desktop, Documents, the home folder and the top of each drive, one folder level down too, newest first"""
+    """.nup files in Downloads, Desktop, Documents, the home folder and the top of each drive, one folder level down too, newest
+    first: every place searched at once, and what was found after DUMP_SEARCH_BUDGET (DumpSearch.cs). One drive that did not
+    answer held the start-up page on "Looking for your game files…" for good"""
     home = os.path.expanduser("~")
     places = [(_known_folder(FOLDER_DOWNLOADS) or os.path.join(home, "Downloads"), "Downloads"),
               (_known_folder(FOLDER_DESKTOP) or os.path.join(home, "Desktop"), "Desktop"),
@@ -395,30 +400,59 @@ def find_dumps():
             root = letter + ":\\"
             if ctypes.windll.kernel32.GetDriveTypeW(root) in (2, 3):   # (removable, fixed)
                 places.append((root, letter + ":"))
-    seen, found = set(), []
+    return search_dumps(places, DUMP_SEARCH_BUDGET, look_for_dumps)
+
+
+def search_dumps(places, budget, look):
+    """look(folder, name) for every place at once; the dumps of the places that answered within <budget> seconds, newest first.
+    A place still searched then is left out (its daemon thread ends with the app). A file in two places keeps the first's name"""
+    seen, unique = set(), []
     for d, name in places:
-        if not d or not os.path.isdir(d) or os.path.normcase(os.path.abspath(d)) in seen:
-            continue
-        seen.add(os.path.normcase(os.path.abspath(d)))
-        dirs = [d]
+        if d and os.path.normcase(os.path.abspath(d)) not in seen:
+            seen.add(os.path.normcase(os.path.abspath(d)))
+            unique.append((d, name))
+    results = [None] * len(unique)
+
+    def one(i, d, name):
         try:
-            subs = [e.path for e in os.scandir(d) if e.is_dir() and not e.name.startswith((".", "$"))
-                    and e.name.lower() != "windows" and not e.name.lower().startswith("program")]
-            dirs += subs[:200]
+            results[i] = look(d, name)
+        except Exception:
+            results[i] = []
+    threads = [threading.Thread(target=one, args=(i, d, name), daemon=True) for i, (d, name) in enumerate(unique)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + budget
+    for t in threads:
+        t.join(max(0, deadline - time.monotonic()))
+    files, found = set(), []
+    for r in results:
+        for x in list(r or []):
+            if os.path.normcase(x.path) not in files:
+                files.add(os.path.normcase(x.path))
+                found.append(x)
+    return sorted(found, key=lambda x: -x.modified)
+
+
+def look_for_dumps(d, name):
+    """The .nup files in <d> and the folders just inside it (not hidden ones, Windows or Program Files), up to 200 folders"""
+    if not os.path.isdir(d):
+        return []
+    dirs, found = [d], []
+    try:
+        subs = [e.path for e in os.scandir(d) if e.is_dir() and not e.name.startswith((".", "$"))
+                and e.name.lower() != "windows" and not e.name.lower().startswith("program")]
+        dirs += subs[:200]
+    except OSError:
+        pass
+    for sub in dirs:
+        try:
+            for e in os.scandir(sub):
+                if e.is_file() and e.name.lower().endswith(".nup"):
+                    st = e.stat()
+                    found.append(Dump(os.path.abspath(e.path), name, st.st_size, st.st_mtime))
         except OSError:
             pass
-        for sub in dirs:
-            try:
-                for e in os.scandir(sub):
-                    if e.is_file() and e.name.lower().endswith(".nup"):
-                        full = os.path.abspath(e.path)
-                        if os.path.normcase(full) not in seen:
-                            seen.add(os.path.normcase(full))
-                            st = e.stat()
-                            found.append(Dump(full, name, st.st_size, st.st_mtime))
-            except OSError:
-                pass
-    return sorted(found, key=lambda x: -x.modified)
+    return found
 
 
 def ago(t):

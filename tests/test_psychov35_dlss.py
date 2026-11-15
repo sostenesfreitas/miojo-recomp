@@ -1,4 +1,4 @@
-"""Compile the actual opt-in scene gate and exercise HDR/mode/format transitions without a game."""
+"""Compile the actual scene gate and exercise HDR/mode/format transitions without a game."""
 import argparse
 import hashlib
 import os
@@ -52,6 +52,7 @@ int mode=ur::DLSS;
 bool tone=false;
 int temporal_mode() { return mode; }
 bool scene_tonemap_on() { return tone; }
+bool temporal_off() { return mode==ur::OFF; }
 int env_switch(const char* n) { const char* e=std::getenv(n); return e && *e ? std::atoi(e) : -1; }
 unsigned logs=0;
 std::string route;
@@ -75,20 +76,21 @@ int main(int argc, char**) {
     for (int t=0;t<2;++t) {
       tone=t;
       for (int f=0;f<256;++f) {
-        const bool expected=f==122 || (enabled && tone && ur::takes_psychov35(mode) && f==97);
+        const bool psycho_mode=mode==ur::OFF || (enabled && ur::takes_psychov35(mode));
+        const bool expected=f==122 || (tone && psycho_mode && f==97);
         assert(temporal_scene_format(f)==expected);
         for (int output=0;output<256;++output) {
           const bool correct=(f==122 && output==122) ||
-              (enabled && tone && ur::takes_psychov35(mode) && f==97 && output==97);
+              (tone && psycho_mode && f==97 && output==97);
           assert(temporal_colour_pair(f,output)==correct);
         }
       }
     }
   }
-  // DLSS/DLAA and FSR 4 / its native AA take it; FSR 3.1 (own packed inputs), the game's network and Off never do
+  // Only the HDR engines take linear input. Off accepts RGBA separately, decoding the network input itself.
   assert(ur::takes_psychov35(ur::DLSS) && ur::takes_psychov35(ur::DLAA) && ur::takes_psychov35(ur::FSR4) &&
-         ur::takes_psychov35(ur::FSR4_AA));
-  assert(!ur::takes_psychov35(ur::GAME) && !ur::takes_psychov35(ur::FSR3) && !ur::takes_psychov35(ur::OFF));
+         ur::takes_psychov35(ur::FSR4_AA) && ur::takes_psychov35(ur::FSR3));
+  assert(!ur::takes_psychov35(ur::GAME) && !ur::takes_psychov35(ur::OFF));
   S s;
   s.history_input=0; // First Vanilla evaluation resets history without a Psycho/HDR log.
   transition(s,false); assert(s.last_frame==0 && logs==0);
@@ -104,6 +106,8 @@ int main(int argc, char**) {
   assert(route=="packed" && engine_name=="DLSS");
   mode=ur::FSR4_AA; s.last_frame=95; transition(s,true,97);
   assert(s.last_frame==0 && route=="RGBA16F linear" && engine_name=="FSR 4");
+  mode=ur::FSR3; s.last_frame=100; transition(s,false,122);s.last_frame=101;transition(s,true,97);
+  assert(s.last_frame==0 && route=="RGBA16F linear" && engine_name=="FSR 3.1");
 }
 '''.replace('/* GATE */', gate).replace('/* PAIR */', pair).replace('/* SWITCH */', switch)
     # All three scene consumers agree: camera, animated characters, reactive mask.
@@ -162,10 +166,12 @@ int main(int argc, char**) {
         cpp, exe = Path(folder)/'test.cpp', Path(folder)/'test.exe'
         cpp.write_text(fixture, encoding='utf-8')
         subprocess.run([a.cxx, '-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror', '-I'+str(ROOT), str(cpp), '-o', str(exe)], check=True)
-        for value in ('', '0', '1', '2'):
+        for value in (None, '', '0', '1', '2'):
             env = os.environ.copy()
-            env['RX_VK_PSYCHOV35_DLSS'] = value
-            subprocess.run([str(exe), *(['enabled'] if value=='1' else [])], env=env, check=True)
+            env.pop('RX_VK_PSYCHOV35_DLSS', None)
+            if value is not None:
+                env['RX_VK_PSYCHOV35_DLSS'] = value
+            subprocess.run([str(exe), *(['enabled'] if value!='0' else [])], env=env, check=True)
     print('PsychoV35 DLSS and FSR 4: 3,670,016 input/output combinations, scene gate, history and RGBA SPIR-V checks passed')
 
 if __name__ == '__main__':

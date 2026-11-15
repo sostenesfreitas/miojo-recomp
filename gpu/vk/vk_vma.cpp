@@ -85,15 +85,16 @@ VmaPool target_images_pool() {
 
 // (hookshot, RX 7800 XT: part of a pool's blocks made at the start, not when the game first needs them. Each is a vkAllocateMemory of
 // 128 MB, ~170 ms on AMD's driver, on the replay thread: ~70 of them in a walk across Hyrule Field, the frame rate dropping to the low
-// 40s whenever new ground came in. In the pool the sampled textures are made in and no other, 15% of the card's memory, 2 to 24 blocks:
-// vram_compact::blocks_at_start. RX_VK_IMAGE_PREALLOC=<blocks>: that many, 0: none)
+// 40s whenever new ground came in. In the pool the sampled textures are made in and no other, 15% of the card's memory, 2 to 24 blocks,
+// none on an integrated GPU: vram_compact::blocks_at_start. RX_VK_IMAGE_PREALLOC=<blocks>: that many, 0: none)
 static size_t blocks_at_start(bool holds_textures) {
     if (!holds_textures) return 0;
     uint64_t heap = 0;
     for (uint32_t h = 0; h < dev.memory.memoryHeapCount; h++)
         if (dev.memory.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) heap = std::max<uint64_t>(heap, dev.memory.memoryHeaps[h].size);
     if (const char* e = getenv("RX_VK_IMAGE_PREALLOC")) return (size_t)std::max(0, atoi(e));
-    return (size_t)vram_compact::blocks_at_start(heap, kImageBlock, holds_textures);
+    return (size_t)vram_compact::blocks_at_start(heap, kImageBlock, holds_textures,
+                                                 dev.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
 }
 /// The pool with n blocks made now, or empty when there is no room for them (its blocks made as needed); the blocks made
 static size_t make_pool(VmaPoolCreateInfo pi, size_t n, VmaPool& pool) {

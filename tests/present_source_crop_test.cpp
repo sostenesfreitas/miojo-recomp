@@ -47,9 +47,10 @@ FgMaker last_maker = FgMaker::Dlss;
 void note_maker(FgMaker m) { last_maker = m; }
 uint64_t antilag_frame() { return 0; }   // (vk_antilag.cpp: AMD Anti-Lag 2 not on here)
 int fsr_calls = 0, fsr_result = 1;
-int fsr3fi_frame(VkCommandBuffer, OutSet&, int, uint32_t w, uint32_t h, uint64_t sequence) {
+bool last_native_pq = false;
+int fsr3fi_frame(VkCommandBuffer, OutSet&, int, uint32_t w, uint32_t h, uint64_t sequence, bool native_pq) {
     CHECK(w == allocated_w && h == allocated_h && sequence > 0);
-    ++fsr_calls; return fsr_result;
+    last_native_pq = native_pq; ++fsr_calls; return fsr_result;
 }
 VkImageBlit last_blit{};
 struct { int32_t rect[4]; float x0, cover; int32_t pq; } copy{};
@@ -110,7 +111,7 @@ void check(uint32_t sw, uint32_t sh, const int* crop, uint32_t x, uint32_t y, ui
     blit_crop(nullptr, 1, sw, sh, crop, 2, VK_IMAGE_LAYOUT_GENERAL, 320, 180);
     CHECK(blits == int(valid) && clears == int(!valid));
     if (valid) CHECK(last_blit.dstOffsets[0].x == 0 && last_blit.dstOffsets[1].x == 320);
-    const bool recorded = framegen_record(nullptr, 1, sw, sh, crop, 0.0f);
+    const bool recorded = framegen_record(nullptr, 1, sw, sh, crop, 0.0f, false);
     CHECK(recorded == valid && initializations == int(valid) && sizes == int(valid));
     if (valid) {
         CHECK(allocated_w == w && allocated_h == h && dispatches == 2 && copies == 1);
@@ -118,11 +119,11 @@ void check(uint32_t sw, uint32_t sh, const int* crop, uint32_t x, uint32_t y, ui
         CHECK(copy_pc[0] == int(x) && copy_pc[1] == int(y) && copy_pc[2] == int(w) && copy_pc[3] == int(h));
         // Newly merged FSR3 receives the same validated extent; fallback still uses the shared crop.
         fsr3fi::wanted = true;
-        CHECK(framegen_record(nullptr, 1, sw, sh, crop, 0.0f) && fsr_calls == 1 && fg.recorded->made == 1);
-        CHECK(dispatches == 4 && copies == 2 && last_maker == FgMaker::Fsr3);
+        CHECK(framegen_record(nullptr, 1, sw, sh, crop, 0.0f, false) && fsr_calls == 1 && fg.recorded->made == 1);
+        CHECK(dispatches == 4 && copies == 2 && last_maker == FgMaker::Fsr3 && !last_native_pq);
         fsr_result = 0;
-        CHECK(framegen_record(nullptr, 1, sw, sh, crop, 0.0f) && fsr_calls == 2 && fg.recorded->made == 1);
-        CHECK(last_maker == FgMaker::BuiltIn);   // (FSR 3.1 made none: the renderer's own did)
+        CHECK(framegen_record(nullptr, 1, sw, sh, crop, 0.0f, true) && fsr_calls == 2 && fg.recorded->made == 1);
+        CHECK(last_maker == FgMaker::BuiltIn && last_native_pq);   // (FSR 3.1 made none: the renderer's own did)
         CHECK(dispatches == 9 && copies == 3);
         CHECK(copy_pc[0] == int(x) && copy_pc[1] == int(y) && copy_pc[2] == int(w) && copy_pc[3] == int(h));
         // Ultrawide's loading cover is closed in the copy, from the middle 16:9's edge; without that middle there is none.
@@ -143,7 +144,7 @@ void check(uint32_t sw, uint32_t sh, const int* crop, uint32_t x, uint32_t y, ui
     } else {
         CHECK(dispatches == 0 && copies == 0 && !fg.recorded);
         fsr3fi::wanted = true; fg.have_prev = true;
-        CHECK(!framegen_record(nullptr, 1, sw, sh, crop, 0.0f) && fsr_calls == 0);
+        CHECK(!framegen_record(nullptr, 1, sw, sh, crop, 0.0f, false) && fsr_calls == 0);
         CHECK(dispatches == 0 && copies == 0 && !fg.recorded);
     }
     // Execute the actual HDR consumer, keeping resources ready to isolate source validation.

@@ -38,10 +38,13 @@ def main():
         # (the general cases, quit, the level unit, and the memory cases at each HOS_CONTROL_MEM level)
         runs = [([], None), (["quit"], None), (["level"], None),
                 (["mem"], None), (["mem"], "ro"), (["mem"], "rw"), (["mem"], "bogus")]
+        if windows:
+            runs.append((["peersid"], None))   # (HOS_CONTROL_PEER_SID's check)
         for case, mem in runs:
             folder = tempfile.mkdtemp(dir=tmp)
             env = dict(os.environ)
             env.pop("HOS_CONTROL_MEM", None)
+            env.pop("HOS_CONTROL_PEER_SID", None)
             if mem is not None:
                 env["HOS_CONTROL_MEM"] = mem
             r = subprocess.run([exe, folder] + case, capture_output=True, text=True, timeout=180, env=env)

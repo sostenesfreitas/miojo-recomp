@@ -1,0 +1,3 @@
+| Date | Build | OS / desktop | GPU / driver | CPU / RAM | Settings | Where | Result |
+|---|---|---|---|---|---|---|---|
+| 2026-11-13 | main 514591a3 | Linux (CachyOS, kernel 7.3.3), KDE Wayland | RTX 3060 Laptop 6 GB, 620.70.06 | Ryzen 7 6800H, 15 GB | A packaged builder (the AppImage's AppRun stand-in: `HOOKSHOT_TOOLS` set), `--update` of a built folder, nothing changed, `--no-prepare-shaders` | The finish stage of 2 builds interleaved with perf/prompt-cache-packaged's, after a warm-up build each (the builder's `where the time went` lines); main's runs | `prompts: regenerated (packaged or direct build)` every build: finish 148 s and 191 s |

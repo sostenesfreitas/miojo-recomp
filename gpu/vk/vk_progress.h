@@ -141,8 +141,17 @@ struct StartupState {
     size_t done = 0, total = 0;
     double left = -1, secs = 0;
     bool prepared = false, finished = false, stopping = false;
+    bool saving = false;   // (the pipeline cache written out, every pipeline counted: prepare_saving)
     double whole = -1;   // (the bar over every part, PrepareBar::fraction; negative: the bar is this part's done of total)
 };
+
+/// What goes under the bar on the right: the time left while there is work counted, and once all of it is (the bar full, the
+/// start not finished) what the start still does, not "a few seconds left" for as long as that takes (#714)
+inline std::string waiting_text(const StartupState& s) {
+    if (s.saving) return "Saving the pipeline cache";
+    const bool counted = s.whole >= 0 ? s.whole >= 1 : s.total && s.done >= s.total;
+    return counted ? "Getting the game ready" : left_text(s.left);
+}
 
 /// (hookshot) The whole preparation on one bar: its parts, 0 the shader programs, 1 the pipelines the notes predict, 2 the noted
 /// pipelines, each counted in what one of it costs (kCost, in shader programs' time) and each in the total from the start. The
@@ -218,13 +227,13 @@ inline StartupView startup_view(const StartupState& s) {
     if (s.prepared) v.hint = "This happens once after an update. Closing the window keeps what is done.";
     if (!s.total) {
         v.left = !pipelines ? "Reading the game's shaders" : s.stage == 1 ? "Reading the pipeline notes" : "Loading the shader cache";
-        if (s.whole >= 0) v.fraction = s.whole, v.pct = percent_of(s.whole), v.right = left_text(s.left);
+        if (s.whole >= 0) v.fraction = s.whole, v.pct = percent_of(s.whole), v.right = waiting_text(s);
         return v;
     }
     v.fraction = s.whole >= 0 ? s.whole : (double)std::min(s.done, s.total) / (double)s.total;
     v.pct = s.whole >= 0 ? percent_of(s.whole) : percent_text(s.done, s.total);
     v.left = with_commas(s.done) + " / " + with_commas(s.total) + (pipelines ? " pipelines" : " shaders");
-    v.right = left_text(s.left);
+    v.right = waiting_text(s);
     return v;
 }
 

@@ -180,10 +180,16 @@ inline bool parallel_configured() {
     const char* p = getenv("RX_VK_PARALLEL");
     return p && atoi(p) >= 2;
 }
-/// RX_VK_RECORDER: sync; defer, thread (serial only: refused, off, with RX_VK_PARALLEL); anything else, or unset, off
+/// (hookshot) The Insert menu's Threaded rendering, the recorder's half of it (threaded_rendering.h; vk_menu.cpp
+/// menu_threaded_rendering, set by vk_replay.cpp before anything runs): true, the recorder thread, as RX_VK_RECORDER=thread.
+/// Asked only with RX_VK_RECORDER unset: the switch, when set, is over the row. Null: no menu (the checks), off
+inline bool (*g_setting_thread)() = nullptr;
+/// RX_VK_RECORDER: sync; defer, thread (serial only: refused, off, with RX_VK_PARALLEL); anything else, off.
+/// Unset: off, or thread where the Threaded rendering row says so (g_setting_thread), refused as the switch's thread is
 inline int mode_from_env(bool* refused) {
     const char* e = getenv("RX_VK_RECORDER");
     *refused = false;
+    if (!e && g_setting_thread && g_setting_thread()) e = "thread";
     if (!e) return OFF;
     if (!strcmp(e, "sync")) return SYNC;
     if (!strcmp(e, "defer") || !strcmp(e, "thread")) {
@@ -212,7 +218,8 @@ inline int mode_init() {
     if (refused)   // (once: the thread that set the mode)
         ::mkwvk::logf("vk: RX_VK_RECORDER=%s refused: RX_VK_PARALLEL=%s records a command buffer on several threads (deferred "
                       "packets are the recording thread's own); the recorder is off",
-                      getenv("RX_VK_RECORDER"), getenv("RX_VK_PARALLEL"));
+                      getenv("RX_VK_RECORDER") ? getenv("RX_VK_RECORDER") : "thread (the Threaded rendering setting)",
+                      getenv("RX_VK_PARALLEL"));
     else if (m == DEFER)
         ::mkwvk::logf("vk: RX_VK_RECORDER=defer: vkCmd* packed and held, drained in order at each command buffer begin, end and "
                       "reset, submit, wait, readback, destruction and replay lock release (serial replay only)%s",

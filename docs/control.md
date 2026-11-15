@@ -7,12 +7,13 @@ through one connection, with replies. Presses are timed in frames, and every rep
 
 - The game side is `host/control.c`. Hooks: `host/nn_hid.c` (the controller's read), `gpu/vk/vk_replay.cpp` (shots at a
   present), `gpu/vk/vk_menu.cpp` (the Insert menu's settings, through its own setter), `host/hos_thread.c` (log lines),
-  `host/hos_main.c` (the start, and for OoT the current map and debug teleport), `host/oot_state_tap.c` (OoT snapshots
+  `host/hos_main.c` (the start, the current map and the debug teleport), `host/oot_state_tap.c` (the game's snapshots
   from Link's update, copied to the bridge thread), `host/hos_mem.c` (guest memory's
   bounds), `host/nn_fs.c` (the save folder), `host/rx_backend.c` (the renderer's side, `MkwVkRenderer`).
 - The client is `scripts/hookshot_ctl.py` (standard library only).
-- Tests: `tests/test_control.py` (the bridge against a fake game) and `tests/test_hookshot_ctl.py` (the client against a
-  fake bridge).
+- Tests: `tests/test_control.py` (the bridge against a fake game), `tests/test_hookshot_ctl.py` (the client against a
+  fake bridge) and `tests/test_control_pipe_security.py` (the Windows pipe's DACL in the source, and a Windows compile
+  of the bridge when there is a compiler for it).
 
 ## Turning it on
 
@@ -34,8 +35,24 @@ it. The default waits until the bridge answers, then prints the socket's path. S
 - **Local only.** There is a Unix domain socket on Linux and a named pipe on Windows, and never TCP. The pipe refuses
   remote clients.
 - **This user only.** The socket is created with mode 0600 (the umask is set around `bind` too), and a client whose
-  `SO_PEERCRED` user differs from the game's is turned away. The pipe's DACL grants the current user alone.
-  `FILE_FLAG_FIRST_PIPE_INSTANCE` keeps another process from owning the name first.
+  `SO_PEERCRED` user differs from the game's is turned away. The pipe's DACL is protected and grants the current user
+  (full access), with two additions that a sandboxed game needs:
+  - **The game's AppContainer.** When the game's token is an AppContainer's (`TokenIsAppContainer`), its
+    `TokenAppContainerSid` gets full access too. The game still runs as your user, so a client of yours connects. But
+    each new pipe instance, made for the next client, is checked against the pipe's DACL with the game's token, and
+    an AppContainer's check also needs its own SID. Without that ACE, only the first client could connect.
+  - **`HOS_CONTROL_PEER_SID`, one more account.** It is for a game run as another account than its driver, like the
+    Beanstalk agent's `beanstalk-runner` user, whose agent runs as the volunteer's own account. That account gets read
+    and write (`GRGW`), enough to connect as a client. Write access also includes `FILE_CREATE_PIPE_INSTANCE`, so that
+    account could make instances of the pipe too: set this only to an account at least as trusted as the game's. The
+    value must be a user's SID, written as Windows writes it and nothing else: `S-1-5-21-<three numbers>-<RID>` with a
+    RID of 1000 or more, an account this PC can look up, and a user, not a group. Everyone, Authenticated Users,
+    Users, Administrators and other well-known SIDs (an SDDL alias like `WD` too) are refused. A refused value is
+    logged (`control: HOS_CONTROL_PEER_SID refused: ...`), and the pipe stays the current user's alone. Unset, nothing
+    changes.
+
+  Linux has neither addition: a sandbox there (the farm's bwrap) runs the game as the same user, which
+  `SO_PEERCRED` already lets in. `FILE_FLAG_FIRST_PIPE_INSTANCE` keeps another process from owning the name first.
 - **A folder of this user's.** The socket's folder has to be owned by the game's user and writable by no one else
   (not a shared `/tmp`): otherwise the bridge stays off and the log says why. Another user could otherwise put a link
   or a socket of theirs where the bridge binds, removes a stale socket, or writes a shot by a relative path.
@@ -85,7 +102,7 @@ Requests on one connection may be answered out of order: a `status` sent while a
 Match replies by `id`. Lines with an `"event"` key and no `"ok"` key are subscription events (see `subscribe`).
 
 `protocol:1` allows additive fields, commands and explicitly requested event kinds. Clients ignore unknown fields.
-The OoT snapshot fields and `oot` subscription below are compatible additions: existing fields keep their types and
+The game's snapshot fields and the `oot` subscription below are compatible additions: existing fields keep their types and
 the default subscription is unchanged.
 
 A client may shut its sending side once its requests are sent (`printf '...\n' | socat - UNIX-CONNECT:<path>`): the
@@ -152,7 +169,7 @@ version.
 
 `map` is the game's own name for the map (`Sequence_CurrentBanc`), read on the game's thread with the player's update
 every 250 ms: the last one known, so it stays through loads and menus, and it is `null` until Link was first seen.
-`game` is OoT's read-only snapshot from Link's update. A `status` request asks for one fresh snapshot; requests
+`game` is the game's read-only snapshot from Link's update. A `status` request asks for one fresh snapshot; requests
 waiting together share that capture. The socket thread never reads the guest or blocks waiting for the game.
 If no Link update arrives within 250 ms (title, pause or loading), the reply keeps the last snapshot and its
 original `frame`/`t`. Before a snapshot is available it returns only the original typed fields if known, or `null`.
@@ -278,7 +295,7 @@ were, and replies `failed`. A `fixed` row replies `failed` too. The reply has th
 it. Arguments:
 
 - `events`: any of `present`, `state`, `log`, `map` and `oot`. The default remains `["present", "state"]`.
-- `every`: frames between present/OoT samples (default 60, 1 to 216000).
+- `every`: frames between present and game samples (default 60, 1 to 216000).
 - `log`: only log lines that contain this text (it also turns `log` on).
 - `flags`: with `oot`, up to 64 flag names (1 to 47 letters, digits, `_` or `.`) or `0x` and eight hex digits, as an
   array of strings. Values are looked up in Bool, Int, Float, Enum, String64 and UInt order; absent/unreadable values
@@ -330,7 +347,7 @@ A pending sample is retained until the bridge takes it; if the bridge is delayed
 than overwriting its changes. Frame gaps can therefore exceed `every`. A client that stops reading is still dropped
 at the bridge's output limit. Flag scanning is off unless that connection asks for it and stops when it leaves.
 
-**teleport** (OoT): the Debug tab's teleport, by destination: `to`, the destination's index or one of its maps' names
+**teleport**: the Debug tab's teleport, by destination: `to`, the destination's index or one of its maps' names
 (any case). Without `to`, the destinations: `{"destinations":[{"index":0,"child":"KokiriForest_Child","adult":
 "KokiriForest_Adult"},...]}` (a destination with no map for an age has `null` there). It is what the Cheats page's
 Teleport list asks for: the game takes it at the player's next update, in play, and goes to the map of Link's age.
@@ -357,7 +374,7 @@ It changes the game as the menu's teleport does, and a save made after it keeps 
 < {"id":13,"ok":true,"frame":6190,"state":"loading","waited":187,"map":"HyruleField_Child"}
 ```
 
-**age** (OoT): the Debug tab's Switch age, so a script can reach the adult's maps (or the child's) without a save of
+**age**: the Debug tab's Switch age, so a script can reach the adult's maps (or the child's) without a save of
 that age: `to`, `"child"` or `"adult"`, none the other age. The game takes it as it takes a teleport, at the player's
 next update in play, and does it as the menu does: Link's age flipped and the current map reloaded in the other age
 (the Market's, when this map has no destination). It uses the teleport's tickets, so a later teleport or age switch
@@ -410,6 +427,14 @@ The client:
   that slot is copied, so Continue loads it. The source is only read. A destination that already holds saves is
   refused. On Windows, use `--profile test` or an explicit `--user DIR`: the game supports `--user` on both platforms.
   With either, the copy goes into `DIR/save/<user id>` instead of the Linux data folder.
+- `launch --repo-save NAME` does the same with a save in the repository
+  ([assets/saves](../assets/saves/README.md)): only `assets/saves/NAME/slot_00/` is copied in, to
+  `<data>/hookshot/save/5a3c9e1f0b7d24680000000000000001/slot_00`, so it is the one slot the title's Load screen
+  shows. There is no `account.sav` or `option.sav` to copy: the game makes both when it loads the slot (checked with a
+  real game on 2026-11-14). NAME is looked for in this script's checkout, or `--repo DIR`'s. Only that layout is taken
+  (`README.md` and `slot_00/` with `progress.sav` and `caption.sav`; nothing else, no links), a leftover
+  `assets/saves/_profile/` is refused, and the same destination checks apply. It goes with neither `--save` nor
+  `--slot`. `saves --repo [DIR]` lists the repo saves with their README's first line, without a game.
 
 ## Guest memory
 
@@ -572,7 +597,8 @@ it does not invent an exit code. `show` and `log` work after exit without connec
 `--profile test` sets `HOS_HEADLESS=1`, `HOS_AUDIO=0` and `HOS_ENV_FILE` to the run's owned empty file, and passes
 `--user <run>/user`. These profile choices win over conflicting `--env` entries. The runtime reads that file
 **instead of** the ambient `hookshot_env.txt` (`load_hookshot_env` in `host/hos_main.c`), not as another layer.
-The profile starts fresh, or `--save FOLDER [--slot NN]` makes a plain-file copy using the existing source checks.
+The profile starts fresh, or `--save FOLDER [--slot NN]` (or `--repo-save NAME`) makes a plain-file copy using the
+existing source checks.
 An ordinary symlinked parent (such as `/home` on Linux) is allowed; source/destination overlap is checked by resolved
 paths. Existing `save/` and user-id entries inside the chosen user root must be real folders, not links.
 It refuses `--data` and `--user`: neither can redirect a test run onto the source save. The same explicit runtime
@@ -680,13 +706,13 @@ with its explicit `process_exited:false` result, so callers can decide whether t
 - **Windows**: the pipe is tested in CI (the windows-2022 runner). The bridge inside a Windows game build was driven by
   hand and by `hookshot_bench.py` (`launch`, `status`, `wait`, `press`, `teleport`, `shot`, `quit`; Windows 11, main
   `de866017`). Refusing remote pipe clients (`PIPE_REJECT_REMOTE_CLIENTS`) needs a second machine and is not tested.
-- **The state is a guess** from the draws a frame (above). A scene with unusual counts can be misread; for OoT, `game`'s
+- **The state is a guess** from the draws a frame (above). A scene with unusual counts can be misread; `game`'s
   `event` and `loading` and `map` are the game's own.
 - **A teleport the game sent but that did not move Link**: `accepted` (the event manager's answer) is reported, not turned into an error: `false` was seen once, when the map did not change, but that it always means no move is not established. Otherwise `wait map` times out.
 - **The first `option_get` or `option_set`** after start can wait, on the bridge's thread, for the start-up check of
   the upscalers (NVIDIA's NGX start: about 3 s). The game does not wait for it; other replies to every client wait
   that long.
-- **OoT samples** stop when Link is not updated. They contain no actor list and do not turn `symbols` into a supported command.
+- **The game's samples** stop when Link is not updated. They contain no actor list and do not turn `symbols` into a supported command.
 - `HOS_CONTROL_MEM=rw` writes were checked against the game's memory (written, read back, put back), not against the
   picture the GPU draws from a written value.
 

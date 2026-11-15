@@ -32,7 +32,8 @@ python -I -B tests/test_recorder_sync.py --headers <Vulkan-Headers/include> [--c
    Thread (each run with --only thread, so the recorder thread's checks alone catch it): no wait before vkEndCommandBuffer, before
    vkQueueSubmit2, at the replay lock's release, before vkResetCommandPool; no backpressure (the ring overwritten); no join at
    teardown; a packet bigger than its room written into the ring when the ring has more free; the recorder's exception swallowed
-   (--throw).
+   (--throw). Destruction leaves a copy unpublished, with the recorder awake until a boundary publishes it: skipping the destruction
+   boundary must put that copy after destruction, even if the producer is paused before it calls the fake driver.
 4. (Windows) the process ends cleanly with the recorder parked in idle() holding its lock: tests/recorder_exit_test.cpp, a DLL with
    the real headers and an exe that calls ExitProcess (as the window's close does); exit code 0 within 20 s (a watchdog ends only
    that child) and the DLL's last global destructor run. Broken: the old global recorder with its destructor (wake, join).

@@ -43,7 +43,8 @@ def check_source(source):
                          "made in the images' pool, they stay empty while the textures are compacted in a pool of their own)")
     need("vk_vma.cpp: blocks_at_start()", block(vma, "static size_t blocks_at_start(bool holds_textures)"),
          ["if (!holds_textures) return 0;", 'getenv("RX_VK_IMAGE_PREALLOC")',
-          "vram_compact::blocks_at_start(heap, kImageBlock, holds_textures)"])
+          "vram_compact::blocks_at_start(heap, kImageBlock, holds_textures,\n"
+          "                                                 dev.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)"])
     # (the images' pool only when the textures are made there, RX_VK_COMPACT=0; else the textures' own)
     need("vk_vma.cpp: images_pool()", block(vma, "VmaPool images_pool() {"),
          ['make_pool(pi, blocks_at_start(!vram_compact::enabled(getenv("RX_VK_COMPACT"))), image_pool)', "made at the start"])
@@ -62,7 +63,7 @@ def check_source(source):
     need("vk_texture.cpp: texture_frame()", block(tex, "void texture_frame(uint64_t completed)"),
          ["if (textures_pool_usage(&pool_blocks, &pool_free, &pool_kept)) reclaim = vram_compact::reclaimable(block_free, pool_free);",
           "kept_only = vram_compact::kept_only(pool_blocks, pool_kept);",
-          "!(kept_only && !squeeze_always) && used > allowed / 100 * 97 && !room_in_blocks)"])
+          "!(kept_only && !squeeze_always) && used > count_line && !room_in_blocks)"])
 
 
 # Compile the real pool constructors, not a second implementation of their policy.
@@ -78,6 +79,7 @@ constexpr int VK_SUCCESS = 0, VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO = 1;
 constexpr int VK_IMAGE_TYPE_2D = 1, VK_FORMAT_R8G8B8A8_UNORM = 1, VK_SAMPLE_COUNT_1_BIT = 1;
 constexpr int VK_IMAGE_USAGE_SAMPLED_BIT = 1, VK_IMAGE_USAGE_TRANSFER_DST_BIT = 2, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT = 4;
 constexpr int VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE = 1, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT = 1, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT = 1;
+constexpr int VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU = 1, VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU = 2;
 #define VK_NULL_HANDLE nullptr
 struct VkImageCreateInfo {
     explicit VkImageCreateInfo(int) {}
@@ -92,7 +94,7 @@ using VmaPool = Pool*;
 struct { struct {
     uint32_t memoryHeapCount = 1;
     struct { uint64_t size = 8ull << 30; int flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT; } memoryHeaps[1];
-} memory; } dev;
+} memory; struct { int deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU; } props; } dev;
 int vma, calls, successes;
 bool fail_prealloc, fail_all;
 size_t requested[8]{};
@@ -128,6 +130,8 @@ int main(int argc, char** argv) {
     compact_env = compact ? nullptr : "0";
     if (!std::strcmp(argv[1], "override")) prealloc_env = "3";
     if (!std::strcmp(argv[1], "prealloc-off")) prealloc_env = "0";
+    const bool integrated = !std::strcmp(argv[1], "integrated");
+    if (integrated) dev.props.deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
     fail_prealloc = !std::strcmp(argv[1], "fallback");
     fail_all = !std::strcmp(argv[1], "failed-pool");
     VmaPool utility = images_pool();
@@ -136,7 +140,7 @@ int main(int argc, char** argv) {
         CHECK(!utility && !sampled && !texture_pool_kept);
         CHECK(calls == 3 && requested[0] == 0 && requested[1] == 9 && requested[2] == 0);
     } else {
-        const size_t wanted = prealloc_env ? size_t(std::atoi(prealloc_env)) : 9;
+        const size_t wanted = prealloc_env ? size_t(std::atoi(prealloc_env)) : integrated ? 0 : 9;
         CHECK(utility && sampled);
         CHECK(utility->info.minBlockCount == (compact || fail_prealloc ? 0 : wanted));
         CHECK(sampled->info.minBlockCount == (fail_prealloc ? 0 : wanted));
@@ -179,7 +183,7 @@ def main():
         subprocess.run([args.cxx, "-std=c++20", "-Wall", "-Wextra", "-Werror", str(ROOT / "tests/test_blocks_at_start.cpp"), "-o",
                         str(exe)], check=True)
         failures = 0
-        for case in ("default", "compaction-off", "override", "prealloc-off", "fallback", "failed-pool"):
+        for case in ("default", "compaction-off", "override", "prealloc-off", "fallback", "failed-pool", "integrated"):
             failures += subprocess.run([str(pools), case]).returncode != 0
         if failures:
             raise SystemExit(f"{failures} pool constructor cases failed")

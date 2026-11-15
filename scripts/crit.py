@@ -65,9 +65,9 @@ def main():
 
     def guest_frame(frames):
         """the innermost game function (f_...) and the import it called, if any"""
-        imp = next((f for f in frames if ":imp_" in f), None)
+        imp = next((f for f in frames if ":imp_" in f or ":hle_" in f), None)   # (hle_<sym>: an HLE body not inlined)
         fn = next((f for f in frames if ":f_" in f), None)
-        return (imp.split(":imp_")[1][:48] + " <- " if imp else "") + (fn or frames[-1])
+        return (imp.replace(":hle_", ":imp_", 1).split(":imp_")[1][:48] + " <- " if imp else "") + (fn or frames[-1])
 
     idle = [t for t in ticks.values() if not any(r for th, (r, _) in t.items() if is_game(th))]
     print("-- no game thread running: %.1f%% of instants" % (100.0 * len(idle) / max(1, n)))

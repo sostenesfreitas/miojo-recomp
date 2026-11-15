@@ -42,6 +42,11 @@ struct Frame {
 /// scene's camera is kept only then
 bool wanted();
 
+/// Matching scene/network formats for the independent input path. RGBA16F is limited to
+/// opt-in Native PsychoV35 frame interpolation; it does not enable the legacy upscaler.
+bool scene_format(VkFormat format);
+bool colour_pair(VkFormat input, VkFormat output);
+
 /// A draw into a scene-sized target with the vertex stage's uniform buffer 3 at `camera`: what vk_temporal.cpp's
 /// temporal_note_scene_draw is given, read the same way (the largest such target of the frame is the scene)
 void note_scene_draw(const Texture* color0, uint32_t width, uint32_t height, Texture* depth, uint64_t camera,

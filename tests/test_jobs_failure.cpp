@@ -22,7 +22,8 @@ void push_shared(Push push, Fn fn, const std::atomic<bool>* flag, Fn failed) {
 }
 template<class Push>
 void push_serial(Push push, Fn fn, Fn failed) {
-    if constexpr (std::is_invocable_v<Push, Fn, Fn>) push(std::move(fn), std::move(failed));
+    if constexpr (std::is_invocable_v<Push, Fn, Fn, bool>) push(std::move(fn), std::move(failed), false);
+    else if constexpr (std::is_invocable_v<Push, Fn, Fn>) push(std::move(fn), std::move(failed));
     else push(std::move(fn));
 }
 template<class Predicate>

@@ -55,7 +55,6 @@ def appdir(path):
         folder.mkdir(parents=True)
         (folder / "kept").write_text(dest + "\n", encoding="utf-8")
     lib = path / "usr" / "lib" / "hookshot"
-    (lib / "hookshot_vk.so").write_bytes(b"vk")
     (lib / "libSDL2-2.0.so.0").write_bytes(b"sdl")
     (path / "AppRun").write_text("#!/bin/sh\n", encoding="utf-8")
     (path / "AppRun").chmod(0o755)
@@ -570,7 +569,7 @@ class UpdateTests(unittest.TestCase):
             self.assertIn("usr-share-hookshot", downloaded[0])
             built = home / "hookshot" / "builder" / "versions" / "v2"
             self.assertEqual((built / "usr" / "share" / "hookshot" / "nx2" / "marker.py").read_text(encoding="utf-8"), "print('two')\n")
-            self.assertEqual((built / "usr" / "lib" / "hookshot" / "hookshot_vk.so").read_bytes(), b"vk")
+            self.assertEqual((built / "usr" / "lib" / "hookshot" / "libSDL2-2.0.so.0").read_bytes(), b"sdl")
             self.assertFalse((home / "hookshot" / "builder" / "versions" / "v1").exists())
 
     def test_an_installed_builder_finds_its_own_root(self):

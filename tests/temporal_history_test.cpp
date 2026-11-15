@@ -15,6 +15,7 @@ namespace dlss_math = mkwvk::dlss_math;
 static void logf(const char*, ...) {}   // (the camera cut's log line)
 struct State {
     uint64_t last_frame = 99;
+    int last_format = 122; bool last_psycho = false;
     float last_vp[16]{}, last_jitter[2]{};
     std::chrono::steady_clock::time_point last_at{};   // (the camera cut's time between frames)
     struct { unsigned width = 1920, height = 1080; } frame;
@@ -37,13 +38,15 @@ Decision temporal(State& s, const Camera& cam, uint64_t now, bool fsr4_engine) {
 Decision dlss(State& s, const Camera& cam, uint64_t now = 100) { return temporal(s, cam, now, false); }
 Decision fsr4(State& s, const Camera& cam, uint64_t now = 100) { return temporal(s, cam, now, true); }
 
-Decision fsr(State& s, const Camera& cam, uint64_t now = 100) {
+Decision fsr_format(State& s, const Camera& cam, uint64_t now = 100, int format = 122, bool psycho = false) {
+    struct { int format; } input{format}; auto* in = &input;
     const unsigned rw = 1920, rh = 1080;
     /* FSR_POLICY */
     struct { bool reset; } f{};
     /* FSR_SINK */
     return {f.reset, motion};
 }
+Decision fsr(State& s, const Camera& cam, uint64_t now = 100) { return fsr_format(s,cam,now); }
 
 int checks = 0, failures = 0;
 void check(bool value, const char* why) {
@@ -120,6 +123,12 @@ int main() {
             for (float v : out) check(std::isfinite(v), "accepted non-finite shader coefficient");
         }
     }
+    identity(s.last_vp); identity(camera.current);
+    s.last_frame=99;s.last_format=122;s.last_psycho=false;
+    check(fsr_format(s,camera,100,97,true).reset,"FSR kept history across Psycho/format change");
+    s.last_format=97;s.last_psycho=true;
+    check(!fsr_format(s,camera,100,97,true).reset,"FSR reset stable Psycho input");
+    check(fsr_format(s,camera,100,97,false).reset,"FSR kept history across tone-only change");
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures ? 1 : 0;
 }

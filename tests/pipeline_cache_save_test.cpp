@@ -164,6 +164,10 @@ struct PcacheFetch {
     explicit PcacheFetch(int, bool = true) {}
     bool held() const { return true; }
 };
+// (vk_draw.cpp: a save owed to the serial builds' thread, and that thread's save between two builds; no serial thread here)
+thread_local bool pcache_save_between = false;
+std::atomic<bool> pcache_save_owed{false};
+bool serial_builds_on() { return false; }
 #include "pipeline_cache_save.inc"
 #ifdef CACHE_VECTOR_BASELINE
 #undef fwrite
@@ -295,6 +299,29 @@ int run(const std::string& name) {
         pipeline_cache_save(true);
         CHECK(copies == 4 && replacements == 3 && new_file());
         CHECK(save_errors == 0 && start_errors == 0 && play_saves == 8);
+    } else if (name == "between") {
+        // The serial builds' thread between two of its builds: a save put off there runs on that thread, at once, whatever
+        // was built since (it was owed: put off with that many counted back).
+        pcache_built_since_save = 3;
+        pcache_save_between = true;
+        pipeline_cache_save(false);
+        pcache_save_between = false;
+        CHECK(queries == 1 && copies == 1 && replacements == 1 && new_file() && play_saves == 1);
+        CHECK(save_errors == 0 && start_errors == 0 && !pcache_save_owed.load());
+    } else if (name == "between-busy") {
+        // A background save under way: the one between two builds does not wait for it there, it is owed again.
+        fault = BLOCK_COPY;
+        pipeline_cache_save(false);
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!copy_blocked.load() && std::chrono::steady_clock::now() < end) Sleep(1);
+        CHECK(copy_blocked);
+        pcache_built_since_save = 5;
+        pcache_save_between = true;
+        pipeline_cache_save(false);
+        pcache_save_between = false;
+        CHECK(pcache_save_owed.load() && pcache_built_since_save == 5 && queries == 1);
+        allow_copy = true;
+        CHECK(wait_until(replacements, 1) && wait_until(play_saves, 1));
     } else if (name == "in-play") {
         // In play the cache is not written at a save for a little growth: what play makes is in the play files.
         pcache_saved_size = 64;

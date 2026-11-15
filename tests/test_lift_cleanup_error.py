@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -31,7 +32,9 @@ def production():
                 isinstance(node.test.func, ast.Name) and node.test.func.id == "lifted_before"]
     assert len(branches) == 1
     # (PREPARE: the module global say() reads since --prepare for RecompLauncher; off, as make_game starts)
-    namespace = dict(os=os, sys=sys, hashlib=hashlib, PREPARE=False)
+    # (_lift_store: no store, HOOKSHOT_LIFT_STORE unset, as for a player: the folder lifts itself)
+    namespace = dict(os=os, sys=sys, hashlib=hashlib, PREPARE=False, _lift_store=types.SimpleNamespace(root=lambda: None),
+                     lift_share_key=lambda *a: None)
     exec(compile(ast.Module(body=[key, *definitions], type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace, compile(ast.Module(body=branches, type_ignores=[]), str(SOURCE), "exec")
 

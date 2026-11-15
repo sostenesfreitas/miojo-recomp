@@ -22,7 +22,7 @@ Categories and function descriptions are data (scripts/cpu_categories.py, script
 object file, symbol and guest address, so the report regenerates from a new capture of a new build with no edits; symbols no
 rule matches are listed as unclassified, hot functions with no description as undocumented.
 """
-import argparse, bisect, collections, csv, glob, json, os, re, statistics, subprocess, sys
+import argparse, bisect, collections, csv, glob, json, math, os, re, statistics, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cpu_categories as cats  # noqa: E402
@@ -41,7 +41,9 @@ def load_map(path):
             m = MAP_LINE.match(line)
             if m:
                 obj = re.sub(r"^.*[\\/]", "", m.group(3))
-                rows.append((int(m.group(2), 16), m.group(1), obj))
+                # (host/hos.h's HLE: a body not inlined into its imp_<sym> entry is hle_<sym>; it is the same function)
+                sym = "imp_" + m.group(1)[4:] if m.group(1).startswith("hle_") else m.group(1)
+                rows.append((int(m.group(2), 16), sym, obj))
     if base is None:
         base = BASES.get(os.path.splitext(path)[1].replace(".map", ""), 0x140000000)
     rows.sort()
@@ -326,34 +328,120 @@ def log_stats(folder):
                 draws=grab(r"presents, [0-9.]+ fps; a frame: ([0-9.]+) draws"))
 
 
-def hle_calls(folder, blocks=4):
-    """HOS_HLE_STATS=1's "hle:" summaries (every 5 s) in game.log: calls a second of each HLE entry, from the last `blocks`
-    summaries (a run stops at the end of its measured window, so those are play). Names as the counter prints them: nn
-    functions mangled without the "imp_" prefix (cut at 64 characters), NVN ones without the "n_" prefix."""
+def hle_blocks(folder):
+    """Complete counter snapshots; legacy records have no clock boundaries and cannot be joined to frames."""
     log = os.path.join(folder, "game.log")
     if not os.path.exists(log):
-        return {}, None
+        return []
     lines = open(log, encoding="utf-8", errors="replace").read().splitlines()
-    heads = [i for i, l in enumerate(lines) if re.search(r"hle: \d+ calls of \d+ functions in ([0-9.]+) s", l)]
-    if not heads:
+    head = re.compile(r"hle: (\d+) calls of (\d+) functions in ([0-9.]+) s")
+    heads = [(i, head.search(line)) for i, line in enumerate(lines) if head.search(line)]
+    out = []
+    for index, (i, match) in enumerate(heads):
+        total, count, secs = int(match[1]), int(match[2]), float(match[3])
+        if not math.isfinite(secs) or secs <= 0:
+            continue
+        end = heads[index + 1][0] if index + 1 < len(heads) else len(lines)
+        rows = [entry for line in lines[i + 1:end] if "hle: " in line
+                for entry in re.findall(r"(\d+) ([^;]+);", line.split("hle: ", 1)[1])]
+        if len(rows) != count or sum(int(n) for n, _ in rows) != total:
+            continue   # (a process may end while the rows of its last report are being printed)
+        calls = collections.Counter()
+        for n, name in rows:
+            calls[name.strip()] += int(n)
+        bounds = re.search(r"begin_ns=(\d+) end_ns=(\d+)\s*$", lines[i])
+        span = tuple(map(int, bounds.groups())) if bounds else None
+        if span and (span[1] <= span[0] or abs((span[1] - span[0]) / 1e9 - secs) > 1e-9):
+            continue
+        out.append(dict(calls=calls, seconds=secs, span=span))
+    return out
+
+
+def hle_calls(folder, blocks=4):
+    """Raw rates from complete blocks; frame/call estimates additionally require hle_measurement's clock checks."""
+    use = hle_blocks(folder)[-blocks:]
+    if not use:
         return {}, None
-    use = heads[-blocks:]
     calls = collections.Counter()
-    secs = 0.0
-    for h in use:
-        secs += float(re.search(r"in ([0-9.]+) s", lines[h]).group(1))
-        for l in lines[h + 1:h + 40]:
-            if "hle: " not in l or re.search(r"hle: \d+ calls of", l):
-                break
-            for n, name in re.findall(r"(\d+) ([^;]+?)(?:;|$)", l.split("hle: ", 1)[1]):
-                calls[name.strip()] += int(n)
+    secs = sum(b["seconds"] for b in use)
+    for b in use:
+        calls.update(b["calls"])
     return {k: v / secs for k, v in calls.items()}, secs
 
 
+def hle_measurement(folder, blocks=4):
+    """Counter and native-frame totals over the same clock span, wholly inside the measured play window."""
+    load = json.load(open(os.path.join(folder, "load.json"), encoding="utf-8"))
+    if not isinstance(load, dict):
+        raise ValueError("load.json must be an object")
+    if "counter_window" in load and not isinstance(load["counter_window"], dict):
+        raise ValueError("counter_window must be an object")
+    w = load.get("window_present_s")
+    play = load.get("counter_window", {}).get("analysis_window_ns")
+    if load.get("failed"):
+        raise ValueError("the measured run failed")
+    with open(os.path.join(folder, "presents.csv"), encoding="utf-8") as f:
+        rows = [(int(r["return_ns"]) - int(r["interval_ns"]), int(r["return_ns"])) for r in csv.DictReader(f)]
+    if not rows or rows[0][1] < rows[0][0] or any(e <= b for b, e in rows[1:]):
+        raise ValueError("invalid native frame intervals")
+    if play is not None:
+        if len(play) != 2 or not all(isinstance(x, int) for x in play) or play[1] <= play[0]:
+            raise ValueError("invalid measured clock boundaries")
+    else:
+        if not w or len(w) != 2 or not all(math.isfinite(x) for x in w) or w[1] <= w[0]:
+            raise ValueError("no valid measured play window")
+        play = (rows[0][0] + round(w[0] * 1e9), rows[0][0] + round(w[1] * 1e9))
+    if rows[0][0] == rows[0][1]:
+        rows = rows[1:]   # (the native logger's first return has no preceding interval)
+    if not rows or any(a[1] >= b[1] for a, b in zip(rows, rows[1:])):
+        raise ValueError("invalid native frame order")
+    use = [b for b in hle_blocks(folder) if b["span"] and play[0] <= b["span"][0] < b["span"][1] <= play[1]][-blocks:]
+    if not use or any(a["span"][1] != b["span"][0] for a, b in zip(use, use[1:])):
+        raise ValueError("no contiguous complete timed counter blocks inside the play window")
+    span = use[0]["span"][0], use[-1]["span"][1]
+    if rows[0][0] > span[0] or rows[-1][1] < span[1]:
+        raise ValueError("native frames do not cover the counter span")
+    if any(max(min(a[1], b[0]), span[0]) < min(max(a[1], b[0]), span[1]) for a, b in zip(rows, rows[1:])):
+        raise ValueError("a gap or overlap in native frames crosses the counter span")
+    frames = sum(span[0] < e <= span[1] for _, e in rows)
+    if not frames:
+        raise ValueError("no native frame returns in the counter span")
+    calls = collections.Counter()
+    for b in use:
+        calls.update(b["calls"])
+    return dict(calls=calls, seconds=(span[1] - span[0]) / 1e9, span=span, frames=frames)
+
+
+def hle_sampled_costs(folder, names, measured):
+    """Estimated sampled occupancy per call, using this counter run's stacks over its counter span."""
+    path = run_files(folder)
+    if not path:
+        return {}
+    with open(path, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    origins = re.findall(r"^# t0_ns (\d+)\s*$", text, re.M)
+    records = re.findall(r"^([0-9]+(?:\.[0-9]+)?) [^|\n]+\|([^\n]+)$", text, re.M)
+    times = [float(ms) for ms, frames in records if any(fr.strip() for fr in frames.split(";"))]
+    if len(origins) != 1 or not times or not all(math.isfinite(t) for t in times):
+        return {}
+    origin = int(origins[0])
+    begin, end = measured["span"]
+    if origin + min(times) * 1e6 > begin or origin + max(times) * 1e6 < end:
+        return {}
+    c, instants = analyse(path, names, window=((begin - origin) / 1e9, (end - origin) / 1e9))
+    if not instants:
+        return {}
+    samples = collections.Counter()
+    for (sym, _), n in c["owner_fn"].items():
+        samples[calls_key(sym)] += n
+    return {key: n / instants * measured["seconds"] * 1e6 / measured["calls"][key]
+            for key, n in samples.items() if measured["calls"].get(key)}
+
+
 def calls_key(sym):
-    """the counter's name for a frame key: imp__ZN... -> _ZN... (64 characters), n_nvnX -> nvnX"""
+    """the counter's name for a frame key: imp__ZN... -> _ZN..., n_nvnX -> nvnX"""
     if sym.startswith("imp_"):
-        return sym[4:][:64]
+        return sym[4:]
     if sym.startswith("n_nvn"):
         return sym[2:]
     return sym
@@ -704,15 +792,23 @@ def main():
     w("")
 
     total = med([sum(r["c"]["owner_fn"].values()) for r in runs]) or 1
-    cps, csecs = hle_calls(a.calls) if a.calls else ({}, None)
-    if a.calls and not cps:
-        raise SystemExit("--calls %s: no 'hle:' summaries in its game.log (HOS_HLE_STATS=1 needs a build with the HLE call "
-                         "counters, see docs/cpu-profile.md)" % a.calls)
-    cfps = window_of(a.calls)[0] if a.calls else None
+    cps, csecs, cfps, call_costs = {}, None, None, {}
+    if a.calls:
+        try:
+            counted = hle_measurement(a.calls)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise SystemExit("--calls %s: %s (use complete timestamped HLE counters and native presents)" % (a.calls, error))
+        csecs = counted["seconds"]
+        cps = {key: n / csecs for key, n in counted["calls"].items()}
+        cfps = counted["frames"] / csecs
+        call_costs = hle_sampled_costs(a.calls, names, counted)
     if cps:
-        w("Call counts come from `%s`, a run of the same scene with the HLE call counters on (`HOS_HLE_STATS=1`), %d s of "
-          "play at %s fps: **calls a frame** = calls a second / that run's fps; **us a call** = the function's ms a frame "
-          "(owner view) x 1000 / calls a frame.\n" % (os.path.basename(os.path.normpath(a.calls)), int(csecs), fmt(cfps)))
+        w("Call counts come from `%s` (`HOS_HLE_STATS=1`), %.3f s inside its play window: **calls a frame** uses native "
+          "frame returns over that same counter span. **Estimated occupancy us/call** uses that run's timestamped "
+          "owner-stack samples over the same span; measured process CPU remains separate.\n" %
+          (os.path.basename(os.path.normpath(a.calls)), csecs))
+        if not call_costs:
+            w("Per-call estimates unavailable: no timestamped counter-run stacks cover this span.\n")
     def by_sym(view):   # (% of a core of each function, whatever its category, a run)
         out = []
         for r in runs:
@@ -753,7 +849,7 @@ def main():
       "are shown, the rest are folded below them.\n" % (int(a.cover * 100), a.top))
     withcalls = bool(cps)
     head = ("| function | category | owner: %% of a core | ms a frame | self | inclusive |%s what it does |"
-            % (" calls a frame | us a call |" if withcalls else ""))
+            % (" calls a frame | estimated occupancy us/call |" if withcalls else ""))
     rule = "|---|---|---|---|---|---|%s---|" % ("---|---|" if withcalls else "")
     rows, undocumented = [], []
     run_oncpu = [100.0 * sum(r["c"]["thread_cpu"].values()) / r["inst"] if r["inst"] else 0.0 for r in runs]
@@ -771,7 +867,7 @@ def main():
         extra = ""
         if withcalls:
             cpf = cps.get(calls_key(sym), 0) / cfps if cfps else None
-            extra = " %s | %s |" % (fmt(cpf, 0) if cpf else "-", fmt(msf * 1000.0 / cpf, 2) if cpf and msf else "-")
+            extra = " %s | %s |" % (fmt(cpf, 0) if cpf else "-", fmt(call_costs.get(calls_key(sym)), 2))
         rows.append("| `%s` | %s | %s (%s-%s) | %s | %s | %s |%s %s |" % (
             disp(sym), cat, fmt(m_), fmt(lo), fmt(hi), fmt(msf, 2), fmt(med([x.get(sym, 0.0) for x in self_s])),
             fmt(med([x.get(sym, 0.0) for x in incl_s])), extra, text))

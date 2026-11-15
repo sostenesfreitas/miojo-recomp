@@ -447,13 +447,13 @@ public partial class MainWindow : Window
         FsrTick.IsChecked = s.Fsr;
         fsrLicense = s.FsrLicense;
         MemoryBox.SelectedItem = BuildMemory.Saved(MemoryBox.ItemsSource.Cast<object>(), s.MemoryGb);
-        if (s.Romfs != null && s.Exefs != null && Directory.Exists(s.Romfs) && File.Exists(System.IO.Path.Combine(s.Exefs, "main")))
+        if (s.Romfs != null && s.Exefs != null && DumpSearch.Exists(s.Romfs, true) && DumpSearch.Exists(System.IO.Path.Combine(s.Exefs, "main"), false))
         {
             romfs = s.Romfs;
             exefs = s.Exefs;
             foldersNote = $"Using the folders {romfs} and {exefs} (as last time)";
         }
-        else if (s.Nup != null && File.Exists(s.Nup))
+        else if (s.Nup != null && DumpSearch.Exists(s.Nup, false))
         {
             if (!dumps.Any(d => string.Equals(d.Path, s.Nup, StringComparison.OrdinalIgnoreCase)))
             {

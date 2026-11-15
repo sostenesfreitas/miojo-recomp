@@ -50,6 +50,7 @@ bool cheats_env = false;
 bool reflex_available() { return false; }
 bool antilag_available() { return false; }
 bool intel_compiler_row() { return false; }   // (not Intel graphics on Windows: the Developer section's rows as before)
+bool laptop_row() { return false; }   // (a dedicated card: no Set up for a weak laptop button)
 int upscalers_available() { return 1; }
 constexpr int DLSS_OK = 0;
 int dlss_why() { return 1; }
@@ -58,7 +59,7 @@ bool upscaler_shown(int n) { return n > 1; }
 bool model_shown(bool available) { return available; }
 }
 '''
-    for name in ("bool cheats_on(", "bool row_shown(", "int tab_row_count(", "int tab_row_to_global(",
+    for name in ("bool cheats_on(", "bool is_laptop_row(", "bool row_shown(", "int tab_row_count(", "int tab_row_to_global(",
                  "int menu_damage_taken("):
         source += block(menu, name) + '\n'
     source += menu[menu.index("struct DebugGroup {"):menu.index("/// (hookshot) The Debug tab's rows from top down")]

@@ -89,7 +89,7 @@ def main():
     # prepared pipeline is had at once, and left to the worker, not waited for, while a worker holds it. Its code is looked
     # at under the cache's lock once the CAS is won, not before)
     dispatch = draw[draw.index("bool on_worker = false;"):]
-    dispatch = dispatch[:dispatch.index("jobs_push_serial")]
+    dispatch = dispatch[:dispatch.index("if (serial) jobs_push_serial(std::move(build)")]
     need("(program_cache_complete_ask(p, &on_worker) || on_worker ||" in dispatch and "if (!program_cache_complete(q))" in dispatch,
          "on Intel a dispatch waits for the gate to make its module on the replay thread")
     need("code_words" not in dispatch, "the dispatch reads a program's code_words before its CAS is won")

@@ -118,6 +118,12 @@ class PipelineCacheSaveTests(unittest.TestCase):
         # prepare) writes whatever changed once.
         self.check_case('in-play')
 
+    def test_between_two_serial_builds_the_save_runs_there(self):
+        # Intel's compute builds are one at a time; a save put off for builds under way runs on that thread between two of
+        # them, at once, and is owed again when a background save is still going.
+        self.check_case('between')
+        self.check_case('between-busy')
+
     def check_case(self, case):
         result = self.run_case(case)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

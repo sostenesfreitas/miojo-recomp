@@ -20,9 +20,11 @@
 
 #include "dlss_math.h"
 #include "temporal_jitter.h"
+#include "upscaler_rows.h"
 #include "vk_draw.h"   // (descriptors_disturbed)
 #include "vk_fsr3.h"
 #include "vk_fsr3fi.h"
+#include "vk_menu.h"
 #include "vk_texture.h"
 
 #include "shaders/fsr3_prep_comp_spv.h"
@@ -71,6 +73,8 @@ struct State {
     float last_vp[16]{};      // (the frame before's view-projection, and its jitter)
     float last_jitter[2]{};
     uint64_t last_frame = 0;  // (the frame prepare last ran, 0: none)
+    VkFormat last_format = VK_FORMAT_UNDEFINED;
+    bool last_psycho = false;
     std::chrono::steady_clock::time_point last_time{};
     Frame frame;              // (the last one prepared: take())
     bool have_frame = false;
@@ -215,10 +219,21 @@ VkImageView depth_view(Texture* t) {
 
 bool wanted() { return fsr3_wanted() || fsr3fi::frames_wanted() != 0; }
 
+bool scene_format(VkFormat format) {
+    if (format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) return true;
+    static const bool enabled = upscaler_rows::psychov35_compatibility(env_switch("RX_VK_PSYCHOV35_DLSS"));
+    return enabled && format == VK_FORMAT_R16G16B16A16_SFLOAT && scene_tonemap_on() && opts.framegen == 2 &&
+           fsr3fi::frames_wanted() != 0;
+}
+
+bool colour_pair(VkFormat input, VkFormat output) {
+    return input == output && scene_format(input);
+}
+
 void note_scene_draw(const Texture* color0, uint32_t width, uint32_t height, Texture* depth, uint64_t camera,
                      uint64_t camera_size) {
     if (!color0 || !depth || !camera || camera_size < 0x230 || width < 640 || height < 360) return;
-    if (color0->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !wanted()) return;
+    if (!scene_format(color0->format) || !wanted()) return;
     State& s = st();
     std::lock_guard lk(s.mu);
     const uint64_t now = texture_frame_no();
@@ -254,6 +269,7 @@ bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out) 
     const Camera cam = s.cam;
     s.cam.valid = false;   // (each frame's own camera)
     if (!in || !in_view) return fail("no input view");
+    if (!scene_format(in->format)) return fail("unexpected scene colour format");
     const uint64_t now = texture_frame_no();
     if (!cam.valid || now - cam.frame > 1) return fail("no scene camera this frame");
     // (any texture destroyed since the camera was noted used to send the frame to the game's own upscale: the game lets
@@ -283,7 +299,9 @@ bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out) 
         !make_image(cmd, s.motion, VK_FORMAT_R16G16_SFLOAT, rw, rh))
         return fail("its images were not made");
 
-    bool reset = !s.last_frame || now - s.last_frame > 2 || s.frame.width != rw || s.frame.height != rh;
+    const bool psycho = scene_tonemap_on();
+    bool reset = !s.last_frame || now - s.last_frame > 2 || s.frame.width != rw || s.frame.height != rh ||
+                 s.last_format != in->format || s.last_psycho != psycho;
     struct {
         float reproject[16];
         float jitter[2];
@@ -336,6 +354,7 @@ bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out) 
     s.frame = f, s.have_frame = true;
     s.last_time = t;
     s.last_frame = now;
+    s.last_format = in->format, s.last_psycho = psycho;
     std::memcpy(s.last_vp, cam.current, sizeof s.last_vp);
     s.last_jitter[0] = cam.jitter[0], s.last_jitter[1] = cam.jitter[1];
     if (s.reason) logf("vk: fsr3 inputs: made again (frame %llu)", (unsigned long long)now);

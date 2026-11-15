@@ -4,7 +4,8 @@
 
    Off unless HOS_CONTROL is set. Linux: a Unix domain socket at that path, made 0600 (the umask around bind too), never
    over an existing file that is not a socket, and a client of another user is turned away (SO_PEERCRED). Windows: a named
-   pipe (\\.\pipe\<name>; a name without the prefix gets it), its DACL the current user's alone, remote clients refused.
+   pipe (\\.\pipe\<name>; a name without the prefix gets it), its DACL the current user's alone (and the game's
+   AppContainer's when it runs in one, and HOS_CONTROL_PEER_SID's user when that is set), remote clients refused.
    There is no TCP. The guest's memory is read or written only with a second opt-in, HOS_CONTROL_MEM (ro, rw).
 
    Newline-delimited JSON: one request object a line ({"id": ..., "cmd": "status", ...}), one reply a line with the id
@@ -2135,19 +2136,102 @@ static void linger(HANDLE h) {
     CloseHandle(h);
 }
 
-static int pipe_security(void) {   /* a DACL with the current user alone */
+/* HOS_CONTROL_PEER_SID: one more account the pipe lets in (read and write, as a client), for a game run as another
+   account than its driver's (the Beanstalk agent's runner account). Only a user's own SID: S-1-5-21-<3 numbers>-<RID>,
+   canonical (the string ConvertSidToStringSid gives back, nothing else), a RID of 1000 or more (the well-known
+   accounts and groups of a machine or a domain are below), and the account a user's (LookupAccountSid). Never a group:
+   the well-known ones below are named in the log line. 1 ok; 0 refused, why says so */
+static const char *const peer_sid_refused[][2] = {
+    {"S-1-1-0", "Everyone"}, {"S-1-5-11", "Authenticated Users"}, {"S-1-5-32-545", "Users"},
+    {"S-1-5-32-544", "Administrators"}, {"S-1-5-32-546", "Guests"}, {"S-1-5-4", "Interactive"},
+    {"S-1-5-7", "Anonymous Logon"}, {"S-1-5-18", "SYSTEM"}, {"S-1-2-0", "Local"}, {"S-1-15-2-1", "ALL APPLICATION PACKAGES"},
+};
+int hos_control_peer_sid_check(const char *s, char *why, size_t cap) {
+    if (!s || !*s || strlen(s) > 184) return snprintf(why, cap, "not a SID"), 0;
+    PSID sid = NULL;
+    if (!ConvertStringSidToSidA(s, &sid)) return snprintf(why, cap, "not a SID"), 0;
+    int ok = 0;
+    char *back = NULL;
+    if (!IsValidSid(sid)) {
+        snprintf(why, cap, "not a valid SID");
+        goto done;
+    }
+    for (size_t i = 0; i < sizeof peer_sid_refused / sizeof *peer_sid_refused; i++) {
+        PSID group = NULL;
+        const int same = ConvertStringSidToSidA(peer_sid_refused[i][0], &group) && EqualSid(sid, group);
+        if (group) LocalFree(group);
+        if (same) {
+            snprintf(why, cap, "%s (%s) is a group, not one user", peer_sid_refused[i][1], peer_sid_refused[i][0]);
+            goto done;
+        }
+    }
+    if (!ConvertSidToStringSidA(sid, &back) || strcmp(back, s)) {   /* (an SDDL alias, leading zeros, hex, spaces, ...) */
+        snprintf(why, cap, "not a SID written as Windows writes it");
+        goto done;
+    }
+    if (strncmp(s, "S-1-5-21-", 9) || *GetSidSubAuthorityCount(sid) != 5) {
+        snprintf(why, cap, "not a user's SID (S-1-5-21-...)");
+        goto done;
+    }
+    if (*GetSidSubAuthority(sid, 4) < 1000) {
+        snprintf(why, cap, "a well-known account or group (RID %lu), not a user of this PC", (unsigned long)*GetSidSubAuthority(sid, 4));
+        goto done;
+    }
+    char name[256], domain[256];
+    DWORD nn = sizeof name, dn = sizeof domain;
+    SID_NAME_USE use;
+    if (!LookupAccountSidA(NULL, sid, name, &nn, domain, &dn, &use)) {
+        snprintf(why, cap, "no such account here (%lu)", GetLastError());
+        goto done;
+    }
+    if (use != SidTypeUser) {
+        snprintf(why, cap, "a group or other non-user account (type %d)", (int)use);
+        goto done;
+    }
+    ok = 1;
+done:
+    if (back) LocalFree(back);
+    LocalFree(sid);
+    return ok;
+}
+
+/* The pipe's DACL: the current user (full); the game's AppContainer, when its token is one (full: a pipe's next instance
+   is checked against the pipe's DACL with the creator's token, and an AppContainer's access check needs its own SID
+   granted besides its user's); HOS_CONTROL_PEER_SID's account (GRGW: to connect as a client) */
+static int pipe_security(void) {
     HANDLE token;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return 0;
-    char info[256];
+    DWORD64 info[64];   /* (a SID is at most 68 bytes) */
     DWORD len = 0;
-    const BOOL got = GetTokenInformation(token, TokenUser, info, sizeof info, &len);
+    char *user = NULL, *ac = NULL;
+    if (!GetTokenInformation(token, TokenUser, info, sizeof info, &len) ||
+        !ConvertSidToStringSidA(((TOKEN_USER *)info)->User.Sid, &user))
+        return CloseHandle(token), 0;
+    DWORD is_ac = 0;
+    if (GetTokenInformation(token, TokenIsAppContainer, &is_ac, sizeof is_ac, &len) && is_ac) {
+        const TOKEN_APPCONTAINER_INFORMATION *t = (const TOKEN_APPCONTAINER_INFORMATION *)info;
+        if (!GetTokenInformation(token, TokenAppContainerSid, info, sizeof info, &len) || !t->TokenAppContainer ||
+            !ConvertSidToStringSidA(t->TokenAppContainer, &ac)) {
+            ctl_log("control: an AppContainer token whose SID could not be read (%lu)", GetLastError());
+            CloseHandle(token), LocalFree(user);
+            return 0;
+        }
+    }
     CloseHandle(token);
-    if (!got) return 0;
-    char *sid = NULL;
-    if (!ConvertSidToStringSidA(((TOKEN_USER *)info)->User.Sid, &sid)) return 0;
-    char sddl[300];
-    snprintf(sddl, sizeof sddl, "D:P(A;;GA;;;%s)", sid);
-    LocalFree(sid);
+    char sddl[700];
+    int n = snprintf(sddl, sizeof sddl, "D:P(A;;GA;;;%s)", user);
+    if (ac) n += snprintf(sddl + n, sizeof sddl - n, "(A;;GA;;;%s)", ac), LocalFree(ac);
+    const char *peer = getenv("HOS_CONTROL_PEER_SID");
+    if (peer && *peer) {
+        char why[160];
+        if (!hos_control_peer_sid_check(peer, why, sizeof why))
+            ctl_log("control: HOS_CONTROL_PEER_SID refused: %s; the pipe stays this user's alone", why);
+        else if (strcmp(peer, user)) {
+            snprintf(sddl + n, sizeof sddl - n, "(A;;GRGW;;;%s)", peer);
+            ctl_log("control: the pipe lets in HOS_CONTROL_PEER_SID's account too");
+        }
+    }
+    LocalFree(user);
     PSECURITY_DESCRIPTOR sd = NULL;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl, SDDL_REVISION_1, &sd, NULL)) return 0;
     pipe_sa.nLength = sizeof pipe_sa, pipe_sa.lpSecurityDescriptor = sd, pipe_sa.bInheritHandle = FALSE;

@@ -1,6 +1,6 @@
-# Hookshot (oot-recomp): design
+# Hookshot: design
 
-A native x86-64 Windows and Linux build of the Switch 2 *The Legend of Zelda: Ocarina of Time* remake: the game's AArch64
+A native x86-64 Windows and Linux build of the game's Switch 2 remake: its AArch64
 code translated to C ahead of time from the user's own decrypted dump and compiled with clang, the Horizon OS and
 NVN2 implemented natively, and the GPU work replayed on Vulkan. No CPU or GPU emulation at any point: the same
 model as mkw-recomp (Mario Kart World), which this project forks.
@@ -49,7 +49,7 @@ git apply -3 mkw.patch
 ```
 
 which works because the base blobs are in this repository. Each sync names its new mkw-recomp base in its commit
-message. OoT-specific code goes into new files where it can, so the shared files stay easy to patch.
+message. Code specific to this game goes into new files where it can, so the shared files stay easy to patch.
 
 ## 3. Architecture
 
@@ -103,12 +103,12 @@ second game.
 1. **Cross-queue `nvnCommandBufferWaitEvent` is honoured.** MKW's queues pass stages back and forth with events;
    replaying them in arrival order on one Vulkan queue flashed. `gpu/vk/vk_replay.cpp` `submit_job` replays each
    submission as far as its waits allow, with per-queue state (`RX_VK_EVENT_WAITS=0` turns it off, for A/B only).
-   *Check early:* log OoT's queues and event waits on the first boot (which queues, how many waits per frame).
+   *Check early:* log the game's queues and event waits on the first boot (which queues, how many waits per frame).
 2. **Nothing the replay reads comes from live guest memory.** Games write per-frame data ahead of the GPU: every
    read is from submit-time captures, and pools are captured from their creation, not their first GPU use
    (`gpu/vk/vk_memory.cpp`, `RX_VK_CAPTURE_POOL_MB`). *Check:* the mirror sync log's live-sync count stays ~0.
 3. **Texture and sampler registrations are queued in order with the submits**, never applied out of band.
-4. **GPU timestamps drive dynamic resolution.** OoT is reported at 1080p-1440p docked, so it has a resolution
+4. **GPU timestamps drive dynamic resolution.** The game is reported at 1080p-1440p docked, so it has a resolution
    controller fed by timestamp reports: the fake GPU time (the counter reports the replay writes, `gpu/vk/vk_replay.cpp`
    `NOP_REPORT_COUNTER`: the 31.25 MHz tick clock since the frame's present, times `RX_VK_TS_SCALE`, 0.1 by default) must be
    scaled so the controller settles where the PC is, not at its floor. *Check:* the render size it picks over time.
@@ -122,15 +122,15 @@ second game.
    with `scripts/prof.py`).
 
 Also inherited, and game-specific in MKW: MKW's frame-pacer hooks at fixed guest addresses are gated on MKW's build
-id (`hos_game_is_mkw`); OoT gets its own once its pacer is found, never by address coincidence.
+id (`hos_game_is_mkw`); the game gets its own once its pacer is found, never by address coincidence.
 
-## 5. What OoT needs that MKW did not (checked on the dump, 2026-11-04)
+## 5. What the game needs that MKW did not (checked on the dump, 2026-11-04)
 
 | | Found | Plan |
 |---|---|---|
 | Dump format | one `.nup` package (base v65536 + update v131072, each an exefs/ and romfs/ tree, data stored as is) | `nx2/nup.py` extracts the newest title to `work/dump` |
 | NSO compression | `main` is ZBIC (NSO flags bit 7, firmware 22.0.0+: zstd with its own magic and BIC-coded tables); rtld, sdk, subsdk0 are LZ4 | `nx2/unpack.py` rewrites ZBIC NSOs as plain ones (hashes checked), decoder `third_party/zbic` |
-| SDK / NVN2 version | 22.2.8 (MKW: 21.4.0); same 46 services and 49 SVCs as MKW | 26 NVN proc names MKW never asked for, 14 not in `host/nvn_native.c` yet (stubs that stop the game only when called; DLSS parameter procs, window acquire timeout, HDR metadata, `nvnProgramBuilderGetShaders`, ...); the device limits in `nvn_native.c` are MKW sdk's (`devinfo[]`) and may need OoT's |
+| SDK / NVN2 version | 22.2.8 (MKW: 21.4.0); same 46 services and 49 SVCs as MKW | 26 NVN proc names MKW never asked for, 14 not in `host/nvn_native.c` yet (stubs that stop the game only when called; DLSS parameter procs, window acquire timeout, HDR metadata, `nvnProgramBuilderGetShaders`, ...); the device limits in `nvn_native.c` are MKW sdk's (`devinfo[]`) and may need the game's |
 | Instructions | 4 UDOT (FEAT_DotProd) sites, the only forms suyu's translator lacked | `nx2/insn.py` `dot()` |
 | Engine | romfs laid out like TOTK's (agl, gsys, Phive, Banc, Bake), Havok 2025.2, NintendoWare G3d2/Vfx3/Ui, SMAA, `.zs` (zstd) files | romfs read from `work/dump/romfs` |
 | Microphone (the ocarina by humming) | to check at runtime (nn::audio input; `audsmx:u`, `auddmg:u` are in the services, as in MKW) | first a stub that hears silence; then a host microphone (WASAPI) or a key that plays the note |
@@ -227,11 +227,11 @@ dump, the runtime made game-neutral, the stage-1 tools checked on MKW's dump as 
     128 bytes off Win64's frame pointer), and longjmp's BR comes back through a64_ijump_hook.
   - HMMA on the host's tensor cores: HMMA_nx2 → IR MatrixMulAddF16 → OpCooperativeMatrixMulAddKHR 16x8x16 f16.
     gpu/vk/vk_coopmat.cpp measures the device's element order (NVIDIA: A's registers 1 and 2 swapped) and checks
-    a multiply. OoT's networks (the movie upscaler, the gameplay TAAU) run at full speed (the movie at 60 fps).
+    a multiply. The game's networks (the movie upscaler, the gameplay TAAU) run at full speed (the movie at 60 fps).
   - Write-backs of GPU-written textures keep the pages the CPU wrote since (SceneLowPriority read texels as
     pointers). Storage buffer tables: GetCbuf(i, x*16 + base) addresses get a 16-entry descriptor array that the
     global memory fallbacks search (the froxel fog); the 32-bit global atomics got fallbacks too.
-  - Program variants remember the storage images' integer-ness too: OoT writes R11G11B10 and RGBA8 targets
+  - Program variants remember the storage images' integer-ness too: the game writes R11G11B10 and RGBA8 targets
     through R32UI views, and a variant made while the slot held a float texture wrote packed words as floats
     (the yellow cast: NaN scene before the TAAU).
   - Extended registers: programs using ~249 GPRs (vertex and mesh) keep their high GPRs in IR registers 256 + n
@@ -248,7 +248,7 @@ dump, the runtime made game-neutral, the stage-1 tools checked on MKW's dump as 
   `GuardFragmentOutputs` keeps float colour outputs finite (RX_VK_NAN_GUARD=0: off). Where the NaN comes from is not known.
 - Discards: a nested early return after a demote wrote its colours (`structured_control_flow.cpp`, from Lichii). That was the box
   around Link (`1e26755d`, the per-character shadow projector, drawn as a box that discards outside) and most of the milky look.
-- Fog and exposure come from the game's own values: no OoT factor scales them. The fog (0.25) and exposure (0.65) factors, from
+- Fog and exposure come from the game's own values: no factor of Hookshot's scales them. The fog (0.25) and exposure (0.65) factors, from
   Orchid's workaround, were off from 11-07 and removed in Hookshot #2042 (`RX_VK_OOT`, `RX_VK_OOT_EXPOSURE`, `RX_VK_OOT_FOG`,
   `RX_VK_OOT_VISUAL` are now only logged as doing nothing, `removed_switch_notes()` in `host/hos_main.c`): they had been tuned
   against bugs since fixed. The ground fog that vanished when the camera looked down was the game's early texel writes being
@@ -271,6 +271,9 @@ dump, the runtime made game-neutral, the stage-1 tools checked on MKW's dump as 
   (a release ships no hot list, so a player's build has no hot pieces: every lifted file is built at `-O1`). `RX_PGO=gen` counts branches
   (host/pgo_rt.c writes LLVM raw format 11, the toolchain has no compiler-rt profile library), `HOS_PGO=<path>` with `<path>.reset` and
   `<path>.dump` files drives a run, `nx2/pgo_pieces.py` fits the merged profile to the pieces, `RX_PGO=<file>` uses it. `RX_VK_ONLY=1`: the renderer alone.
+  (2026-11-14, after ProjectReLink) The renderer module the same way, apart from the game's: `RX_VK_PGO=gen` counts in the back end's own
+  files with the module's own copy of host/pgo_rt.c (`RX_VK_PGO_FILE=<path>` drives a run; on Linux the writer reads the ELF sections
+  `__llvm_prf_*`), `llvm-profdata merge` makes `work/hookshot_vk.profdata`, `RX_VK_PGO=<file>` uses it (docs/development.md).
 - Dark frames, open: lit surfaces come out black for one frame, geometry and depth intact. 5% with `RX_VK_FRAMEGEN=0`, 2.9% with the menu's Off, about 0.1% at 4x.
   Not the cause: render conditions, clear flags, ClearBuffer order, GPU lag, write-back, the real-time step, the ambient cubemap.
   `HOS_COND_RECORD` and `RX_VK_COND_ALWAYS` look like fixes by count and are not: the picture goes white. Tools: the frame log's dark trap dumps probes, passes and conditions; `RX_VK_PROBE_MIN`, `RX_VK_PROBE_UBO_HEX`.

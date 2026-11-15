@@ -50,6 +50,16 @@ class AppImageLicences(unittest.TestCase):
             if '"third_party", "%s"' % part in build:
                 self.assertTrue(any(k.startswith(licence) for k in WANT), part)
 
+    def test_fsr_headers_carried(self):
+        # (AMD FSR 4 on Linux: the back end compiled in the player's build reads AMD's FSR API headers from the image, where
+        # nx2/build.py looks for them, and stops with a sentence when an older image has none)
+        script = (ROOT / "scripts/linux/appimage.sh").read_text(encoding="utf-8")
+        build = (ROOT / "nx2/build.py").read_text(encoding="utf-8")
+        self.assertIn('cp -a third_party/fidelityfx "$T/third_party/"', script)
+        self.assertIn('FSR_HEADERS = os.path.join(kit.HERE, "..", "third_party", "fidelityfx")', build)
+        self.assertNotIn("HOOKSHOT_VK_PREBUILT", build)   # (every build compiles the back end: no prebuilt one to fall back on)
+        self.assertTrue((ROOT / "third_party/fidelityfx/api/include/ffx_api.h").is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

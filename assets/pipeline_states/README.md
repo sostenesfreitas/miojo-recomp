@@ -21,7 +21,7 @@ Hookshot's shader hashes; their notes say how. They hold the same records as any
   `hookshot_pipeline_states_shipped.bin`. The first start's shader preparation then builds these pipelines before the
   title screen, so the first field load doesn't wash out white while they compile. Every start also keeps the listed
   compute programs' pipelines ready, together with the ones the player's own play has run, so a program is not set up
-  the first time the game runs it. `nx2/pipeline_states.py check` stops when the merged list names more than 1024
+  the first time the game runs it. `nx2/pipeline_states.py check` stops when the merged list names more than 2560
   compute programs (`COMPUTE_MOST`): the game keeps memory for each one listed and never drops one itself, so raise
   the number with a measurement or prune the list.
 
@@ -96,8 +96,15 @@ converted to the new format (or recorded again) in place, and the layout stays t
 
 ## The tour's list
 
-The pipeline tour plays a fixed route on its own and records the pipelines it makes. It then replaces `tour.bin.xz` and
-`tour.md` with that list:
+The pipeline tour (`scripts/pipeline_tour.py`, [docs/development.md](../../docs/development.md#the-pipeline-tour)) plays a
+fixed route on its own, through the game's control bridge, and records the pipelines it makes. With `--publish` it then
+replaces `tour.bin.xz` and `tour.md` with that list, filling the note in from its runs:
+
+```sh
+python -I scripts/pipeline_tour.py tour --game <game folder> --out <tour dir> --name play --publish
+```
+
+which runs, for the parts' lists:
 
 ```sh
 python -I nx2/pipeline_states.py tour <tour lists>... --gpu "..." --build "main at <commit>" --settings "..." --route "..."

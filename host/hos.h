@@ -15,7 +15,20 @@
 #include "a64.h"
 #include <stdarg.h>
 
-#define HLE(sym) void imp_##sym(Ctx *c)
+/* HOS_HLE_STATS=1 (off by default): each HLE function counts its calls, and hos_hostcall.c logs every 5 s how often each
+   ran. Off, a call costs a test of the switch and a branch more: the counted arm is a tail call, so the function saves
+   no registers for it and the body stays inlined in the other. */
+typedef struct HleCount { const char *name; volatile long calls, listed; long before; struct HleCount *next; } HleCount;
+extern int hos_hle_stats;
+void hos_hle_counted(HleCount *h, void (*fn)(Ctx *c), Ctx *c);
+#define HLE(sym) \
+    static void hle_##sym(Ctx *c); \
+    void imp_##sym(Ctx *c) { \
+        static HleCount h = {#sym}; \
+        if (hos_hle_stats) hos_hle_counted(&h, hle_##sym, c); \
+        else hle_##sym(c); \
+    } \
+    static void hle_##sym(Ctx *c)
 /* HOS_GAME_VERSION: the game update the address hooks below are for, from the build (build.py reads the main
    module's build id). An update moves the game's functions, so a hook compiles the address of the version it is
    for and the other version's hooks are left out (ENTRY_HOOKs: the address is not in the lift; SPLICE_AFTERs:

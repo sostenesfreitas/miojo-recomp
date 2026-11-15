@@ -47,6 +47,7 @@ typedef struct { uint64_t x[32]; float vreg[32][4]; } Ctx;
 static uint64_t recomp_load64(Ctx *c, uint64_t a) { uint64_t v; (void)c; memcpy(&v, hos_guest_range(a, 8), 8); return v; }
 volatile float hos_wide_squeeze;
 volatile uint32_t hos_wide_keep_mask = 0xf;
+volatile float hos_ui_qx, hos_ui_qy;   /* (host/hos_wide_ui.c's scale: 0, the squeeze alone) */
 HOST_C
 static void site(Ctx *c) {
 SITE_C

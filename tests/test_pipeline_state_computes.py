@@ -578,6 +578,7 @@ struct Program {
     unsigned workgroup[3]{32, 1, 1};
     uintptr_t layout = 0x1357;
     VkPipeline compute_pipeline = 0xbeef;
+    std::atomic<bool> optimize_owed{false};
 };
 struct Pre {
     std::mutex mu;
@@ -586,15 +587,21 @@ struct Pre {
 };
 // the made-up driver: in_cache, whether its caches hold the pipeline; broken, whether it refuses to compile it
 static bool in_cache = false, broken = false;
-static int asks = 0, compiles = 0, destroys = 0;
+static int asks = 0, compiles = 0, destroys = 0, quick_compiles = 0;
+// (Intel's one-at-a-time builds and the Debug tab's Intel quick compute builds row)
+static bool serial = false, quick_row = false;
+static bool serial_builds_on() { return serial; }
+static bool intel_quick_compute() { return quick_row; }
 static void pin_subgroup(decltype(VkComputePipelineCreateInfo::stage)&, unsigned) {}
 static VkResult cached_compute(const VkComputePipelineCreateInfo* ci, VkPipeline* pl) {
     CHECK(ci->stage.module == 0x2468 && ci->layout == 0x1357);
     if (ci->flags & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) {
+        CHECK(!(ci->flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT));   // (the caches are asked for the optimized one)
         asks++;
         if (!in_cache) return *pl = VK_NULL_HANDLE, VK_PIPELINE_COMPILE_REQUIRED;
         return *pl = 0xcafe, VK_SUCCESS;
     }
+    if (ci->flags & VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT) quick_compiles++;
     compiles++;
     if (broken) return *pl = VK_NULL_HANDLE, -4;
     return *pl = 0xcafe, VK_SUCCESS;
@@ -622,7 +629,27 @@ int main() {
     run(false, true, false, false, 0, 1, 0, 1, 0, 0xcafe);    // a driver that cannot say: one call, as before
     run(false, false, true, false, 0, 1, 0, 0, 1, 0);
     run(true, true, false, true, 1, 0, 1, 0, 0, 0xbeef);      // the game went on meanwhile: let go, the program's own kept
-    std::printf("PASS: the precompile's compute arm asks the caches first and counts cached, compiled and not made\n");
+    CHECK(quick_compiles == 0);
+    // (Intel's one-at-a-time builds: compiled without the optimizer, its optimized build owed to its first dispatch. The optimized
+    // one from the caches is taken as it is; the row off, or another GPU, builds the optimized one, as above)
+    const auto intel = [](bool row, bool cached, bool abandoned, int want_quick, bool owed) {
+        serial = true, quick_row = row, quick_compiles = 0;
+        Program program;
+        Pre pre;
+        pre.abandoned = abandoned;
+        dev.vk13.pipelineCreationCacheControl = true, in_cache = cached, broken = false;
+        asks = compiles = destroys = 0;
+        actual_arm(program, &pre);
+        CHECK(asks == 1 && compiles == (cached ? 0 : 1) && quick_compiles == want_quick);
+        CHECK(program.optimize_owed.load() == owed);
+        CHECK(program.compute_pipeline == (abandoned ? 0xbeef : 0xcafe));
+    };
+    intel(true, false, false, 1, true);     // not in the caches: quick, owed
+    intel(true, true, false, 0, false);     // the optimized one in the caches: kept, nothing owed
+    intel(true, false, true, 1, false);     // the game went on: let go, nothing owed
+    intel(false, false, false, 0, false);   // the row off: optimized, as before
+    std::printf("PASS: the precompile's compute arm asks the caches first and counts cached, compiled and not made; on Intel's "
+                "one-at-a-time builds it compiles without the optimizer and owes the optimized build\n");
     return 0;
 }
 """
@@ -632,7 +659,8 @@ def check_arm(draw, cxx):
     arm = block(block(draw, "void precompile_run("), "if (i < computes.size()) {")
     # (what the arm makes a compute pipeline from and how it asks the caches: the functions every maker of one goes through)
     helpers = (block(draw, "VkComputePipelineCreateInfo compute_pipeline_info(const Program& q, bool noopt) {") + "\n" +
-               block(draw, "VkPipeline compute_pipeline_cached(const Program& q, bool noopt) {") + "\n")
+               block(draw, "VkPipeline compute_pipeline_cached(const Program& q, bool noopt) {") + "\n" +
+               block(draw, "bool precompile_compute_quick(VkComputePipelineCreateInfo& ci) {") + "\n")
     fixture = (ARM_HEAD + helpers + "\nstatic void actual_arm(Program& program, Pre* pre) {\n    std::vector<Program*> computes{&program};\n"
                "    size_t i = 0;\n    " + arm + "\n}\n" + ARM_MAIN)
     with tempfile.TemporaryDirectory(prefix="state-computes-arm-") as tmp:

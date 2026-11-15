@@ -34,6 +34,9 @@ struct Inputs {
     VkImageView color = VK_NULL_HANDLE;
     VkImage color_image = VK_NULL_HANDLE;
     VkFormat color_format = VK_FORMAT_UNDEFINED;
+    /// Encoding of the captured present, independent of its UNORM storage format.
+    bool native_pq = false;
+    float max_luminance = 1.0f; // Nits for PQ; ignored for the existing SDR path.
     uint32_t width = 0, height = 0;
 
     VkImageView depth = VK_NULL_HANDLE;

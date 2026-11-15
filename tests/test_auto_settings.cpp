@@ -19,8 +19,9 @@ int main() {
     using namespace auto_settings;
     // (the copies of the menu's indices agree with upscaler_rows.h)
     expect((int)GAME == (int)ur::GAME && (int)DLSS == (int)ur::DLSS && (int)FSR4 == (int)ur::FSR4, "upscaler indices as upscaler_rows.h's");
-    expect(ur::percent(RES_QUALITY) == 67 && ur::percent(RES_BALANCED) == 58 && ur::percent(RES_PERFORMANCE) == 50,
-           "render resolution indices: Quality 67, Balanced 58, Performance 50");
+    expect(ur::percent(RES_QUALITY) == 67 && ur::percent(RES_BALANCED) == 58 && ur::percent(RES_PERFORMANCE) == 50 &&
+               ur::percent(RES_ULTRA_PERFORMANCE) == 33,
+           "render resolution indices: Quality 67, Balanced 58, Performance 50, Ultra Performance 33");
 
     Hardware h;
     h.vendor = NVIDIA, h.rtx = true, h.dlss_built = true, h.vram_mb = 12282, h.ram_mb = 32000, h.screen_w = 2560, h.screen_h = 1440;
@@ -54,6 +55,14 @@ int main() {
     igpu.vendor = INTEL, igpu.integrated = true, igpu.vram_mb = 16000;
     c = choose(igpu);
     expect(c.tier == 1 && c.upscaler == GAME, "an integrated GPU: Minimum whatever memory it reports");
+    expect(c.resolution == 0, "an integrated GPU, threads not known: Minimum's own Render resolution");
+    igpu.threads = 8;
+    c = choose(igpu);
+    expect(c.resolution == 0, "an integrated GPU beside 8 threads: Minimum's own Render resolution");
+    igpu.threads = 4, igpu.ram_mb = 16122;
+    c = choose(igpu);
+    expect(c.tier == 1 && c.upscaler == GAME && c.resolution == RES_ULTRA_PERFORMANCE && std::strstr(c.why, "33%"),
+           "an integrated GPU beside 4 threads (i3-1115G4's UHD Graphics): the game's own at 33%");
 
     Hardware deck;
     deck.vendor = AMD, deck.handheld = true, deck.vram_mb = 1024, deck.screen_w = 1280, deck.screen_h = 800;

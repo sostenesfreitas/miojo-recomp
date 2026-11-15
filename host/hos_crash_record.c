@@ -28,6 +28,7 @@ typedef HANDLE File;
 #include <fcntl.h>
 #include <pwd.h>
 #include <signal.h>
+#include <sched.h>
 #include <sys/file.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -49,13 +50,14 @@ typedef struct LogFacts {
     uint64_t bytes, epoch;
     size_t tail;
     int known, fatal, crash, lost;
+    int quit; /* the marker's quit note (hos_crash_quit_asked): the player had asked to quit */
 } LogFacts;
 static Session session;
 static HosReportPrivacy privacy;
 static File marker = NO_FILE, staging = NO_FILE;
-static char pending_dir[PATH_CAP], running_dir[PATH_CAP], marker_path[PATH_CAP], staging_path[PATH_CAP];
+static char pending_dir[PATH_CAP], running_dir[PATH_CAP], marker_path[PATH_CAP], staging_path[PATH_CAP], game_dir[PATH_CAP];
 static char published_stem[96];
-static int ready, claimed, prune_failed;
+static int ready, claimed, prune_failed, quit_noted, quit_busy;
 static char record_bytes[TEXT_CAP];
 static Text record = {record_bytes, sizeof record_bytes, 0, 0};
 #ifdef _WIN32
@@ -464,6 +466,7 @@ static void format_record(Text *b, const Session *s, const HosCrashContext *c, u
     } else {
         field(b, "crash_handler", "not observed");
         field(b, "termination_note", "ended from outside or lost power, not necessarily a crash");
+        if (facts && facts->quit) field(b, "quit_asked", "yes"); /* (a quit never counts as a crash: hos_crash_dialog.h) */
         if (facts && facts->known) {
             decimal_field(b, "log_size_bytes", facts->bytes); decimal_field(b, "log_tail_bytes", facts->tail);
             timestamp(facts->epoch, when); field(b, "log_mtime_utc", when);
@@ -544,6 +547,8 @@ static void recover_one(const char *name) {
         int ok = complete;
         if (!complete) {
             LogFacts facts = log_facts(&before);
+            char note[5];
+            facts.quit = read_file(old, note, sizeof note, sizeof before) && !memcmp(note, "quit\n", sizeof note);
             format_record(&record, &before, NULL, epoch_now(), &facts);
             ok = !record.full && reset_file(file) && write_file(file, record.bytes, record.n) && durable(file);
         }
@@ -748,7 +753,16 @@ void hos_crash_clean_end(void) {
     int expected = 0;
     if (!__atomic_load_n(&ready, __ATOMIC_ACQUIRE) ||
         !__atomic_compare_exchange_n(&claimed, &expected, 2, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
-    __atomic_store_n(&ready, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&ready, 0, __ATOMIC_SEQ_CST);
+    /* (a quit note being written on another thread (hos_crash_quit_asked) finishes before the marker closes: its descriptor
+       could otherwise be another file's by then. A write of 5 bytes: bounded, never a wait on a stuck thread) */
+    for (int spins = 0; spins < 100000 && __atomic_load_n(&quit_busy, __ATOMIC_SEQ_CST); ++spins) {
+#ifdef _WIN32
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+    }
     close_file(staging); staging = NO_FILE; remove_file(staging_path);
     remove_file(marker_path); close_file(marker); marker = NO_FILE;
 #ifdef _WIN32
@@ -756,9 +770,9 @@ void hos_crash_clean_end(void) {
     if (dump_status != INVALID_HANDLE_VALUE) { CloseHandle(dump_status); dump_status = INVALID_HANDLE_VALUE; DeleteFileW(dump_status_temp); }
 #endif
 }
-void hos_crash_record_start(const char *dir, const char *version, const char *log_path) {
-    if (ready) return;
-    char root[PATH_CAP], host[256] = "", leaf[64];
+/* The identities records leave out, and the folders, as a start and the crash window's helper both need them */
+static int setup(const char *dir, char root[PATH_CAP]) {
+    char host[256] = "";
 #ifdef _WIN32
     const char *home = getenv("USERPROFILE"), *user = getenv("USERNAME");
     DWORD host_size = sizeof host; GetComputerNameA(host, &host_size);
@@ -773,9 +787,14 @@ void hos_crash_record_start(const char *dir, const char *version, const char *lo
     session.pid = (uint64_t)getpid();
 #endif
     hos_report_privacy_init(&privacy, home, user, host);
-    if (!dir || !join(root, sizeof root, dir, "bug-reports") || !make_dir(root) ||
-        !join(pending_dir, sizeof pending_dir, root, "pending") || !make_dir(pending_dir) ||
-        !join(running_dir, sizeof running_dir, root, "running") || !make_dir(running_dir)) return;
+    return dir && join(root, PATH_CAP, dir, "bug-reports") && make_dir(root) &&
+           join(pending_dir, sizeof pending_dir, root, "pending") && make_dir(pending_dir) &&
+           join(running_dir, sizeof running_dir, root, "running") && make_dir(running_dir);
+}
+void hos_crash_record_start(const char *dir, const char *version, const char *log_path) {
+    if (ready) return;
+    char root[PATH_CAP], leaf[64];
+    if (!setup(dir, root)) return;
     recover();
     prune_pending();
     memcpy(session.magic, "Hookshot running 1", 19);
@@ -818,7 +837,67 @@ void hos_crash_record_start(const char *dir, const char *version, const char *lo
 #ifdef _WIN32
     prepare_dump(root);
 #endif
+    memcpy(game_dir, dir, length(dir, sizeof game_dir - 1) + 1);
     __atomic_store_n(&ready, 1, __ATOMIC_RELEASE);
+}
+/* The player asked to quit (the window closed, the control socket's quit: host/rx_backend.c rx_close_asked, before anything
+   that takes time): a note after the marker's session, which recovery copies into an unclean record as quit_asked, so an end
+   while the game closes (a second close of a window that stopped answering) is no crash. A positional write, as the crash
+   writer's own to the marker: a crash while it is written leaves both at their offsets */
+void hos_crash_quit_asked(void) {
+    /* (counted as busy before ready is read, as hos_crash_clean_end clears ready before it waits for none busy: one of the two
+       sees the other, so the marker is never written once it is closed) */
+    __atomic_add_fetch(&quit_busy, 1, __ATOMIC_SEQ_CST);
+    if (__atomic_load_n(&ready, __ATOMIC_SEQ_CST) && !__atomic_exchange_n(&quit_noted, 1, __ATOMIC_ACQ_REL)) {
+        static const char note[5] = {'q', 'u', 'i', 't', '\n'};
+#ifdef _WIN32
+        OVERLAPPED at = {0};
+        at.Offset = (DWORD)sizeof(Session);
+        DWORD n = 0;
+        WriteFile(marker, note, sizeof note, &n, &at);
+#else
+        ssize_t n = pwrite(marker, note, sizeof note, (off_t)sizeof(Session));
+        (void)n;
+#endif
+    }
+    __atomic_sub_fetch(&quit_busy, 1, __ATOMIC_SEQ_CST);
+}
+/* For the crash window (host/hos_crash_dialog.c): this run's id, its log ("" when it logs to no file) and the game folder,
+   NULL before a start recorded */
+const char *hos_crash_record_run(void) { return __atomic_load_n(&ready, __ATOMIC_ACQUIRE) ? session.run_id : NULL; }
+const char *hos_crash_record_log(void) { return __atomic_load_n(&ready, __ATOMIC_ACQUIRE) ? session.log_path : NULL; }
+const char *hos_crash_record_dir(void) { return __atomic_load_n(&ready, __ATOMIC_ACQUIRE) ? game_dir : NULL; }
+/* The helper, once its game has ended: the recovery a start does (an unclean record for each marker no live process holds),
+   without a marker of its own. 0 when the folders cannot be made */
+int hos_crash_record_recover(const char *dir) {
+    char root[PATH_CAP];
+    if (ready || !setup(dir, root)) return 0;
+    recover();
+    return 1;
+}
+/* Whether a run's marker is still there: 0 gone (or not a marker), 1 this run's, 2 there but not readable (Windows: its
+   owner's lock, held until the process is gone), 3 another run's (Linux's restart is the same process with a new run) */
+int hos_crash_record_marker(const char *dir, uint64_t pid, const char *run_id) {
+    char root[PATH_CAP], running[PATH_CAP], path[PATH_CAP], leaf[64];
+    if (!dir || !join(root, sizeof root, dir, "bug-reports") || !join(running, sizeof running, root, "running")) return 0;
+    snprintf(leaf, sizeof leaf, "%llu.running", (unsigned long long)pid);
+    if (!join(path, sizeof path, running, leaf)) return 0;
+#ifdef _WIN32
+    wchar_t w[PATH_CAP];
+    if (!wide(path, w)) return 0;
+    HANDLE f = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND || GetLastError() == ERROR_PATH_NOT_FOUND ? 0 : 2;
+#else
+    int f = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (f < 0) return errno == ENOENT ? 0 : 2;
+#endif
+    Session s;
+    const int got = read_file(f, &s, sizeof s, 0);
+    close_file(f);
+    if (!got) return 2;
+    if (memcmp(s.magic, "Hookshot running 1", 19)) return 0;
+    return !memcmp(s.run_id, run_id, length(run_id, 32)) && s.run_id[32] == 0 ? 1 : 3;
 }
 int hos_crash_record_write(const HosCrashContext *context) {
     int expected = 0;
@@ -829,8 +908,11 @@ int hos_crash_record_write(const HosCrashContext *context) {
     if (record.full || !write_file(staging, record.bytes, record.n) || !durable(staging)) return 0;
     const uint32_t complete = 1;
 #ifdef _WIN32
-    LARGE_INTEGER at; at.QuadPart = offsetof(Session, record_complete);
-    if (!SetFilePointerEx(marker, at, NULL, FILE_BEGIN) || !write_file(marker, &complete, sizeof complete)) return 0;
+    /* (positional, as hos_crash_quit_asked's note: neither depends on the other's file pointer) */
+    OVERLAPPED at = {0};
+    at.Offset = (DWORD)offsetof(Session, record_complete);
+    DWORD wrote = 0;
+    if (!WriteFile(marker, &complete, sizeof complete, &wrote, &at) || wrote != sizeof complete) return 0;
 #else
     if (pwrite(marker, &complete, sizeof complete, offsetof(Session, record_complete)) != (ssize_t)sizeof complete) return 0;
 #endif

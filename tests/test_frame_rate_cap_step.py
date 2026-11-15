@@ -60,6 +60,7 @@ static uint8_t guest[0x4000];
 #define MOD 0x1000u
 static int clock_logs;
 static long long clock_now;
+static int64_t now = 1000000000LL;   /* (the presents' clock; hos_now_ns below reads it) */
 static void hos_log(const char *fmt, ...) {
     char text[256];
     va_list args; va_start(args, fmt); vsnprintf(text, sizeof text, fmt, args); va_end(args);
@@ -83,6 +84,9 @@ volatile float hos_text_scale, hos_camera_scale;
 @OPTS@
 volatile uint64_t hos_step_probe, hos_res_module;
 volatile uint32_t hos_frame_seconds_bits;
+/* (the host clock the extracted cap code reads for the movie pacing; movie_seen_at itself comes with the
+   extracted block, which starts at the cap's enum) */
+static int64_t hos_now_ns(void) { return now; }
 @HOST@
 static uint64_t a64_fpx_div32_div32(void *c, uint64_t a, uint64_t b) {
     float x, y; uint32_t w;
@@ -97,7 +101,6 @@ static float lifted_step(float base, float nominal) {
     memcpy(&r, &_v, 4);
     return r;
 }
-static int64_t now = 1000000000LL;
 static float frames(int n, double seconds) {   /* (n presents that far apart: the seconds the hook is given, 0 when off) */
     float f;
     uint32_t bits;
@@ -171,6 +174,17 @@ int main(int argc, char **argv) {
             if (*rate == 40) { recovered = 1; break; }
         }
         CHECK(recovered && lifted_step(60.0f, (float)*rate) == 1.5f);
+    } else if (!strcmp(mode, "movie pace")) {   /* (at the console's cap a movie's player pacing goes to 240 while it updates, back to 60 after) */
+        CHECK(frames(3, 1.0 / 60) == 0.0f && *limit == 60 && *rate == 60);   /* (no movie seen: nothing changes) */
+        movie_seen_at = (uint64_t)now;   /* (the movie's player just updated: the lift's hook stamps this in the host) */
+        CHECK(near(frames(10, 1.0 / 120), 1.0 / 120) && *limit == 240 && *rate == 60);   /* (paced and stepped: the frames' own time, the limiter raised) */
+        CHECK(near(frames(10, 1.0 / 240), 1.0 / 240) && *limit == 240);   /* (kept while the window holds) */
+        CHECK(frames(16, 1.0 / 60) == 0.0f && *limit == 60 && *rate == 60);   /* (the window passed with no new updates (16 x 1/60 = 266 ms > 250 ms): the game's limiter and step back) */
+        movie_seen_at = (uint64_t)now;   /* (another movie: up again, and the first movie's game_limit is not lost) */
+        CHECK(near(frames(5, 1.0 / 120), 1.0 / 120) && *limit == 240);
+    } else if (!strcmp(mode, "movie pace off")) {   /* (HOS_MOVIE_PACE=0: even a fresh movie stamp leaves the game's cap) */
+        movie_seen_at = (uint64_t)now;
+        CHECK(frames(10, 1.0 / 60) == 0.0f && *limit == 60 && *rate == 60);
     } else {   /* (HOS_FPS_STEP=0, or a lift without the hook: the rate up to the cap, as before) */
         CHECK(frames(10, 1.0 / 120) == 0.0f && *rate == 120 && *limit == 120);
         CHECK(lifted_step(60.0f, 60.0f) == 1.0f);
@@ -238,8 +252,14 @@ def main():
     check("V-Sync" in row and "real time" in row, "the row's help does not say Uncapped keeps real time and V-Sync limits it")
 
     vi = (ROOT / "host" / "nn_vi.c").read_text(encoding="utf-8")
-    host = "\n".join(block(vi, m) for m in ("static float text_scale(", "static float camera_scale(", "static int fps_max(void) {",
-                                             "int hos_vi_native_interval(", "static int realtime_rate(", "static void realtime_step("))
+    # (the cap's one-line pieces, then the functions: fps_refresh reads the row at each present, fps_max answers from it)
+    line = lambda marker: next(l for l in vi.split("\n") if l.startswith(marker))
+    host = "\n".join([line("enum { FPS_UNCAPPED"), line("static volatile uint64_t movie_seen_at;"),
+                      line("static const int64_t MOVIE_STALE_NS"), line("static volatile int fps_now;"),
+                      line("static int fps_of(")] +
+                     [block(vi, m) for m in ("static float text_scale(", "static float camera_scale(", "static void fps_refresh(",
+                                             "static int fps_max(void) {", "int hos_vi_native_interval(", "static int realtime_rate(",
+                                             "static void realtime_step(")])
     # (the option ids realtime_step names: vk_api.h's HOS_OPT_* enums)
     opts = "\n".join(re.findall(r"enum \{ HOS_OPT_[^}]*\};", (ROOT / "gpu" / "vk" / "vk_api.h").read_text(encoding="utf-8")))
     fixture = FIXTURE.replace("@OPTS@", opts).replace("@HOST@", host).replace(
@@ -254,10 +274,13 @@ def main():
                                        ("unknown index", None, None, "8"), ("cap 120", None, None, "2"), ("clock log", "60", None, None),
                                        ("cap 30", None, None, "7"), ("cap 30", "30", None, None),
                                        ("30 fallback", "30", "0", None), ("cap 60", "29", None, "7"),
-                                       ("cap 120", "120", None, "7")):
+                                       ("cap 120", "120", None, "7"),
+                                       ("movie pace", None, None, None), ("movie pace off", None, None, None)):
             env = {k: v for k, v in os.environ.items() if not k.startswith(("HOS_", "T_"))}
             if mode == "clock log":
                 env["HOS_FPS_LOG"] = "1"
+            if mode == "movie pace off":
+                env["HOS_MOVIE_PACE"] = "0"
             if cap:
                 env["HOS_FPS_MAX"] = cap
             if step:

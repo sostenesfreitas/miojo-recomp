@@ -44,7 +44,8 @@ struct VkComputePipelineCreateInfo {
 // caches first, through the same cached_compute: tests/test_pipeline_state_computes.py)
 struct {uintptr_t device=0x1234;struct{bool pipelineCreationCacheControl=false;}vk13;}dev;
 VkPipelineCache pcache=0x5678;
-struct Program {struct Stage{uintptr_t module;};std::vector<Stage>stages{{0x2468}};unsigned workgroup[3]{32,1,1};uintptr_t layout=0x1357;VkPipeline compute_pipeline=0xbeef;};
+struct Program {struct Stage{uintptr_t module;};std::vector<Stage>stages{{0x2468}};unsigned workgroup[3]{32,1,1};uintptr_t layout=0x1357;VkPipeline compute_pipeline=0xbeef;std::atomic<bool> optimize_owed{false};};
+bool serial_builds_on(){return false;} bool intel_quick_compute(){return false;}   // (not Intel's one-at-a-time builds)
 struct Pre {std::mutex mu;bool abandoned=false;std::atomic<size_t> computes_cached{0},computes_compiled{0},computes_failed{0};};
 constexpr int VK_PIPELINE_CREATE_DISABLE_OPTIMIZATION_BIT=0x1;
 bool env_on(const char*){return false;}   // (RX_VK_NOOPT: not set, and the precompile does not follow it)
@@ -94,7 +95,7 @@ def main():
     # ci/made identities are checked at the boundary as well as inside the API spy.
     # (the arm takes its create info and its cache answer from these two, so the fixture takes them from the source as well)
     info=block(source,'VkComputePipelineCreateInfo compute_pipeline_info(')
-    asked=block(source,'VkPipeline compute_pipeline_cached(')
+    asked=block(source,'VkPipeline compute_pipeline_cached(')+'\n'+block(source,'bool precompile_compute_quick(')
     ask='VkPipeline made = compute_pipeline_cached(p, false);'
     armed=arm.replace(ask, ask+' expected_ci=&ci; expected_out=&made;')
     assert armed != arm

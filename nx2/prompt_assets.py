@@ -1043,9 +1043,25 @@ def prompt_packages():
     return result
 
 
+def builder_release():
+    """The release a packaged builder is (version.txt, or the AppImage's VERSION); None in a source checkout"""
+    for name in ("version.txt", "VERSION"):
+        try:
+            with open(os.path.join(os.path.dirname(HERE), name), encoding="utf-8") as f:
+                tag = f.readline().strip()
+        except FileNotFoundError:
+            continue
+        if tag:
+            return tag
+    return None
+
+
 def prompt_key(a):
-    """Everything generate() reads; keep this list with its file opens/imports and tests/test_prompt_skip.py."""
+    """Everything generate() reads; keep this list with its file opens/imports and tests/test_prompt_skip.py. Also the
+    game's side (host/prompts.c makes the runtime files from these, under keys of its own that don't cover its code), and a
+    packaged builder's release: each builder update draws them again once, whatever this list misses"""
     source = {n: prompt_file(os.path.join(HERE, n)) for n in ("prompt_assets.py", "prompt_draw.py")}
+    source["host/prompts.c"] = prompt_file(os.path.join(os.path.dirname(HERE), "host", "prompts.c"))
     tables = {n: prompt_file(os.path.join(HERE, n)) for n in ("prompt_faces.py", "prompt_keys.py")}
     fonts = {FONT: prompt_file(os.path.join(a.romfs, FONT))}
     try:
@@ -1063,7 +1079,7 @@ def prompt_key(a):
     for n in ("ARCHSPEC_CPU_DIR", "ARCHSPEC_EXTENSION_CPU_DIR"):
         if n in os.environ:
             switches[n] = [os.environ[n], prompt_tree(os.environ[n], ".json")]
-    return {"source": source, "font": fonts, "table": tables, "game assets": game,
+    return {"source": source, "builder": builder_release(), "font": fonts, "table": tables, "game assets": game,
             "overrides": prompt_tree(os.path.join(HERE, "prompt_faces"), ".png"), "packages": prompt_packages(),
             "switch": switches, "parameters": [a.faces, a.no_textures, a.dump],
             "Python/platform": [sys.version, sys.platform, platform.machine(), sys.byteorder]}
@@ -1210,7 +1226,7 @@ def make_prompts(a, incremental=False):
     from kit import env_on
     sweep_prompts(a.out)
     key = None
-    reason = "packaged or direct build"
+    reason = "a direct run of prompt_assets.py"
     if incremental:
         try:
             key = prompt_key(a)   # before the drawing, never certify old output with a key taken only afterwards
@@ -1221,19 +1237,10 @@ def make_prompts(a, incremental=False):
     if env_on("HOOKSHOT_FORCE_PROMPTS"):
         reason = "forced"
     if reason is None:
-        # Every build used to clear these along with the originals. Their runtime keys do not cover host/prompts.c.
-        try:
-            for name in sorted(PROMPT_RUNTIME):
-                try:
-                    os.remove(os.path.join(a.out, name))
-                except FileNotFoundError:
-                    pass
-        except OSError as e:
-            reason = f"runtime files could not be cleared: {e}"
-            print(f"prompts: {reason}; regenerating", flush=True)
-        else:
-            print("prompts: unchanged, kept", flush=True)
-            return
+        # (the game's runtime files are kept too: host/prompts.c is in the key, so they were made by this same code. Not
+        # removed under a game that may be running from this folder)
+        print("prompts: unchanged, kept", flush=True)
+        return
     stamp = os.path.join(a.out, PROMPT_KEY)
     try:
         os.remove(stamp)   # an interrupted retry must not leave even the previous stamp behind
@@ -1395,7 +1402,7 @@ def main():
     ap.add_argument("--no-textures", action="store_true")
     ap.add_argument("--dump", help="also write every face's images as PNG into <dir>/<face>/ (the names nx2/prompt_faces/<face>/ "
                     "takes in their place), and the game's textures they go into into <dir>/game/")
-    ap.add_argument("--incremental", action="store_true", help="keep complete, unchanged output (source-checkout builds)")
+    ap.add_argument("--incremental", action="store_true", help="keep complete, unchanged output (make_game.py's builds)")
     a = ap.parse_args()
     make_prompts(a, a.incremental and not a.dump)   # a layer dump is requested output too: always draw it
 

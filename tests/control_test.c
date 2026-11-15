@@ -2,9 +2,9 @@
    Unix socket on Linux, a named pipe on Windows. A thread stands in for the game (a controller read, then a present,
    every 2 ms; draws a frame as a case sets them), and the test is the client. tests/test_control.py builds and runs it.
 
-   control_test <folder> [quit | level | mem]: the cases, quit (a child serving while the parent asks it to quit), the
-   HOS_CONTROL_MEM levels, or the memory cases at the level in the environment. (Windows: quitserve <pipe> and
-   servefail <pipe> are the children those start.) */
+   control_test <folder> [quit | level | mem | peersid]: the cases, quit (a child serving while the parent asks it to quit), the
+   HOS_CONTROL_MEM levels, or the memory cases at the level in the environment. (Windows: peersid, HOS_CONTROL_PEER_SID's
+   check; quitserve <pipe> and servefail <pipe> are the children those start.) */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -577,7 +577,8 @@ static void mem_case(const char *folder) {
 }
 
 #ifdef _WIN32
-/* The pipe's DACL, read back through a client's handle: protected, one ACE, allowing this user alone */
+/* The pipe's DACL, read back through a client's handle: protected, one ACE, allowing this user alone (this run has no
+   HOS_CONTROL_PEER_SID and no AppContainer) */
 static void dacl_case(Client *c) {
     PACL dacl = NULL;
     PSECURITY_DESCRIPTOR sd = NULL;
@@ -598,6 +599,40 @@ static void dacl_case(Client *c) {
     LocalFree(sd);
     puts("PASS: the pipe's DACL: protected, one ACE, this user alone");
 }
+
+/* HOS_CONTROL_PEER_SID's check (host/control.c): a user's own SID, canonical, never a group or a well-known account */
+int hos_control_peer_sid_check(const char *s, char *why, size_t cap);   /* (host/control.c) */
+static void peer_sid_unit(void) {
+    static const char *const refused[] = {
+        NULL, "", "junk", "WD", "AU", "BU", "BA", "S-1-1-0", "S-1-5-11", "S-1-5-32-545", "S-1-5-32-544", "S-1-5-18",
+        "S-1-15-2-1", "S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-513", "S-1-5-21-1-2-1001", "S-1-5-21-1-2-3-4-1001",
+        " S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1001 ", "S-1-5-21-01-2-3-1001", "s-1-5-21-1-2-3-1001",
+        "S-1-5-21-1-2-3-1001;", "S-1-5-21-1-2-3-1001)(A;;GA;;;WD"};
+    char why[160];
+    for (unsigned i = 0; i < sizeof refused / sizeof *refused; i++) {
+        why[0] = 0;
+        CHECK(!hos_control_peer_sid_check(refused[i], why, sizeof why) && why[0]);
+    }
+    CHECK(!hos_control_peer_sid_check("S-1-1-0", why, sizeof why) && strstr(why, "Everyone"));
+    CHECK(!hos_control_peer_sid_check("S-1-5-32-544", why, sizeof why) && strstr(why, "Administrators"));
+    HANDLE token;
+    CHECK(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token));
+    DWORD64 info[64];
+    DWORD len = 0;
+    CHECK(GetTokenInformation(token, TokenUser, info, sizeof info, &len));
+    CloseHandle(token);
+    char *me = NULL;
+    CHECK(ConvertSidToStringSidA(((TOKEN_USER *)info)->User.Sid, &me));
+    PSID sid = ((TOKEN_USER *)info)->User.Sid;
+    if (!strncmp(me, "S-1-5-21-", 9) && *GetSidSubAuthorityCount(sid) == 5 && *GetSidSubAuthority(sid, 4) >= 1000) {
+        CHECK(hos_control_peer_sid_check(me, why, sizeof why));
+        puts("PASS: HOS_CONTROL_PEER_SID: this user's SID taken; groups, well-known and odd forms refused");
+    } else {
+        puts("PASS: HOS_CONTROL_PEER_SID: groups, well-known and odd forms refused (this user's SID is not a plain user's: "
+             "the accepting half skipped)");
+    }
+    LocalFree(me);
+}
 #endif
 
 int main(int argc, char **argv) {
@@ -613,6 +648,9 @@ int main(int argc, char **argv) {
         snprintf(sock_path, sizeof sock_path, "%s", argv[3]);
         return hos_control_serve(sock_path, &game) ? 0 : 3;
     }
+#endif
+#ifdef _WIN32
+    if (argc > 2 && !strcmp(argv[2], "peersid")) return peer_sid_unit(), 0;
 #endif
     if (argc > 2 && !strcmp(argv[2], "quit")) return quit_case(argv[1]), 0;
     if (argc > 2 && !strcmp(argv[2], "level")) return level_unit(), 0;

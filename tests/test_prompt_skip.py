@@ -27,7 +27,7 @@ spec = importlib.util.spec_from_file_location("prompt_make_game", SOURCE / "make
 M = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(M)
 
-# The actual finish-stage call site, including its no-fontTools fallback and packaged/source decision.
+# The actual finish-stage call site, including its no-fontTools fallback.
 main = next(n for n in ast.parse((SOURCE / "make_game.py").read_text(encoding="utf-8")).body
             if isinstance(n, ast.FunctionDef) and n.name == "main")
 start = next(i for i, n in enumerate(main.body) if isinstance(n, ast.Assign) and
@@ -47,6 +47,7 @@ class PromptSkipTests(unittest.TestCase):
         self.out = self.root / "game" / "prompts"
         self.out.parent.mkdir()
         self.source_files = [self.here / n for n in ("prompt_assets.py", "prompt_draw.py", "prompt_faces.py", "prompt_keys.py")]
+        self.source_files.append(self.root / "host" / "prompts.c")   # (the game's side: its runtime files are kept with the set)
         self.game_files = [self.romfs / n for n in (P.FONT, P.prompt_keys.LABEL_FONT, "Pack/ZsDic.pack.zs", P.TEXTURES, P.LAYOUTS,
                                                   "System/Resource/ResourceSizeTable.authored.rsizetable.zs")]
         self.kenney = self.root / "kenney_input"
@@ -99,8 +100,8 @@ class PromptSkipTests(unittest.TestCase):
             return 1   # a failed child, not an interruption of the builder itself
         return 0
 
-    def build(self, packaged=False):
-        env = dict(vars(M), romfs=str(self.romfs), out=str(self.out.parent), launcher="packaged launcher" if packaged else None)
+    def build(self):
+        env = dict(vars(M), romfs=str(self.romfs), out=str(self.out.parent), launcher=None)
         exec(FINISH, env)
 
     def stamp(self):
@@ -476,46 +477,39 @@ class PromptSkipTests(unittest.TestCase):
         self.build()
         self.assertEqual(self.calls, 3)
 
-    def test_kept_originals_unchanged_and_runtime_files_cleared(self):
+    def test_kept_originals_and_runtime_files_unchanged(self):
+        # (the game's runtime files stay: host/prompts.c is in the stamp, and a game running from the folder keeps its own)
         self.build()
-        original = {p.relative_to(self.out): p.read_bytes() for p in self.out.rglob("*") if p.is_file()}
         for name in P.PROMPT_RUNTIME:
             (self.out / name).write_bytes(b"runtime output")
-        self.build()
+        original = {p.relative_to(self.out): p.read_bytes() for p in self.out.rglob("*") if p.is_file()}
+        with mock.patch.object(P.os, "remove", side_effect=AssertionError("nothing is removed on a kept set")):
+            self.build()
         self.assertEqual(self.calls, 1)
         self.assertEqual({p.relative_to(self.out): p.read_bytes() for p in self.out.rglob("*") if p.is_file()}, original)
-        self.assertTrue(all(not (self.out / name).exists() for name in P.PROMPT_RUNTIME))
 
-    def test_unclearable_runtime_file_regenerates_instead_of_keeping(self):
+    def test_builder_release_draws_them_again(self):
+        # (a packaged builder: each update draws them once, whatever the input list misses; a checkout has no release)
         self.build()
-        runtime = self.out / "Common.key"
-        runtime.write_bytes(b"runtime output")
-        remove = os.remove
-        def denied(path):
-            if Path(path) == runtime:
-                raise PermissionError("authored runtime file denial")
-            remove(path)
-        with mock.patch.object(P.os, "remove", side_effect=denied):
-            self.build()
-        self.assertEqual(self.calls, 2)
-        self.assertFalse(runtime.exists())
-        self.assertIn("runtime files could not be cleared", self.log.getvalue())
+        (self.root / "VERSION").write_text("v3.0.0-rc.3\n", encoding="utf-8")
+        self.build()
+        self.build()
+        (self.root / "VERSION").write_text("v3.0.0-rc.4\n", encoding="utf-8")
+        self.build()
+        self.assertEqual(self.calls, 3)
+        self.assertIn("prompts: regenerated (builder changed)", self.log.getvalue())
 
-    def test_failed_generation_removes_prompts_for_source_and_packaged_builds(self):
-        for packaged in (False, True):
-            with self.subTest(packaged=packaged):
-                self.during = None
-                self.build(packaged=packaged)
-                self.assertTrue(self.out.exists())
-                os.environ["HOOKSHOT_FORCE_PROMPTS"] = "1"
-                def failed(out):
-                    (out / "External.bfotf").write_bytes(b"partial font")
-                    raise OSError("authored drawing failure")
-                self.during = failed
-                self.build(packaged=packaged)
-                self.assertFalse(self.out.exists())
-                self.assertIn("the button prompts of other controllers were not made: the game shows its own",
-                              self.log.getvalue())
+    def test_failed_generation_removes_prompts(self):
+        self.build()
+        self.assertTrue(self.out.exists())
+        os.environ["HOOKSHOT_FORCE_PROMPTS"] = "1"
+        def failed(out):
+            (out / "External.bfotf").write_bytes(b"partial font")
+            raise OSError("authored drawing failure")
+        self.during = failed
+        self.build()
+        self.assertFalse(self.out.exists())
+        self.assertIn("the button prompts of other controllers were not made: the game shows its own", self.log.getvalue())
 
     def test_interrupted_generation_keeps_old_output_without_stamp(self):
         self.build()
@@ -565,11 +559,14 @@ class PromptSkipTests(unittest.TestCase):
         self.assertEqual(self.calls, 2)
         self.assertIn("regenerated (forced)", self.log.getvalue())
 
-    def test_packaged_build_always_regenerates(self):
-        self.build(packaged=True)
-        self.build(packaged=True)
-        self.assertEqual(self.calls, 2)
-        self.assertFalse(self.stamp().exists())
+    def test_every_build_asks_for_kept_prompts(self):
+        # (a packaged builder's too, the launcher's: #2698 had them drawn every time there)
+        commands = []
+        self.stack.enter_context(mock.patch.object(M, "run", side_effect=lambda c, **k: commands.append(c) or self.child(c, **k)))
+        for launcher in (None, "packaged launcher"):
+            exec(FINISH, dict(vars(M), romfs=str(self.romfs), out=str(self.out.parent), launcher=launcher))
+        self.assertEqual(len(commands), 2)
+        self.assertTrue(all("--incremental" in c for c in commands))
 
     def test_malformed_and_empty_manifest(self):
         self.build()

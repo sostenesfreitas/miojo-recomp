@@ -1,0 +1,3 @@
+| Date | Build | OS / desktop | GPU / driver | CPU / RAM | Settings | Where | Result |
+|---|---|---|---|---|---|---|---|
+| 2026-11-14 | main cf605c85, the renderer built from source into a nightly-80-7315957c game folder | Windows 11 Pro 10.0.29704, 2048x1152 output | Intel Arc B580 12 GB (PCI device 0xE20B), driver 32.0.101.9154 | Core i5-13600K, 64 GB | the default on main (float adds a compare-exchange loop on this card); no other switch | from the start through the control bridge into the save's Kokiri Forest (child), then standing on Link's balcony | the device was lost at frame 942, as the forest came up, after 898 frames presented (`VK_ERROR_DEVICE_LOST`, the checkpoints at the dispatch of 499dbfd0721d2858); run main1, 03:26 |

@@ -1071,17 +1071,40 @@ static void status_reads() {
     }
 }
 /// A buffer destroyed while a recording that names it is open (valid: that recording is reset, never submitted); every command
-/// naming it must have reached the driver before the destruction
+/// naming it must have reached the driver before the destruction. Leave the last copy unpublished: a producer pause cannot let
+/// the recorder finish it by chance. The real destruction boundary publishes and waits; a missing boundary leaves the copy until
+/// the following pool reset, so both the ordered log and the destroyed-buffer check catch it.
 static void destroy_recorded() {
     recording_begin();
     frame();
-    copy_runs(kUp, 0);   // (names 0xE001: in flight behind the frame when it is destroyed)
+    const bool threaded = rec::mode() == rec::THREAD;
+    static uint64_t unpublished_at;
+    if (threaded) {
+        // Drain the frame and restart at a ring boundary, so the one small copy neither wraps nor fills a publication batch.
+        const uint64_t cap = rec::g_rec.cap;
+        rec::g_rec.stop();
+        unpublished_at = (rec::g_rec.W.load() + cap - 1) & ~(cap - 1);
+        rec::g_rec.W.store(unpublished_at), rec::g_rec.R.store(unpublished_at);
+        // Stay awake until the first publication. Otherwise sleeping could make publish() flush the copy immediately.
+        rec::g_thread_start_hook = [] {
+            while (rec::g_rec.W.load() == unpublished_at) std::this_thread::yield();
+        };
+    }
+    copy_runs(kUp, 0);   // (names 0xE001: left unpublished until an ordered boundary)
+    if (threaded && (rec::g_rec.w <= unpublished_at || rec::g_rec.W.load() != unpublished_at)) {
+        std::fprintf(stderr, "FAIL destroy fixture: the copy must be pending and unpublished before destruction\n");
+        std::exit(2);
+    }
     vkDestroyBuffer(kDev, H<VkBuffer>(0xE001), nullptr);
     vkResetCommandPool(kDev, kUpPool, 0);
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     vkBeginCommandBuffer(kUp, &bi);
     copy_runs(kUp, 2);
     recording_end(14);
+    if (threaded) {
+        rec::g_rec.stop();
+        rec::g_thread_start_hook = nullptr;   // (only changed while the recorder is joined)
+    }
 }
 static int g_stress_frames = 0;
 static void stress() {

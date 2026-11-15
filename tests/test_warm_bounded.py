@@ -27,6 +27,14 @@ def check_source():
     for kept in ("pipelines.emplace", "pipeline_keep_ready(", "programs[", "program_cache_load_some("):
         if kept in warm:
             raise SystemExit("precompile_warm keeps what it builds: " + kept)
+    # (the compute pipelines in the progress's total from the start, and the cache's write said on the screen: reported as the
+    # notes' total, the screen sat at 100% while they were built and the cache written, #714)
+    if "const size_t all_n = total + computes.size();" not in warm or "progress(done.load(), all_n);" not in warm or \
+            "progress(total + computes_done.load(), all_n);" not in warm or "progress(total, total)" in warm:
+        raise SystemExit("precompile_warm leaves its compute pipelines out of the progress: the screen sits at 100% meanwhile")
+    if warm.index("prepare_saving_now.store(true") > warm.index("pipeline_cache_save(true);") or \
+            warm.index("prepare_saving_now.store(false") < warm.index("pipeline_cache_save(true);"):
+        raise SystemExit("precompile_warm writes the pipeline cache out without the start-up screen saying so")
     if warm.index("build_graphics(") > warm.index("vkDestroyPipeline(dev.device, made, nullptr);"):
         raise SystemExit("precompile_warm does not destroy the pipeline it has just built")
     run = draw[draw.index("void precompile_run(void (*progress)(size_t done, size_t total)) {"):]

@@ -58,6 +58,10 @@ typedef int SRWLOCK;
 static void AcquireSRWLockExclusive(SRWLOCK *l) { CHECK(!*l); *l = 1; }
 static void ReleaseSRWLockExclusive(SRWLOCK *l) { CHECK(*l); *l = 0; }
 volatile uint32_t hos_frame_seconds_bits;
+/* (the extracted hos_movie_frames stamps the movie's last update with the host clock) */
+static volatile uint64_t movie_seen_at;   /* (the host's: the extracted code reads and writes it) */
+static int64_t clock_ns = 1000000000LL;
+static int64_t hos_now_ns(void) { return clock_ns; }
 @HOST@
 /* (the lifted update with the patch, on a small guest: the count at +760 of the player) */
 typedef struct { uint64_t x[31]; } Ctx;
@@ -92,6 +96,9 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 600; i++) n = update(0);
     CHECK(n == 600);
     CHECK(hos_movie_frames(0x5000) == 1 && hos_movie_frames(0x5000) == 1);
+    /* (the stamp happens before the frame time is read, so a movie player updating at the console's cap is
+       seen by the pacing even though the count keeps the game's own step) */
+    CHECK(movie_seen_at == (uint64_t)clock_ns);
     /* 120 fps: half a 60th an update, a whole one every second update */
     seconds(1.0 / 120);
     before = n;

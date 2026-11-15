@@ -32,9 +32,13 @@ inline uint64_t run_from(uint64_t min_free, bool is_pressed) { return is_pressed
 /// empty: the driver counted them (1152 MB on an 8 GB card), no texture could take them, so reclaimable() rightly left them in
 /// the count and the hold cut the texture budget by as much (#2690: an RTX 3070 in Castle Town Market, 31-36 fps against 54-56
 /// without them), and the textures' blocks were made in play as before. In the textures' pool the scene's textures fill them,
-/// and what they hold free is that pool's free space, which the budget takes off the count already
-inline uint64_t blocks_at_start(uint64_t heap, uint64_t block, bool holds_textures) {
-    return holds_textures && block ? std::clamp<uint64_t>(heap / 100 * 15 / block, 2, 24) : 0;
+/// and what they hold free is that pool's free space, which the budget takes off the count already.
+/// None on an integrated GPU: its heap is the PC's RAM, which the game needs too, and VMA keeps those blocks for the whole run.
+/// On a UHD Graphics with 16 GB (i3-1115G4) nine blocks (1152 MB) stayed while the textures' budget fell to 720 MB; the pool
+/// down to them (kept_only) kept the 97% rule waiting, and at 6.6 GB of the 6.5 the driver allowed a 1119 x 1119 depth image
+/// was not made and the device was lost (the Deku Tree's last cutscene)
+inline uint64_t blocks_at_start(uint64_t heap, uint64_t block, bool holds_textures, bool integrated) {
+    return holds_textures && block && !integrated ? std::clamp<uint64_t>(heap / 100 * 15 / block, 2, 24) : 0;
 }
 
 /// The free space of the textures' pool a run can give back: not what the blocks made at the start hold (kept), which VMA
@@ -46,6 +50,31 @@ inline uint64_t returnable(uint64_t block_bytes, uint64_t free_bytes, uint64_t k
 /// Whether the textures' pool is down to its blocks made at the start. VMA keeps those, so nothing an eviction frees comes off
 /// the driver's count: the rule that squeezes by the count alone (97% of the allowance) waits, as it does for room in the blocks
 inline bool kept_only(uint64_t block_bytes, uint64_t kept) { return kept && block_bytes <= kept; }
+
+/// The driver's count, in percent of its allowance, above which the textures give up the excess. 97 on a dedicated card, whose
+/// driver pages what is past the allowance out to system memory. 90 on an integrated GPU: its heap is the PC's RAM, with nowhere
+/// to page to, so past the allowance the driver's own allocations fail. A UHD Graphics (i3-1115G4, 7.0 GB allowed) at 6.7 GB
+/// entered Hyrule Castle, its imports grew by 560 MB, and at 7.5 of 7.0 GB graphics pipelines were not made (-2) and the next
+/// vkCmdDispatchIndirect faulted inside igvk64.dll; 3% of the allowance is 215 MB of room, 10% is 717
+inline uint64_t count_line_pct(bool integrated) { return integrated ? 90 : 97; }
+
+/// Whether VMA's blocks hold room enough (an eighth of the allowance free) that the count line's squeeze waits: new images take
+/// that space and the count does not grow. Not past the allowance, where a dedicated card's driver pages (#2156), and not on an
+/// integrated GPU: what grows there near the line is the driver's own (pipelines, command memory) and the staging arenas, which
+/// no block's free space takes. The UHD Graphics above sat at 6,709 of 7,172 MB with 1,121 MB of it free in the blocks, so the
+/// squeeze waited; Hyrule Castle's load then took the count to 7.5 GB
+inline bool room_in_blocks(uint64_t used, uint64_t allowed, uint64_t block_free, bool integrated) {
+    return !integrated && used <= allowed && block_free >= allowed / 8;
+}
+
+/// What the textures give up once the driver has refused a pipeline for want of memory (VK_ERROR_OUT_OF_DEVICE_MEMORY or
+/// _HOST_MEMORY): the count's excess over its line, and kShortGive at least, whatever the blocks hold free. The count is read
+/// every 10 frames (3 s at the UHD Graphics' 3.5 fps); the refusals say it sooner, and the UHD Graphics' next indirect dispatch
+/// after six of them faulted inside igvk64.dll
+inline constexpr uint64_t kShortGive = 256ull << 20;
+inline uint64_t short_excess(uint64_t used, uint64_t count_line) {
+    return std::max<uint64_t>(used > count_line ? used - count_line : 0, kShortGive);
+}
 
 /// The presents between the end of a run and the next look
 inline uint64_t rest(bool is_pressed) { return is_pressed ? 120 : 600; }

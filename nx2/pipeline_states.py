@@ -108,9 +108,12 @@ COMPUTE = 1           # (StateRec2::kCompute)
 # Measured 2026-11-12 (RTX 3090, driver 620.70, Linux; a full prepare; the heap in use from the game's "vk: malloc:" line after
 # the same short session): the game has 4,127 compute programs (code keys) in 9,925 texture variants. None kept ready: 7,667 MB.
 # The 224 that play on that PC had dispatched (1,059 variants): 7,888 MB, so about 1 MB a listed program, and 4.8 s of
-# precompile. All of them: 10,112 MB and 8.1 s. Play there reached 132 to 225 programs over 15 game folders. 1024 is four times
-# that and about 1 GB: past it, measure again and raise this, or prune the list
-COMPUTE_MOST = 1024
+# precompile. All of them: 10,112 MB and 8.1 s. Play there reached 132 to 225 programs over 15 game folders.
+# 2026-11-14: scripts/pipeline_tour.py's tour (every map, actor and cutscene) meets 2,104 programs with the shipped list's 233,
+# half of the game's, and its list is shipped whole: raised from 1024 (four times play) to 2560. By the measurement above
+# (0.6 to 1 MB a program) those 2,104 cost 1.2 to 2.1 GB more than none kept and some 6.5 s of precompile at each start; not
+# measured again yet. Past 2560, measure again and raise this, or prune the list
+COMPUTE_MOST = 2560
 # One list someone sent: more than the game has programs (twice 4,127, rounded up) was not written by the game. The merge's bound
 # above is the one that counts what a release costs; this one only keeps a made-up file small
 SENT_COMPUTE_MOST = 8192

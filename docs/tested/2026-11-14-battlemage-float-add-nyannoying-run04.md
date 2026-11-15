@@ -1,0 +1,3 @@
+| Date | Build | OS / desktop | GPU / driver | CPU / RAM | Settings | Where | Result |
+|---|---|---|---|---|---|---|---|
+| 2026-11-14 | 80e0e5ee: main cf605c85 with this change, the renderer built from source into a nightly-80-7315957c game folder | Windows 11 Pro 10.0.29704, 2048x1152 output | Intel Arc B580 12 GB (PCI device 0xE20B), driver 32.0.101.9154 | Core i5-13600K, 64 GB | the default with the change (float adds the GPU's own atomic); no other switch | from the start through the control bridge into the save's Kokiri Forest (child), then standing on Link's balcony | no device loss in 3,321 frames, 41-45 fps in the forest (5 s windows); run fadd2, 03:29 |

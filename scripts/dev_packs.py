@@ -304,10 +304,20 @@ def object_store():
     return os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "hookshot-objects")
 
 
+def lift_store():
+    """(nx2/lift_store.py) The translations every base and pack on this PC share, unless HOOKSHOT_LIFT_STORE names another (or is
+    empty or 0: none): a new base or a first pack translates the game only when the translator, the hot list or the game
+    changed. Copies are clones where the file system has them (btrfs, XFS), full copies elsewhere"""
+    if os.name == "nt":
+        return os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Hookshot", "lifts")
+    return os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "hookshot-lifts")
+
+
 def run(cmd, cwd, env=None):
     print("+ " + " ".join(cmd), flush=True)
     e = dict(os.environ, **(env or {}))
     e.setdefault("HOOKSHOT_OBJ_STORE", object_store())
+    e.setdefault("HOOKSHOT_LIFT_STORE", lift_store())
     subprocess.run(cmd, cwd=cwd, check=True, env=e)
 
 
@@ -319,7 +329,38 @@ def base_env(predict_s):
     return {"RX_VK_PREDICT_S": str(predict_s)} if predict_s > 0 else {}
 
 
-def prepare(game, b):
+def renderer_profile(base_work, environ):
+    """The renderer's play profile for a pack of the renderer alone: the one make_game.py gave the base's build, by the same
+    path, so the base's objects are found again, since nx2/build.py run by itself uses none and the pack's renderer would then
+    differ from the base's by more than the change. That is <base work>/hookshot_vk.profdata when the base's checkout had its
+    own, else the committed one make_game.py unpacked there (hookshot_vk.shipped.profdata: every base of main since the
+    profile was committed; before this looked for the first name only, every renderer pack of such a base was built without
+    the profile its base had). Nothing when the base had none, or when RX_VK_PGO is set (a counting pack, or another profile)"""
+    if environ.get("RX_VK_PGO"):
+        return {}
+    for name in ("hookshot_vk.profdata", "hookshot_vk.shipped.profdata"):
+        prof = os.path.join(base_work, name)
+        if os.path.isfile(prof):
+            return {"RX_VK_PGO": prof}
+    return {}
+
+
+def pack_route(how, environ):
+    """What a pack builds: route()'s answer for the changed files, except that a profile switch set for this pack makes it build
+    even when no file changed. RX_VK_PGO (gen: a renderer that counts, for recording its profile; or another profile) builds
+    the renderer; RX_PGO (the game's hot pieces) the game. Before, `RX_VK_PGO=gen dev_packs.py pack` of an unchanged tree said
+    "nothing to build" and the pack held the base's ordinary renderer: a recording with it wrote nothing"""
+    if environ.get("RX_PGO"):
+        return "game"
+    if environ.get("RX_VK_PGO") and how is None:
+        return "renderer"
+    return how
+
+
+PREPARE_FAILED = {3: "no usable Vulkan here", 4: "the GPU driver stopped responding"}   # (make_game.py prepare_shaders' codes)
+
+
+def prepare(game, b, required=True):
     """The game's own preparation in a game folder, as make_game.py runs it (the game's environment, without the build's
     switches), with the base's budget; nothing on a Windows game built on Linux, which prepares at its first start"""
     if CROSS:
@@ -463,7 +504,7 @@ def cmd_pack(a):
     if subprocess.run(["git", "-C", tree, "merge-base", "--is-ancestor", b["commit"], "HEAD"]).returncode:
         sys.exit("%s is not built on the base %s: rebase it on the base, or make a new base" % (tree, b["commit"][:8]))
     changed = changed_files(tree, b["commit"])
-    how = route(changed, tree)
+    how = pack_route(route(changed, tree), os.environ)
     pack = os.path.join(d, "packs", a.name)
     if os.path.isdir(pack):   # (what an earlier build of this pack brought goes: this one says again what differs)
         shutil.rmtree(pack)
@@ -481,7 +522,8 @@ def cmd_pack(a):
     elif how == "renderer":
         link_objects(b["work"], w["renderer_work"])
         run([sys.executable, "-I", "nx2/build.py", "--standalone"], tree,
-            {"OOT_WORK": w["renderer_work"], "RX_RELEASE": "1", "RX_VK_ONLY": "1", "HOOKSHOT_KEEP_BUILD_FILES": "1"})
+            dict({"OOT_WORK": w["renderer_work"], "RX_RELEASE": "1", "RX_VK_ONLY": "1", "HOOKSHOT_KEEP_BUILD_FILES": "1"},
+                 **renderer_profile(b["work"], os.environ)))
         built, kinds = os.path.join(w["renderer_work"], "sa", "build"), MODULES[1:]
     else:
         built, kinds = None, ()

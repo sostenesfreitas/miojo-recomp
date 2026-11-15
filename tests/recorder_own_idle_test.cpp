@@ -1,9 +1,17 @@
 // RX_VK_RECORDER=thread's two opt-in switches against a fake Vulkan (tests/test_recorder_own_idle.py builds it with the real
 // vk_work.h and vk_recorder.h): RX_VK_RECORDER_OWN (a recording slot's own resets at its reuse without the wait for the recorder)
 // and RX_VK_RECORDER_IDLE=wait (the recorder's idle waits on its ring counter). Deterministic: the recorder thread is held in a
-// gated packet instead of timed, and a watchdog (3 s) ends a wait that should not happen, as a failure.
+// gated packet instead of timed, and a watchdog (3 s) ends a wait that should not happen, as a failure. The own_slots cases track
+// which pool, command buffer and descriptor set each held packet names; the real_ cases (Windows) go through vk_replay.cpp's own
+// WaitOnAddress adapter (rec_wait_hooks.inc, cut from it by the Python side) and end with the recorder stopped and joined.
 //
 //   recorder_own_idle_test <case>    exits 0 when the case holds, 1 (with a FAIL line) when it does not
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>   // (the real_ cases: vk_replay.cpp's adapter takes WaitOnAddress from kernelbase.dll)
+#endif
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
@@ -14,6 +22,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <vector>
 
 #include "vk_work.h"
 
@@ -82,14 +91,20 @@ static void open_gate() {
 }
 /// a failure after 3 s: the gate opened, so the case ends and reports it. Each armed watchdog has its number; done() disarms it
 static std::atomic<int> g_armed{0}, g_done{0};
+static std::mutex threads_mu;
+static std::vector<std::thread> g_threads;   // (the watchdogs: joined before a normal return, so none outlives main)
+static void keep(std::thread t) {
+    std::lock_guard lk(threads_mu);
+    g_threads.push_back(std::move(t));
+}
 static void watchdog() {
     const int id = ++g_armed;
-    std::thread([id] {
+    keep(std::thread([id] {
         for (int i = 0; i < 300 && g_done.load() < id; i++) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         if (g_done.load() >= id) return;
         g_watchdog = true;
         open_gate();
-    }).detach();
+    }));
 }
 /// (_Exit, not a return: the recorder thread may still be waiting on this file's mutexes, which exit() would destroy)
 [[noreturn]] static void pass(const std::string& c) {
@@ -201,6 +216,205 @@ static void race_hook() {
     while (race_step.load() != 2 && !g_watchdog.load()) std::this_thread::yield();   // (the producer publishes)
 }
 
+// ---- RX_VK_RECORDER_OWN with identities: two recording slots, each with its command pool, command buffer, descriptor pool, extra
+// pool and a set from each pool. The fakes fail a reset, begin or destruction of an object that a held packet still names, or of a
+// slot whose GPU work has not completed (what recording_wait waits for in begin_recording)
+static VkCommandPool CP(int s) { return (VkCommandPool)(uintptr_t)(0x100 + s); }
+static VkCommandBuffer CB(int s) { return (VkCommandBuffer)(uintptr_t)(0x200 + s); }
+static VkDescriptorPool DP(int s) { return (VkDescriptorPool)(uintptr_t)(0x300 + s); }
+static VkDescriptorPool EX(int s) { return (VkDescriptorPool)(uintptr_t)(0x400 + s); }
+static VkDescriptorSet SET(int s) { return (VkDescriptorSet)(uintptr_t)(0x500 + s); }    // (from DP(s))
+static VkDescriptorSet XSET(int s) { return (VkDescriptorSet)(uintptr_t)(0x600 + s); }   // (from EX(s))
+static int slot_of(const void* h, uintptr_t base) { return (int)((uintptr_t)h - base); }
+static std::atomic<int> in_flight_cb[2], in_flight_set[2], in_flight_xset[2];   // (packets recorded, not yet run)
+static std::atomic<bool> gpu_done[2];
+static std::mutex bad_mu;
+static std::string g_bad;
+static void bad(const char* what, int slot) {
+    std::lock_guard lk(bad_mu);
+    if (g_bad.empty()) g_bad = std::string(what) + " (slot " + std::to_string(slot) + ")";
+}
+static void VKAPI_CALL gated_bind(VkCommandBuffer cb, VkPipelineBindPoint, VkPipelineLayout, uint32_t, uint32_t n, const VkDescriptorSet* sets,
+                                  uint32_t, const uint32_t*) {
+    {
+        std::unique_lock lk(g_mu);
+        g_cv.wait(lk, [] { return g_gate_open; });
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        const uintptr_t h = (uintptr_t)sets[i];
+        (h >= 0x600 ? in_flight_xset[h - 0x600] : in_flight_set[h - 0x500])--;
+    }
+    in_flight_cb[slot_of(cb, 0x200)]--;
+}
+static void own_check(int s, bool busy, const char* what) {
+    if (!gpu_done[s]) bad("slot reused before its GPU work completed", s);
+    if (busy) bad(what, s);
+}
+static VkResult VKAPI_CALL id_reset_command_pool(VkDevice, VkCommandPool p, VkCommandPoolResetFlags) {
+    const int s = slot_of(p, 0x100);
+    own_check(s, in_flight_cb[s] > 0, "a command pool reset while a held packet records into its command buffer");
+    return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL id_begin(VkCommandBuffer cb, const VkCommandBufferBeginInfo*) {
+    const int s = slot_of(cb, 0x200);
+    own_check(s, in_flight_cb[s] > 0, "a command buffer begun while a held packet records into it");
+    return VK_SUCCESS;
+}
+static VkResult VKAPI_CALL id_reset_descriptor_pool(VkDevice, VkDescriptorPool p, VkDescriptorPoolResetFlags) {
+    const int s = slot_of(p, 0x300);
+    own_check(s, in_flight_set[s] > 0, "a descriptor pool reset while a held packet binds a set from it");
+    return VK_SUCCESS;
+}
+static void VKAPI_CALL id_destroy_descriptor_pool(VkDevice, VkDescriptorPool p, const VkAllocationCallbacks*) {
+    const int s = slot_of(p, 0x400);
+    own_check(s, in_flight_xset[s] > 0, "an extra descriptor pool destroyed while a held packet binds a set from it");
+}
+static void record_bind(int s, VkDescriptorSet set) {
+    in_flight_cb[s]++;
+    ((uintptr_t)set >= 0x600 ? in_flight_xset[(uintptr_t)set - 0x600] : in_flight_set[(uintptr_t)set - 0x500])++;
+    vkCmdBindDescriptorSets(CB(s), VK_PIPELINE_BIND_POINT_GRAPHICS, (VkPipelineLayout)(uintptr_t)0x700, 0, 1, &set, 0, nullptr);
+}
+/// slot s's own calls at its use, as begin_recording and draw_begin_recording make them (the extra pools: at a reuse)
+static void own_calls(int s, int pool_slot, bool reuse) {
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    rec::OwnSlot own;
+    vkResetCommandPool(kDev, CP(s), 0);
+    vkBeginCommandBuffer(CB(s), &bi);
+    vkResetDescriptorPool(kDev, DP(pool_slot), 0);
+    if (reuse) vkDestroyDescriptorPool(kDev, EX(s), nullptr);
+}
+/// slot 0 used and ended; slot 1 begun with its commands held in the recorder; then slot 0 comes round again, its GPU work
+/// completing 20 ms late (unless `early`), and makes its own calls (on slot 1's descriptor pool, if `wrong`). The fakes' verdict
+static std::string two_slots(bool wrong, bool early) {
+    vkx::vkCmdBindDescriptorSets = gated_bind;
+    vkx::vkResetCommandPool = id_reset_command_pool;
+    vkx::vkBeginCommandBuffer = id_begin;
+    vkx::vkResetDescriptorPool = id_reset_descriptor_pool;
+    vkx::vkDestroyDescriptorPool = id_destroy_descriptor_pool;
+    uint64_t end_pos[2] = {0, 0};
+    gpu_done[0] = gpu_done[1] = true;   // (first uses: nothing submitted)
+    replay_mu.lock();
+    rec::slot_begin(end_pos[0]);
+    own_calls(0, 0, false);
+    rec::slot_done();
+    record_bind(0, SET(0)), record_bind(0, XSET(0));
+    vkEndCommandBuffer(CB(0));   // (the end waits for the recorder: slot 0's packets run)
+    end_pos[0] = rec::produced();
+    gpu_done[0] = false;         // (submitted: its GPU work pending)
+    rec::slot_begin(end_pos[1]);
+    own_calls(1, 1, false);
+    rec::slot_done();
+    {
+        std::lock_guard lk(g_mu);
+        g_gate_open = false;     // (the recorder held in slot 1's first packet)
+    }
+    record_bind(1, SET(1)), record_bind(1, XSET(1));
+    rec::t_prod->flush();
+    watchdog();
+    if (!early) {                // (recording_wait: slot 0's GPU work completes, late)
+        std::thread([] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            gpu_done[0] = true;
+        }).detach();
+        while (!gpu_done[0]) std::this_thread::yield();
+    }
+    rec::slot_begin(end_pos[0]);
+    own_calls(0, wrong ? 1 : 0, true);
+    rec::slot_done();
+    const bool held = in_flight_cb[1] == 2;   // (slot 1's packets still unrun: no own call waited for them)
+    open_gate();
+    replay_mu.unlock();
+    g_done = g_armed.load();
+    if (g_watchdog) fail("a slot's own call waited for the recorder held in another slot's packet (3 s watchdog)");
+    if (!held) fail("slot 1's packets ran before slot 0's own calls: nothing was held");
+    std::lock_guard lk(bad_mu);
+    return g_bad;
+}
+
+// ---- the real adapter: vk_replay.cpp's own installation of WaitOnAddress and WakeByAddressSingle (Windows)
+#ifdef _WIN32
+static bool install_real_hooks() {
+#include "rec_wait_hooks.inc"
+}
+#else
+static bool install_real_hooks() { return false; }
+#endif
+static void (*real_wake)(void*) = nullptr;
+static bool (*real_wait)(volatile void*, void*, size_t, uint32_t) = nullptr;
+static std::atomic<int> in_real_wait{0}, real_wait_returns{0}, real_timeouts{0};   // (inside the wait call now; returns; timeouts)
+// (a case that must be released by the wake or the compare alone: its waits get 10 s instead of 2 ms, far past the 3 s a case
+// allows, but finite, so a stop's wake that lands just before such a wait starts (the production code's 2 ms covers that) costs
+// the teardown at most 10 s, not a hang)
+static std::atomic<bool> no_timeout{false};
+constexpr uint32_t kLongWaitMs = 10000;
+static std::atomic<bool> entered_without_timeout{false};   // (the wait in progress was entered with the 10 s timeout)
+// (real_parked: the time just before a publish, and the verdict on the first wait to return after it, judged by the wrapper as
+// it returns: 1 when that wait began before the publish and blocked 15 ms or more (the wake ended it), 2 otherwise)
+static std::atomic<uint64_t> judge_after_ns{0};
+static std::atomic<int> verdict{0};
+static bool counted_real_wait(volatile void* a, void* c, size_t n, uint32_t ms) {
+    const bool inf = no_timeout;
+    entered_without_timeout = inf;
+    const uint64_t call = rec::now_ns();
+    in_real_wait++;
+    const bool r = real_wait(a, c, n, inf ? kLongWaitMs : ms);
+#ifdef _WIN32
+    if (!r && GetLastError() == ERROR_TIMEOUT) real_timeouts++;   // (a timeout, not an early return: WaitOnAddress may return early)
+#endif
+    // (the counters first, the return's time after them: a return the producer still counts as a blocked wait is then judged on
+    // a time after the publish, never left unjudged)
+    in_real_wait--;
+    real_wait_returns++;
+    const uint64_t ret = rec::now_ns();
+    if (const uint64_t pub = judge_after_ns; pub && ret >= pub) {   // (the first return after the publish time, judged once)
+        int none = 0;
+        verdict.compare_exchange_strong(none, call < pub && ret - call >= 15000000 ? 1 : 2);
+    }
+    return r;
+}
+static std::atomic<bool> real_wake_works{true};
+static void gated_real_wake(void* a) {   // (the real wake, unless a case turns it off)
+    if (real_wake_works) real_wake(a);
+}
+static bool real_setup() {
+    if (!install_real_hooks()) return false;
+    real_wake = rec::g_wake_by_address;
+    rec::g_wake_by_address = gated_real_wake;
+    real_wait = rec::g_wait_on_address;
+    rec::g_wait_on_address = counted_real_wait;
+    return true;
+}
+static bool parked() {   // (the recorder inside the OS wait on W)
+    return wait_until([] { return in_real_wait.load() == 1; });
+}
+/// one packet published while the recorder waits; true once it ran (3 s)
+static bool publish_runs(int want) {
+    replay_mu.lock();
+    vkCmdWriteTimestamp2(kCmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, (VkQueryPool)(uintptr_t)0x40, 0);
+    rec::t_prod->flush();   // (published; the producer does not wait for it, so no kick())
+    const bool ran = wait_until([want] { return g_ran.load() == want; });
+    if (ran) replay_mu.unlock();
+    return ran;
+}
+
+/// the recorder stopped through the renderer's own teardown (vkDestroyDevice's boundary), joined within 3 s, and a normal return:
+/// the process ends through exit() with nothing of the recorder left running
+static std::atomic<bool> stopped{false};
+static int orderly_end(const std::string& c) {
+    keep(std::thread([] {
+        for (int i = 0; i < 1500 && !stopped; i++) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!stopped) fail("the recorder did not stop within 15 s (vkDestroyDevice)");
+    }));
+    vkDestroyDevice(kDev, nullptr);
+    stopped = true;
+    if (rec::g_rec.th.joinable() || rec::g_rec.ready.load()) fail("the recorder thread still there after vkDestroyDevice");
+    g_done = g_armed.load();
+    for (std::thread& t : g_threads) t.join();   // (every watchdog disarmed: each ends within 10 ms)
+    std::printf("PASS %s\n", c.c_str());
+    std::fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) return 2;
     const std::string c = argv[1];
@@ -211,6 +425,82 @@ int main(int argc, char** argv) {
     std::printf("mode %d own %d idle_wait %d\n", mode, (int)rec::g_own, (int)rec::g_idle_wait);
     if (c == "env") pass(c);   // (the switches as the renderer reads them: the Python side checks the line)
     if (rec::mode() != rec::THREAD) fail("RX_VK_RECORDER=thread expected");
+
+    if (c.rfind("own_slots", 0) == 0) {   // (the identities: own_slots holds; _wrong and _early show the fakes catch each fault)
+        if (!rec::g_own) fail("RX_VK_RECORDER_OWN=1 expected");
+        warm_up();
+        const std::string verdict = two_slots(c == "own_slots_wrong", c == "own_slots_early");
+        if (c == "own_slots" && !verdict.empty()) fail(verdict.c_str());
+        if (c == "own_slots_wrong" && verdict.find("descriptor pool reset while") == std::string::npos) fail("the wrong pool's reset not caught");
+        if (c == "own_slots_early" && verdict.find("before its GPU work") == std::string::npos) fail("the early reuse not caught");
+        if (c != "own_slots") std::printf("caught: %s\n", verdict.c_str());
+        pass(c);
+    }
+    if (c.rfind("real_", 0) == 0) {
+        if (!real_setup()) {
+            std::printf("SKIP %s: vk_replay.cpp's WaitOnAddress adapter is Windows' (Linux: host/posix's futex, not built here)\n", c.c_str());
+            return 0;
+        }
+        if (!rec::g_idle_wait) fail("RX_VK_RECORDER_IDLE=wait expected");
+        rec::g_test_idle_waiting = race_hook;   // (set once, before the recorder starts: it acts only while race_armed)
+        warm_up();
+        if (c == "real_parked") {   // (asleep on W through the real wait, with the 10 s timeout: within the 3 s a case allows, only the publish's wake lets it go)
+            no_timeout = true;
+            real_wake(&rec::g_rec.W);   // (back round into a wait entered with the 10 s timeout)
+            bool woken = false;
+            int published = 0;   // (packets published so far: an attempt that returned early publishes none)
+            // (an attempt can be inconclusive when the recorder is between waits at an unlucky moment: each one starts 30 ms after
+            // the last, when its wakes and the unlock's kicks are done with, and up to 20 are made)
+            for (int attempt = 0; attempt < 20 && !woken; attempt++) {
+                if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                if (!wait_until([] { return in_real_wait == 1 && entered_without_timeout; })) fail("the recorder never waited on W");
+                const int r0 = real_wait_returns;
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                if (real_wait_returns != r0 || in_real_wait != 1) continue;   // (it returned early: again)
+                verdict = 0;
+                judge_after_ns = rec::now_ns();
+                if (!publish_runs(++published)) fail("a publish did not wake the recorder waiting on W (3 s)");
+                judge_after_ns = 0;
+                // (the wait that returned began before the publish and blocked for 15 ms or more: no compare at its start, so the
+                // wake ended it. Otherwise inconclusive: again)
+                woken = verdict == 1;   // (the recorder judges a wait before it runs the packet that wait let through)
+            }
+            if (!woken) fail("no attempt showed the wake ending a blocked wait");
+            no_timeout = false;
+        } else if (c == "real_timeout") {   // (no wake and nothing published: only the 2 ms timeout ends each wait)
+            real_wake_works = false;
+            if (!parked()) fail("the recorder never waited on W");
+            const int t0 = real_timeouts;
+            if (!wait_until([t0] { return real_timeouts - t0 >= 3; })) fail("with no wake the waits did not time out (3 s)");
+            if (!publish_runs(1)) fail("with no wake the timeout did not bring the recorder back to a publish (3 s)");
+            real_wake_works = true;
+        } else if (c == "real_race") {   // (a publish just before a wait with the 10 s timeout, the wake off: within 3 s only the compare returns it)
+            race_armed = true;   // (the recorder's next timed-out wait brings it round into the hook)
+            if (!wait_until([] { return race_step.load() == 1; })) fail("the recorder never reached its wait");
+            no_timeout = true;   // (the wait after the hook: 10 s, so within 3 s only the compare can end it)
+            real_wake_works = false;
+            replay_mu.lock();
+            vkCmdWriteTimestamp2(kCmd, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, (VkQueryPool)(uintptr_t)0x40, 0);
+            rec::t_prod->flush();
+            race_step = 2;
+            if (!wait_until([] { return g_ran.load() == 1; })) fail("the published packet never ran");
+            replay_mu.unlock();
+            race_armed = false;
+            no_timeout = false;
+            real_wake_works = true;
+        } else if (c == "real_stop") {   // (stopped while asleep on W)
+            if (!parked()) fail("the recorder never waited on W");
+        } else if (c == "real_both") {   // (both switches: the slot's own reset while a packet is held, then a parked publish)
+            if (!rec::g_own) fail("RX_VK_RECORDER_OWN=1 expected");
+            if (reset_with_packet_in_flight(0, Where::OWN_SLOT) != 0) fail("the slot's own reset waited for the recorder");
+            g_ran = 0;
+            if (!parked()) fail("the recorder never waited on W");
+            if (!publish_runs(1)) fail("a publish did not wake the recorder waiting on W (3 s)");
+        } else {
+            return 2;
+        }
+        return orderly_end(c);
+    }
 
     if (c.rfind("own", 0) == 0) {
         warm_up();
@@ -226,10 +516,10 @@ int main(int argc, char** argv) {
             if (reset_with_packet_in_flight(0, Where::OUTSIDE) != 1) fail("the reset outside OwnSlot did not wait");
         } else if (c == "own_guard") {   // (the slot's last end not yet run by the recorder: the reset waits, logged once)
             replay_mu.lock();
-            const uint64_t far = rec::produced() + (uint64_t(1) << 40);
+            const uint64_t far_end = rec::produced() + (uint64_t(1) << 40);
             replay_mu.unlock();
-            if (reset_with_packet_in_flight(far, Where::OWN_SLOT) != 1) fail("the guard let the reset skip the wait");
-            if (reset_with_packet_in_flight(far, Where::OWN_SLOT) != 1) fail("the guard let the reset skip the wait (again)");
+            if (reset_with_packet_in_flight(far_end, Where::OWN_SLOT) != 1) fail("the guard let the reset skip the wait");
+            if (reset_with_packet_in_flight(far_end, Where::OWN_SLOT) != 1) fail("the guard let the reset skip the wait (again)");
             if (mkwvk::logs_own != 1) fail("the guard's line not logged exactly once");
         } else {
             return 2;

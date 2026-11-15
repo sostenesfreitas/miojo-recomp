@@ -31,9 +31,15 @@ FAKE = r'''
 import json, os, socket, struct, sys, threading, time, zlib
 path = os.environ["HOS_CONTROL"]
 log = open(os.environ["FAKE_LOG"], "a", buffering=1)
+console = None
+if os.name == "nt":   # (whether this stand-in has a console, and whether that console is a window on the desktop)
+    import ctypes
+    window = ctypes.windll.kernel32.GetConsoleWindow()
+    console = [bool(ctypes.windll.kernel32.GetConsoleCP()), bool(window and ctypes.windll.user32.IsWindowVisible(window))]
 log.write(json.dumps({"cmd": "_start", "control": path, "xdg": os.environ.get("XDG_DATA_HOME"),
                       "argv": sys.argv[1:], "cwd": os.getcwd(), "headless": os.environ.get("HOS_HEADLESS"),
-                      "audio": os.environ.get("HOS_AUDIO"), "env_file": os.environ.get("HOS_ENV_FILE")}) + "\n")
+                      "audio": os.environ.get("HOS_AUDIO"), "env_file": os.environ.get("HOS_ENV_FILE"),
+                      "console": console}) + "\n")
 print("fake: started", flush=True)
 started = time.monotonic()
 options = {"text_speed": 3, "fps_counter": 0}
@@ -319,6 +325,8 @@ class Sessions(unittest.TestCase):
         self.assertEqual(Path(info["environment"]["HOS_ENV_FILE"]).read_bytes(), b"")
         self.assertEqual(info["user"], str(session.folder / "user"))
         self.assertEqual(self.requests("_start")[-1]["argv"], ["--user", info["user"]])
+        if WINDOWS:   # (the owner's own hidden console, inherited: an owner with none left the game to open a window of its own)
+            self.assertEqual(self.requests("_start")[-1]["console"], [True, False], "the game opened a console window")
         attached = self.m.Session.attach(session.folder)
         self.assertEqual(attached.request("status")["state"], "play")
         attached.request("press", buttons="A", frames=3)
@@ -400,6 +408,23 @@ class Sessions(unittest.TestCase):
             self.start(profile="test", user=str(source))
         explicit = self.start(user=str(self.root / "explicit-user"))
         self.assertEqual(explicit.info()["user"], str(self.root / "explicit-user"))
+
+    def test_repo_save_launch(self):
+        repo = self.root / "checkout"
+        make_repo_save(repo, "kokiri-start")
+        session = self.start(profile="test", repo_save="kokiri-start", repo=str(repo))
+        info = session.info()
+        copied = Path(info["user"]) / "save" / self.m.SAVE_USER
+        self.assertEqual(sorted(p.name for p in copied.iterdir()), ["slot_00"])
+        self.assertEqual((copied / "slot_00" / "progress.sav").read_bytes(), b"progress kokiri-start")
+        self.assertEqual(info["repo_save"], "kokiri-start")
+        self.assertEqual(info["save_source"], str(repo / "assets" / "saves" / "kokiri-start"))
+        with self.assertRaisesRegex(self.m.Failed, "--save or --repo-save, not both"):
+            self.start(profile="test", repo_save="kokiri-start", repo=str(repo), save=str(copied))
+        with self.assertRaisesRegex(self.m.Failed, "--slot goes with --save"):
+            self.start(profile="test", repo_save="kokiri-start", repo=str(repo), slot="00")
+        with self.assertRaisesRegex(self.m.Failed, "--repo goes with --repo-save"):
+            self.start(profile="test", repo=str(repo))
 
     def test_ready_levels_and_cleanup(self):
         for level, values in (("bridge", {"FAKE_PRESENT_AFTER": "99", "FAKE_PLAY_AFTER": "99"}),
@@ -813,6 +838,111 @@ class Sessions(unittest.TestCase):
             result = session.stop(timeout=0.1)
         self.assertEqual(result["state"], "running")
         self.assertEqual(result["stop_result"]["method"], "quit-timeout")
+
+
+def make_repo_save(checkout, name, title="Kokiri Forest, by the house, child"):
+    """A made-up repo save in checkout/assets/saves: name/{README.md, slot_00/{progress.sav, caption.sav}}"""
+    saves = Path(checkout) / "assets" / "saves"
+    (saves / name / "slot_00").mkdir(parents=True)
+    (saves / name / "README.md").write_text(title + "\n\nMade up for the tests.\n", encoding="utf-8")
+    for n in ("progress.sav", "caption.sav"):
+        (saves / name / "slot_00" / n).write_bytes(n.split(".")[0].encode() + b" " + name.encode())
+    if not (saves / "README.md").exists():
+        (saves / "README.md").write_text("# Saves in the repository\n", encoding="utf-8")
+    return saves
+
+
+class RepoSaves(unittest.TestCase):
+    """--repo-save and saves --repo: copies and listings of made-up repo saves, no game and no socket"""
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="ctl-repo-saves-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.repo = self.root / "checkout"
+        self.saves = make_repo_save(self.repo, "kokiri-start")
+        make_repo_save(self.repo, "deku-tree", "Inside the Deku Tree, at its door")
+        self.m = client_module()
+
+    def tree(self, folder):
+        return sorted((str(p.relative_to(folder)), p.read_bytes()) for p in Path(folder).rglob("*") if p.is_file())
+
+    def test_copy(self):
+        before = self.tree(self.saves)
+        dest = self.m.copy_repo_save("kokiri-start", str(self.root / "data"), repo=str(self.repo))
+        self.assertEqual(dest, str(self.root / "data" / "hookshot" / "save" / self.m.SAVE_USER))
+        self.assertEqual(self.tree(dest), [(os.path.join("slot_00", "caption.sav"), b"caption kokiri-start"),
+                                           (os.path.join("slot_00", "progress.sav"), b"progress kokiri-start")])
+        self.assertEqual(self.tree(self.saves), before)   # (only read)
+        with self.assertRaisesRegex(self.m.Failed, "already holds saves"):
+            self.m.copy_repo_save("deku-tree", str(self.root / "data"), repo=str(self.repo))
+        dest = self.m.copy_repo_save("deku-tree", user=str(self.root / "user"), repo=str(self.repo))
+        self.assertEqual(dest, str(self.root / "user" / "save" / self.m.SAVE_USER))
+
+    def test_names(self):
+        for name, why in (("nothing-here", "no repo save 'nothing-here'.*it has: deku-tree, kokiri-start"),
+                          ("_profile", "no repo save '_profile'"), ("../checkout", "no repo save"),
+                          ("Kokiri", "no repo save"), ("", "no repo save")):
+            with self.subTest(name):
+                with self.assertRaisesRegex(self.m.Failed, why):
+                    self.m.copy_repo_save(name, str(self.root / ("data-" + name.replace("/", "_"))), repo=str(self.repo))
+        self.assertFalse(any(p.name.startswith("data-") for p in self.root.iterdir()))
+
+    def test_only_the_expected_files(self):
+        import shutil
+        save, profile = self.saves / "kokiri-start", self.saves / "_profile"
+
+        def old_profile():
+            profile.mkdir()
+            (profile / "account.sav").write_bytes(b"someone's account")
+            (profile / "option.sav").write_bytes(b"someone's options")
+        cases = [
+            ("extra in slot", lambda: (save / "slot_00" / "x.bin").write_bytes(b"x"), "not expected: x.bin"),
+            ("second slot", lambda: shutil.copytree(save / "slot_00", save / "slot_01"), "not expected: slot_01"),
+            ("settings", lambda: (save / "hookshot_options.ini").write_text("x"), "not expected: hookshot_options.ini"),
+            ("account in slot", lambda: (save / "slot_00" / "account.sav").write_bytes(b"x"), "not expected: account.sav"),
+            ("option in save", lambda: (save / "option.sav").write_bytes(b"x"), "not expected: option.sav"),
+            ("old profile", old_profile, "_profile is not shipped any more"),
+            ("no caption", lambda: (save / "slot_00" / "caption.sav").unlink(), "missing: caption.sav"),
+            ("no readme", lambda: (save / "README.md").unlink(), "missing: README.md"),
+            ("folder for file", lambda: (save / "README.md").unlink() or (save / "README.md").mkdir(),
+             "not the right kind: README.md"),
+        ]
+        if not WINDOWS:
+            secret = self.root / "secret.txt"
+            secret.write_text("not a save")
+            cases.append(("link", lambda: (save / "slot_00" / "progress.sav").unlink() or
+                          os.symlink(secret, save / "slot_00" / "progress.sav"), "is a link or not a plain file"))
+            cases.append(("linked profile", lambda: os.symlink(save, profile), "_profile is not shipped any more"))
+            cases.append(("linked save", lambda: os.symlink(save, self.saves / "linked"), "no repo save 'linked'"))
+        for what, spoil, why in cases:
+            with self.subTest(what):
+                keep = self.root / "keep"
+                shutil.copytree(self.saves, keep, symlinks=True)
+                spoil()
+                name = "linked" if what == "linked save" else "kokiri-start"
+                data = self.root / ("data-" + what.replace(" ", "-"))
+                with self.assertRaisesRegex(self.m.Failed, why):
+                    self.m.copy_repo_save(name, str(data), repo=str(self.repo))
+                self.assertFalse(data.exists())
+                shutil.rmtree(self.saves)
+                keep.rename(self.saves)
+
+    def test_saves_repo_listing(self):
+        r = ctl("saves", "--repo", str(self.repo), check=0)
+        self.assertEqual(r.stdout.splitlines(), ["%-28s %s" % ("deku-tree", "Inside the Deku Tree, at its door"),
+                                                 "%-28s %s" % ("kokiri-start", "Kokiri Forest, by the house, child")])
+        rows = json.loads(ctl("--json", "saves", "--repo", str(self.repo), check=0).stdout)
+        self.assertEqual([(r["name"], r["title"]) for r in rows],
+                         [("deku-tree", "Inside the Deku Tree, at its door"),
+                          ("kokiri-start", "Kokiri Forest, by the house, child")])
+        self.assertIn("no saves in", ctl("saves", "--repo", str(self.root), check=0).stdout)
+        ctl("saves", "--repo", check=0)   # (this checkout's own, without a game)
+
+    def test_launch_flags(self):
+        r = ctl("launch", str(self.root), "--save", str(self.saves), "--repo-save", "kokiri-start", check=2)
+        self.assertIn("not allowed with argument", r.stderr)
+        r = ctl("launch", str(self.root), "--repo-save", "nothing", check=2)   # (no game there: refused before any copy)
+        self.assertIn("no game at", r.stderr)
 
 
 class HookshotCtl(unittest.TestCase):

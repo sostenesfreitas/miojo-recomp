@@ -108,11 +108,10 @@ def dlss_args(dlss):
 
 def make_game_env(dlss, environ=None):
     """The environment make_game.py runs in. HOOKSHOT_NGX_SDK is set only when DLSS is chosen (one set in the shell is not
-    passed on when unticked, as on Windows), and HOOKSHOT_VK_PREBUILT is dropped so build.py compiles hookshot_vk.so with NGX."""
+    passed on when unticked, as on Windows). Every build compiles hookshot_vk.so (the AppImage carries no built one)."""
     env = dict(os.environ if environ is None else environ)
     if dlss:
         env["HOOKSHOT_NGX_SDK"] = ngx_sdk_dir()
-        env.pop("HOOKSHOT_VK_PREBUILT", None)
     else:
         env.pop("HOOKSHOT_NGX_SDK", None)
     return env

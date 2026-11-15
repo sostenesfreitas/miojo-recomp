@@ -31,7 +31,8 @@ def main():
 
     header = (SHADERS / "taau_upscale_comp_spv.h").read_text(encoding="utf-8")
     glslang = shutil.which("glslangValidator")
-    version = header.split("\n", 1)[0].strip().lstrip("/ ").strip()
+    generated = header.split('\n', 1)[1] if header.startswith('// Generated from') else header
+    version = generated.split("\n", 1)[0].strip().lstrip("/ ").strip()
     if glslang:
         got = subprocess.run([glslang, "--version"], capture_output=True, text=True).stdout
         m = re.search(r"Glslang Version: \d+:(\d+)\.(\d+)\.(\d+)", got)
@@ -41,7 +42,7 @@ def main():
                 out = Path(d) / "h.h"
                 subprocess.run([glslang, "-V", "--target-env", "vulkan1.3", "--vn", "TAAU_UPSCALE_COMP_SPV", "-o", str(out),
                                 str(SHADERS / "taau_upscale.comp")], check=True, capture_output=True)
-                if out.read_text(encoding="utf-8") != header:
+                if out.read_text(encoding="utf-8") != generated:
                     raise SystemExit("taau_upscale_comp_spv.h is not taau_upscale.comp compiled: run glslangValidator again")
             print("(the SPIR-V header matches its source)")
         else:

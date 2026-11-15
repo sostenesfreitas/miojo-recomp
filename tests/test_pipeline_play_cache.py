@@ -11,6 +11,8 @@ drops another driver's, ignores other names and numbers on from the highest; at 
 when that write fails; RX_VK_PLAY_CACHE=0 and a device without pipelineCreationCacheControl keep the one cache; with the fetch lock on (Intel), a
 save while a build sits between two of create_cached's builds finishes holding no lock, and a save with a bound (the window's
 close) keeps a generation a stuck build is in rather than hang.
+Cache loading off skips persistent imports/compaction and new play saves while required pipelines still build in memory, and
+pcache_saved_now (the warm pass's save, before prepare_run's record) says not saved.
 
 No Vulkan loader, GPU or game. python -I -B tests/test_pipeline_play_cache.py [--cxx clang++] [--source gpu/vk/vk_draw.cpp]
 """
@@ -26,6 +28,7 @@ RUN_ALL_ARGS = ["--cxx", "{cxx}"]
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ["route", "save", "retry", "users", "merge", "merge-read-failed", "merge-create-failed", "compact", "compact-failed", "off", "no-control", "lock-users"]
+CASES += ["load-default", "load-one", "load-default-play-off", "load-off", "load-off-word", "load-off-play-on", "load-off-play-off"]
 
 
 def play_block(source):
@@ -44,6 +47,22 @@ def lock_block(source):
     return source[source.index(start_marker):source.index(end_marker)]
 
 
+def init_block(source):
+    start_marker = "bool pcache_load_off() {"
+    end_marker = "\nstruct Targets {"
+    if source.count(start_marker) != 1 or source.count(end_marker) != 1:
+        raise SystemExit("FAIL: the pipeline cache's init in gpu/vk/vk_draw.cpp was not found")
+    return source[source.index(start_marker):source.index(end_marker)]
+
+
+def saved_now_block(source):
+    start_marker = "bool pcache_saved_now() {"
+    end_marker = "\nbool warm_libraries("
+    if source.count(start_marker) != 1 or source.count(end_marker) != 1:
+        raise SystemExit("FAIL: pcache_saved_now in gpu/vk/vk_draw.cpp was not found")
+    return source[source.index(start_marker):source.index(end_marker)]
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("clang++") or shutil.which("g++") or "g++")
@@ -55,6 +74,8 @@ def main():
         source = a.source.read_text(encoding="utf-8")
         (temp / "pipeline_play_cache.inc").write_text(play_block(source), encoding="utf-8")
         (temp / "pcache_fetch_lock.inc").write_text(lock_block(source), encoding="utf-8")
+        (temp / "pcache_init.inc").write_text(init_block(source), encoding="utf-8")
+        (temp / "pcache_saved_now.inc").write_text(saved_now_block(source), encoding="utf-8")
         exe = temp / "check.exe"
         cmd = [a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Werror", "-pthread", "-I" + str(temp), "-I" + str(ROOT / "gpu/vk"),
                str(ROOT / "tests/pipeline_play_cache_test.cpp"), "-o", str(exe)]
@@ -67,9 +88,15 @@ def main():
         for case in CASES:
             data = temp / ("data-" + case)
             data.mkdir()
-            env = {k: v for k, v in os.environ.items() if k not in ("RX_VK_PLAY_CACHE", "RX_VK_PCACHE_FETCH_LOCK")}
-            if case == "off":
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("RX_VK_PLAY_", "RX_VK_PCACHE_"))}
+            if case in ("off", "load-default-play-off", "load-off-play-off"):
                 env["RX_VK_PLAY_CACHE"] = "0"
+            if case == "load-off-play-on":
+                env["RX_VK_PLAY_CACHE"] = "1"
+            if case.startswith("load-off"):
+                env["RX_VK_PCACHE_LOAD"] = "off" if case == "load-off-word" else "0"
+            if case == "load-one":
+                env["RX_VK_PCACHE_LOAD"] = "1"
             if case == "lock-users":   # (the fetch lock on, as on Intel's Windows driver)
                 env["RX_VK_PCACHE_FETCH_LOCK"] = "1"
             # (each case a fresh process: the switch is read once, the generations are the process's)
