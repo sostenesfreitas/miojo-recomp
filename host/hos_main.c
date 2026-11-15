@@ -797,6 +797,33 @@ static void oot_infinite_rupees(Ctx *c, int64_t now) {
     if (logged < 6) logged++, hos_log("cheats: infinite rupees: %d -> %d", have, limit);
 }
 
+/* The Cheats page's Infinite magic: twice a second, when the meter (the player's +0x1bbc) is below the most it was seen
+   at, the game's own OneShotPlayerHealMPMax fills it (f_82ea0f80: the meter's limit from the game data, queued as an
+   add to the meter at +0x1b78). The first look heals once, so the most seen is the limit from then on. */
+static void oot_infinite_magic(Ctx *c, uint64_t components, int64_t now) {
+    int rx_option(int id, int otherwise);
+    static int64_t next;
+    static uint64_t last_player;
+    static int most;
+    if (rx_option(HOS_OPT_CHEAT_MAGIC, 0) <= 0 || now < next) return;
+    next = now + 500000000LL;
+    const uint64_t player = recomp_load64(c, components + 0x358);
+    A64Fn heal = a64_lookup(0x82ea0f80ULL);
+    if (!player || !heal) return;
+    const int have = (int)(int32_t)recomp_load32(c, player + 0x1bbc);
+    if (player != last_player) last_player = player, most = -1;   /* (another save: its limit may be smaller) */
+    if (have > most) {
+        if (most >= 0) { most = have; return; }
+        most = have;
+    } else if (have == most) return;
+    const Ctx saved = *c;
+    c->x[31] = (c->x[31] - 0x100) & ~0xfULL, c->x[0] = player;
+    heal(c);
+    *c = saved;
+    static int logged;
+    if (logged < 6) logged++, hos_log("cheats: infinite magic: %d (most %d)", have, most);
+}
+
 static void oot_set_time(Ctx *c, unsigned hour) {
     // ExecuteWmSetTime passes seconds since midnight to the world manager.
     const uint64_t singleton = recomp_load64(c, 0x84c9e898ULL);
@@ -834,17 +861,17 @@ static void oot_lock_time(Ctx *c, int64_t now) {
     if (!told) told = 1, hos_log("cheats: clock held at %02d:00", hour);
 }
 
-/* Ctrl+1 hearts, Ctrl+3 ammo, Ctrl+4 moon jump, Ctrl+5 lock time, Ctrl+6 rupees: each switches its row while the game is in front. */
+/* Ctrl+1 hearts, Ctrl+3 ammo, Ctrl+4 moon jump, Ctrl+5 lock time, Ctrl+6 rupees, Ctrl+7 magic: each switches its row while the game is in front. */
 static void oot_cheat_hotkeys(void) {
     void rx_option_set(int id, int value);
     int rx_option(int id, int otherwise);
-    static const int keys[] = {'1', '3', '4', '5', '6'};
-    static const int ids[] = {HOS_OPT_CHEAT_HEARTS, HOS_OPT_CHEAT_AMMO, HOS_OPT_CHEAT_MOONJUMP, HOS_OPT_CHEAT_TIMELOCK, HOS_OPT_CHEAT_RUPEES};
-    static int held[5];
+    static const int keys[] = {'1', '3', '4', '5', '6', '7'};
+    static const int ids[] = {HOS_OPT_CHEAT_HEARTS, HOS_OPT_CHEAT_AMMO, HOS_OPT_CHEAT_MOONJUMP, HOS_OPT_CHEAT_TIMELOCK, HOS_OPT_CHEAT_RUPEES, HOS_OPT_CHEAT_MAGIC};
+    static int held[6];
     DWORD foreground = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
     const int ctrl = foreground == GetCurrentProcessId() && !rx_option(1, 0) && GetAsyncKeyState(VK_CONTROL) < 0;
-    for (unsigned i = 0; i < 5; i++) {
+    for (unsigned i = 0; i < 6; i++) {
         const int down = ctrl && GetAsyncKeyState(keys[i]) < 0;
         if (down && !held[i]) rx_option_set(ids[i], 1), hos_log("cheats: Ctrl+%c switched a row", keys[i]);
         held[i] = down;
@@ -1404,6 +1431,7 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     oot_player_speed(c, components);
     oot_infinite_ammo(c, now);
     oot_infinite_rupees(c, now);
+    oot_infinite_magic(c, components, now);
     oot_lock_time(c, now);
     oot_cheat_hotkeys();
     oot_map_refresh(c, now);

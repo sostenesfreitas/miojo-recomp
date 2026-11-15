@@ -5982,6 +5982,7 @@ void fill_replay_table(MkwVkRenderer& t) {
         if (id == HOS_OPT_CHEAT_SPEED) return menu_link_speed();
         if (id == HOS_OPT_CHEAT_AMMO) return menu_infinite_ammo();
         if (id == HOS_OPT_CHEAT_RUPEES) return menu_infinite_rupees();
+        if (id == HOS_OPT_CHEAT_MAGIC) return menu_infinite_magic();
         if (id == HOS_OPT_CHEAT_TIMELOCK) return menu_time_lock();
         if (id == HOS_OPT_CHEAT_MOONJUMP) return menu_moon_jump();
         if (id == HOS_OPT_HDR_NATIVE) return dev.hdr && opts.hdr == 2;

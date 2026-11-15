@@ -1561,6 +1561,8 @@ Row rows[] = {
      "Hold Jump to rise. Ctrl+4 switches it too (Ctrl+1 heart protection).", nullptr, false, true, 14},
     {TAB_DEBUG, "Infinite rupees", nullptr, 0, 0, 0, nullptr,
      "Keeps the wallet full: rupees go back up to what the wallet holds. Ctrl+6 switches it too.", nullptr, false, true, 15},
+    {TAB_DEBUG, "Infinite magic", nullptr, 0, 0, 0, nullptr,
+     "Keeps the magic meter full. Ctrl+7 switches it too.", nullptr, false, true, 16},
     {TAB_DEBUG, "Developer", nullptr, 0, 0, 0, nullptr, nullptr, nullptr, false, true, -1, true},
     // (hookshot, first under the heading: debug_rows lists only those) the zip for the "Submit your pipelines" issue: share_pipeline_list, pipeline_share.h
     {TAB_DEBUG, "Save my pipeline list", nullptr, 0, 0, 0, nullptr,
@@ -1618,6 +1620,7 @@ std::atomic<int> player_flight{-1};
 std::atomic<int> free_camera{0};
 std::atomic<int> infinite_ammo{0};
 std::atomic<int> infinite_rupees{0};
+std::atomic<int> infinite_magic{0};
 std::atomic<int> time_lock{0};
 std::atomic<int> moon_jump{0};
 std::atomic<int> cheat_action{0};
@@ -1748,9 +1751,9 @@ void choose_inventory_filter(int filter) {
     inventory_amount = false;
     inventory_reveal();
 }
-constexpr int kCheatRows = 16;   // (the debug tools' rows: Row::cheat 0 to 15)
+constexpr int kCheatRows = 17;   // (the debug tools' rows: Row::cheat 0 to 16)
 /// The tools that are an On / Off (halves; Left Off, Right On, confirm flips)
-bool cheat_toggles(int i) { return i == 0 || i == 1 || i == 7 || (i >= 12 && i <= 15); }
+bool cheat_toggles(int i) { return i == 0 || i == 1 || i == 7 || (i >= 12 && i <= 16); }
 /// A debug tool's value as its row shows it ("" an action: confirm does it)
 std::string cheat_value(int i) {
     char t[16];
@@ -1764,6 +1767,7 @@ std::string cheat_value(int i) {
     case 11: return link_speed_names[std::clamp(link_speed.load(), 0, kLinkSpeeds - 1)];
     case 12: return tx_onoff(infinite_ammo.load() == 1);
     case 15: return tx_onoff(infinite_rupees.load() == 1);
+    case 16: return tx_onoff(infinite_magic.load() == 1);
     case 13: return tx_onoff(time_lock.load() == 1);
     case 14: return tx_onoff(moon_jump.load() == 1);
     default: return "";
@@ -1777,12 +1781,12 @@ bool age_shown(int i) { return i == 9 && link_age.load(std::memory_order_relaxed
 /// What confirm does on a tool's row, for its prompt (nullptr: nothing)
 const char* cheat_confirm(int i) {
     static const char* const says[kCheatRows] = {"Toggle", "Toggle", "Apply", "Apply", "Set", nullptr, "Apply", "Toggle", "Open list",
-                                                 "Switch", "Open", nullptr, "Toggle", "Toggle", "Toggle", "Toggle"};
+                                                 "Switch", "Open", nullptr, "Toggle", "Toggle", "Toggle", "Toggle", "Toggle"};
     return i >= 0 && i < kCheatRows ? says[i] : nullptr;
 }
 /// The button label on an action tool's row ("": not a button action)
 const char* cheat_button_text(int i) {
-    static const char* const buttons[kCheatRows] = {"", "", "Mark", "Return", "", "", "", "", "Choose map", "Switch", "Edit items", "", "", "", "", ""};
+    static const char* const buttons[kCheatRows] = {"", "", "Mark", "Return", "", "", "", "", "Choose map", "Switch", "Edit items", "", "", "", "", "", ""};
     return i >= 0 && i < kCheatRows ? buttons[i] : "";
 }
 constexpr int kRows = sizeof rows / sizeof rows[0];
@@ -3208,8 +3212,8 @@ std::string restart_line(ui::Ctx& c, float px, float width) {
 /// and Change quantity are not shown (the Inventory page edits every amount)
 struct DebugGroup { const char* title; int from, to; };   // (debug_tools_order[from, to))
 // (-1 is the saved Damage taken option, not a cheat action: beside Heart protection in Player)
-constexpr int debug_tools_order[] = {0, -1, 1, 11, 9, 10, 12, 15, 14, 8, 2, 3, 7, 4, 13};
-constexpr DebugGroup debug_groups[] = {{"Player", 0, 9}, {"Travel", 9, 12}, {"Camera & world", 12, 15}};
+constexpr int debug_tools_order[] = {0, -1, 1, 11, 9, 10, 12, 15, 16, 14, 8, 2, 3, 7, 4, 13};
+constexpr DebugGroup debug_groups[] = {{"Player", 0, 10}, {"Travel", 10, 13}, {"Camera & world", 13, 16}};
 constexpr int kDebugGroups = sizeof debug_groups / sizeof debug_groups[0];
 constexpr int kDebugTools = sizeof debug_tools_order / sizeof debug_tools_order[0];
 /// The Debug tab's rows as shown (its row numbers, tab_row_to_global's): the switch, the tools in debug_tools_order while they
@@ -4568,6 +4572,8 @@ void menu_init() {
         infinite_ammo.store(ammo && !strcmp(ammo, "1"));
         const char* rupees = getenv("HOS_OOT_INFINITE_RUPEES");
         infinite_rupees.store(rupees && !strcmp(rupees, "1"));
+        const char* magic = getenv("HOS_OOT_INFINITE_MAGIC");
+        infinite_magic.store(magic && !strcmp(magic, "1"));
         const char* moon = getenv("HOS_OOT_MOON_JUMP");
         moon_jump.store(moon && !strcmp(moon, "1"));
         if (const char* lock = getenv("HOS_OOT_LOCK_TIME")) clock_hour = std::clamp(atoi(lock), 0, 23), time_lock.store(1);   // (the hour)
@@ -4831,6 +4837,7 @@ int menu_free_camera() { return cheats_on() ? free_camera.load(std::memory_order
 int menu_link_speed() { return cheats_on() ? link_speeds[std::clamp(link_speed.load(std::memory_order_relaxed), 0, kLinkSpeeds - 1)] : 100; }
 int menu_infinite_ammo() { return cheats_on() ? infinite_ammo.load(std::memory_order_relaxed) : 0; }
 int menu_infinite_rupees() { return cheats_on() ? infinite_rupees.load(std::memory_order_relaxed) : 0; }
+int menu_infinite_magic() { return cheats_on() ? infinite_magic.load(std::memory_order_relaxed) : 0; }
 // The hour to hold the clock at, or -1.
 int menu_time_lock() { return cheats_on() && time_lock.load(std::memory_order_relaxed) ? clock_hour : -1; }
 int menu_moon_jump() { return cheats_on() ? moon_jump.load(std::memory_order_relaxed) : 0; }
@@ -4948,10 +4955,11 @@ void menu_option_set(int id, int value) {
     }
     // (the game side's Ctrl+number shortcuts: any value switches the row)
     if (id == HOS_OPT_CHEAT_HEARTS || id == HOS_OPT_CHEAT_AMMO || id == HOS_OPT_CHEAT_TIMELOCK || id == HOS_OPT_CHEAT_MOONJUMP ||
-        id == HOS_OPT_CHEAT_RUPEES) {
+        id == HOS_OPT_CHEAT_RUPEES || id == HOS_OPT_CHEAT_MAGIC) {
         if (!cheats_on()) return;
         std::atomic<int>& row = id == HOS_OPT_CHEAT_HEARTS ? protect_hearts : id == HOS_OPT_CHEAT_AMMO ? infinite_ammo
-                              : id == HOS_OPT_CHEAT_TIMELOCK ? time_lock : id == HOS_OPT_CHEAT_RUPEES ? infinite_rupees : moon_jump;
+                              : id == HOS_OPT_CHEAT_TIMELOCK ? time_lock : id == HOS_OPT_CHEAT_RUPEES ? infinite_rupees
+                              : id == HOS_OPT_CHEAT_MAGIC ? infinite_magic : moon_jump;
         row.store(row.load() == 1 ? 0 : 1);
         menu_refresh = true;
         return;
@@ -5198,8 +5206,8 @@ void cheat_press(int i, const bool* press, bool& changed) {
     }
     if (press[7] && i >= 2 && i <= 4) cheat_action.store(i == 4 ? 100 + clock_hour : i);
     if (press[7] && i == 6) cheat_action.store(200 + pouch_item * 32 + pouch_delta + 10);
-    if ((press[3] || press[4] || press[7]) && i >= 12 && i <= 15) {   // (miojo: Infinite ammo, Lock time, Moon jump, Infinite rupees)
-        std::atomic<int>& v = i == 12 ? infinite_ammo : i == 13 ? time_lock : i == 15 ? infinite_rupees : moon_jump;
+    if ((press[3] || press[4] || press[7]) && i >= 12 && i <= 16) {   // (miojo: Infinite ammo, Lock time, Moon jump, Infinite rupees, Infinite magic)
+        std::atomic<int>& v = i == 12 ? infinite_ammo : i == 13 ? time_lock : i == 15 ? infinite_rupees : i == 16 ? infinite_magic : moon_jump;
         v.store(press[7] ? !v.load() : press[4] ? 1 : 0);
         changed = true;
     }

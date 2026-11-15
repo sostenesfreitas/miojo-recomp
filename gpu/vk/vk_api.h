@@ -60,6 +60,8 @@ enum { HOS_OPT_SKIP_OPENING = 52 };
 enum { HOS_OPT_AUTO_RUN = 55 };
 // (miojo) the Cheats page's Infinite rupees row, as the other cheats' (host/hos_main.c oot_infinite_rupees)
 enum { HOS_OPT_CHEAT_RUPEES = 61 };   // (60 is held for Hookshot's Item wheel)
+// (miojo) the Cheats page's Infinite magic row (host/hos_main.c oot_infinite_magic)
+enum { HOS_OPT_CHEAT_MAGIC = 62 };
 /* (HOS_OPT_FPS_CAP, 53: the Game frame rate cap row, host/nn_vi.c reads it) */
 enum { HOS_OPT_FPS_CAP = 53 };
 /* Damage taken: 0 Half, 1 Normal (unchanged), 2 Double, 3 Quadruple. (56: Hookshot's Auto run has 55) */
