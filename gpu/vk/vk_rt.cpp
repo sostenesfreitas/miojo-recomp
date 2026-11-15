@@ -601,6 +601,8 @@ bool read_model(const SkinnedDraw& k, Rt::Model& m) {
     for (uint32_t i = 0; i < n; i++) m.idx[i] = (uint32_t)((int64_t)m.idx[i] + k.base_vertex - lo);
     raw.resize((size_t)(nv * k.stride));
     if (!memory_read_as_submitted(k.vbuf + (uint64_t)lo * k.stride, raw.data(), raw.size())) return false;
+    raw.resize(raw.size() + 8);   // (the weights are read 4 bytes and the joints 8 whatever their format: a single R8 set near the
+                                  // vertex's end reads past the last one, off the end of its page: a crash after hours of play)
     const bool half = k.formats & dlss_actor::kHalfPosition;
     m.sets = k.sets;
     m.pos.resize(nv * 3), m.joints.assign(nv * 4 * k.sets, 0), m.weights.assign(nv * 4 * k.sets, 0);
