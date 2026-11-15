@@ -40,6 +40,10 @@ struct HostTranslateInfo {
     bool support_conditional_barrier{}; ///< True when the device supports barriers in conditional
                                         ///< control flow
     bool single_lane_geometry_subgroups{};
+    /// (Lichii bd0171f7) True when a handle read from a table at a per-invocation index may become
+    /// a descriptor array of the table's entries: the device indexes sampled image arrays
+    /// nonuniformly and has the descriptors for it
+    bool support_handle_table_arrays{};
 
     void ApplyDescriptorLimitPolicy() noexcept {
         if (min_ssbo_alignment == 0) {

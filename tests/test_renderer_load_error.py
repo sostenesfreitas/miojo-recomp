@@ -1,9 +1,11 @@
 """Why the Linux renderer did not load is in the log (host/posix/win32_posix.c hos_load_error, host/rx_backend.c load_vulkan).
 
-hookshot_vk.so is opened with RTLD_NOW and takes symbols from the executable, so one from another build fails at dlopen,
-before mkwvk_init's version check, and the game falls back to WebGPU. The POSIX LoadLibraryA kept only
-ERROR_FILE_NOT_FOUND, so the log said "(2)" for that and for a missing file alike. It now keeps dlerror()'s text, which
-names the file or the symbol, and load_vulkan prints it (the dev-loop proposal's B1, #2636).
+dlopen fails on hookshot_vk.so for a missing file, a glibc older than it needs, a wrong ELF class or a static TLS block
+too small, before mkwvk_init's version check, and nothing is drawn. The POSIX LoadLibraryA kept only
+ERROR_FILE_NOT_FOUND, so the log said "(2)" for all of them alike. It now keeps dlerror()'s text, which names the file
+or what it lacks, and load_vulkan prints it, without dlerror()'s leading "<file>: " so the path is in the line once. The
+renderer's own load of libvulkan.so.1 (gpu/vk/vk_main.cpp mkwvk_init) prints it too. The dev-loop proposal's B1,
+https://github.com/NotRexed/Hookshot/pull/2636.
 
 Everywhere: the source does so. On Linux it also builds host/posix/win32_posix.c as it is and loads, through
 LoadLibraryA, a .dll name with no library behind it, a library that needs a symbol nothing has, then a good one.
@@ -17,6 +19,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+RUN_ALL_ARGS = ["--cc", "gcc"]
 ROOT = Path(__file__).resolve().parents[1]
 
 DRIVER = r"""#include <windows.h>
@@ -49,7 +52,15 @@ def check_source():
     failed = load[load.index("if (!m) {"):load.index("return NULL;", load.index("if (!m) {"))]
     if "#ifdef _WIN32" not in failed or "hos_load_error()" not in failed.split("#else")[1]:
         raise SystemExit("load_vulkan: the Linux renderer's failure to load is logged without its reason")
-    print("ok   the source keeps dlerror()'s text and load_vulkan logs it")
+    linux = failed.split("#else")[1].split("#endif")[0]
+    if "why += n_path + 2;" not in linux or ": WebGPU" in linux or ": nothing is drawn" not in linux:
+        raise SystemExit("load_vulkan: the Linux line repeats dlerror()'s path, or names a WebGPU Linux does not have")
+    vk = (ROOT / "gpu" / "vk" / "vk_main.cpp").read_text(encoding="utf-8")
+    vk_failed = vk[vk.index("if (!load_global()) {"):]
+    vk_failed = vk_failed[:vk_failed.index("return nullptr;")]
+    if "#ifdef _WIN32" not in vk_failed or "hos_load_error()" not in vk_failed.split("#else")[1] or "dlerror" in vk_failed:
+        raise SystemExit("mkwvk_init: a libvulkan.so.1 that did not load is logged without its reason")
+    print("ok   the source keeps dlerror()'s text, and load_vulkan and mkwvk_init log it")
 
 
 def check_posix(cc):

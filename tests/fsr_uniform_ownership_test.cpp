@@ -31,6 +31,13 @@ bool coherent=false,fail_buffer=false;
 unsigned flushed=0,queued=0;
 std::mutex par_mutex;
 struct ParLock { std::lock_guard<std::mutex> lock{par_mutex}; };
+namespace rec {   // (vk_recorder.h's RX_VK_RECORDER_OWN marks, as they are with the recorder off)
+inline void slot_begin(uint64_t) {}
+inline void slot_done() {}
+inline uint64_t produced() { return 0; }
+struct OwnSlot { OwnSlot() {} ~OwnSlot() {} };   // (a scope, as the real one)
+}   // namespace rec
+uint64_t rec_end_pos[64];   // (vk_replay.cpp: each slot's end in the recorder's ring)
 void logf(const char*,...) {}
 bool create_buffer(uint64_t size,VkBufferUsageFlags,bool,VkBuffer& buffer,VmaAllocation& allocation,void** mapped,bool=false) {
     if(fail_buffer) return false;
@@ -88,6 +95,7 @@ int64_t st_wait_ns=0;
 #define PROF(x) ((void)0)
 void queue_flush_locked(){batch_flushed=1;}
 void gpu_time_collect(Recording&){} void gprof_collect(int){} void gpu_time_begin(Recording&){}
+void occ_collect(){}   // (vk_replay.cpp: the occlusion counts' harvest, RX_VK_OCC_QUERIES)
 void gprof_begin_recording(int,VkCommandBuffer,VkCommandBuffer){}
 uint64_t completed(){return 0;}
 void memory_recording_value(uint64_t,uint64_t){} void memory_recording_part(uint64_t){} void texture_begin_recording(VkCommandBuffer,uint64_t){}

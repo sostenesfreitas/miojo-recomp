@@ -47,33 +47,17 @@ static class Program
         Environment.SetEnvironmentVariable("HOOKSHOT_SETUP_BASE", root);
         Environment.SetEnvironmentVariable("HOOKSHOT_BUILDER_PORTABLE", "1");
         Check(BuilderHome.Base == root && BuilderHome.Portable, "Actual process context chose another home.");
-        Check(Storage.Base == root && Storage.NgxSdk == Path.Combine(root, "ngx-sdk") && Storage.FfxSdk == Path.Combine(root, "ffx-sdk"), "Storage/SDKs escaped the home.");
-        Check(Storage.Work == root, "Default work escaped the home.");
-        Check(BuilderHome.DefaultGame == Path.Combine(volume, "Hookshot"), "Default game escaped the portable volume.");
         var child = new ProcessStartInfo("authored-child-never-started");
         child.Environment["HOOKSHOT_SETUP_BASE"] = Path.Combine(fixture, "stale unrelated home");
         child.Environment["HOOKSHOT_BUILDER_PORTABLE"] = "0";
         BuilderHome.PassTo(child);
         Check(child.Environment["HOOKSHOT_SETUP_BASE"] == root && child.Environment["HOOKSHOT_BUILDER_PORTABLE"] == "1", "Child context was not passed.");
 
-        var game = Path.Combine(volume, "Games", "authored game");
-        var saved = BuilderHome.SavePath(game);
-        Check(saved != game && saved != null && !Path.IsPathRooted(saved), "Portable choice was stored as an absolute path.");
-        Check(BuilderHome.LoadPath(saved) == game, "Saved portable path failed round trip.");
-        Check(BuilderHome.LoadPath(BuilderHome.SavePath("relative choice")) == Path.Combine(root, "relative choice"), "Relative choice used cwd.");
-        Check(BuilderHome.SavePath(null) == null && BuilderHome.LoadPath("") == "", "Empty choices changed.");
-        var drive = Path.GetPathRoot(root)!;
-        var external = (char.ToUpperInvariant(drive[0]) == 'Z' ? "Y" : "Z") + @":\authored external\package.nup";
-        Check(BuilderHome.SavePath(external) == external && BuilderHome.LoadPath(external) == external, "External volume was remapped.");
-        Refuses(() => BuilderHome.LoadPath(@"\ambiguous"), "Drive-less rooted path accepted.");
-        Refuses(() => BuilderHome.SavePath("C:ambiguous"), "Drive-relative path accepted.");
-
         var moved = Path.Combine(fixture, "authored volume é, moved");
         Directory.Move(volume, moved);
         var newRoot = Path.Combine(moved, "HookshotBuilder");
         var next = BuilderHome.Resolve(null, Path.Combine(newRoot, "versions", "v-authored", "HookshotBuilder"), standard);
         Check(next.Root == newRoot && next.Portable, "Fresh direct start after relocation chose another home.");
-        Check(BuilderHome.LoadPath(next, saved) == Path.Combine(moved, "Games", "authored game"), "Relocated choice kept its old prefix.");
         File.WriteAllText(Path.Combine(newRoot, BuilderHome.Marker), "not a portable marker");
         Refuses(() => BuilderHome.Resolve(null, Path.Combine(newRoot, "versions", "v-authored", "HookshotBuilder"), standard), "Invalid marker silently chose AppData.");
         File.WriteAllBytes(Path.Combine(newRoot, BuilderHome.Marker), new byte[] { 0xff });
@@ -85,6 +69,6 @@ static class Program
         var shared = Path.Combine(fixture, "csharp shared");
         Directory.CreateDirectory(shared);
         File.WriteAllText(Path.Combine(shared, BuilderHome.Marker), BuilderHome.MarkerText + "\n", new UTF8Encoding(false));
-        Console.WriteLine($"PASS: {checks} portable home/storage/path/context assertions; no process started");
+        Console.WriteLine($"PASS: {checks} portable home/context assertions; no process started");
     }
 }

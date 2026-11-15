@@ -116,6 +116,14 @@ def sources():
         raise SystemExit("vk_menu.cpp: no After restart tag on a changed value, or no Restart needed line")
     if "restart_init();" not in function(menu, "void menu_init() {"):
         raise SystemExit("menu_init does not keep the start values")
+    # (Auto (this PC) sets the Output resolution and the Profile once the device is known, after host/hos_main.c read them at
+    # boot: they apply at the next start, but a new install's first close of the menu asked to restart for what the player never
+    # chose. restart_init runs once, so calling it there kept nothing: Auto's change is taken as Later instead)
+    auto = function(menu, "void menu_auto_for_gpu(")
+    if "restart_init();" in auto:
+        raise SystemExit("menu_auto_for_gpu: restart_init does nothing after menu_init (it runs once); Auto's rows are not Later")
+    if "restart_state.choose_later(" not in auto[auto.index("apply_auto("):]:
+        raise SystemExit("menu_auto_for_gpu: the rows Auto sets ask to restart at the menu's first close (not taken as Later)")
     if "restart_state.note(" not in function(menu, "void set_row("):
         raise SystemExit("set_row does not tell the restart state of a change")
     tick = function(menu, "void menu_tick() {")

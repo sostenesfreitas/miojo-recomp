@@ -3,6 +3,12 @@
 // differs from the shadow (the pool's copy of what guest memory holds), the shadow kept the same. One workgroup a chunk of a
 // run (64 KB at most), from a table the CPU wrote. A chunk of 16-byte vectors goes a subgroup's span at a time, written whole
 // when any of its vectors differs (whole lines over PCIe: word by word it went at ~1 GB/s); a chunk's odd words one by one.
+// (hookshot) Stamps (the late pages' fix, vk_memory.cpp): a chunk with bit 1 of vecs set has the address of its stamps in a
+// uint64 a chunk right after the table's chunks (such a table has no observations), and writes the submission's value (low
+// 32 bits, pc.stamp) there beside every word it CHANGES (differs from the shadow). A span is written to guest memory whole, its
+// unchanged words with what the shadow holds, which may be older than what the CPU wrote since: those are not stamped, so the
+// late pages' fix keeps the CPU's copy of them (the per-character animation output's padding: 0x6f6f6f6f put back over the
+// CPU's floats beside the words the program changed).
 // glslangValidator -V --target-env vulkan1.3 --vn WB_DIFF_COMP_SPV -o wb_diff_comp_spv.h wb_diff.comp
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
@@ -15,12 +21,14 @@ struct Chunk {
     uvec2 shadow;
     uvec2 guest;
     uint count;     // (16-byte vectors, or words)
-    uint vecs;      // (1: vectors, the three addresses 16-byte aligned; 0: words)
+    uint vecs;      // (bit 0: vectors, the three addresses 16-byte aligned, else words; bit 1: it has stamps)
 };
 layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Table { Chunk c[]; };
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Addrs { uvec2 a[]; };
 layout(push_constant) uniform P {
     Table table;
     uint count;
+    uint stamp;         // The submission's value, low 32 bits, for the chunks with stamps.
     uvec2 observations; // Optional uint per chunk; zero address keeps the ordinary write-back.
 } pc;
 shared uint chunk_changed;
@@ -33,21 +41,29 @@ void main() {
         barrier();
     }
     const Chunk c = pc.table.c[ci];
-    if (c.vecs != 0u) {
+    const bool stamped = (c.vecs & 2u) != 0u;
+    const uvec2 stamps = stamped ? Addrs(pc.table).a[pc.count * 4u + ci] : uvec2(0u);   // (a Chunk is 4 uvec2)
+    if ((c.vecs & 1u) != 0u) {
         Vecs m = Vecs(c.mirror), s = Vecs(c.shadow), g = Vecs(c.guest);
         const uint n = (c.count + 255u) & ~255u;   // (every invocation through the loop alike: the vote takes them all)
         for (uint i = gl_LocalInvocationID.x; i < n; i += 256u) {
             const bool in_run = i < c.count;
-            uvec4 v = uvec4(0u);
+            uvec4 v = uvec4(0u), sv = uvec4(0u);
             bool differs = false;
             if (in_run) {
                 v = m.v[i];
-                differs = any(notEqual(v, s.v[i]));
+                sv = s.v[i];
+                differs = any(notEqual(v, sv));
             }
             if (observe && differs) atomicOr(chunk_changed, 1u);
             if (subgroupAny(differs) && in_run) {
                 g.v[i] = v;
                 s.v[i] = v;
+                if (stamped && differs) {   // (only the words that changed: see the top)
+                    Words st = Words(stamps);
+                    for (uint k = 0u; k < 4u; k++)
+                        if (v[k] != sv[k]) st.w[i * 4u + k] = pc.stamp;
+                }
             }
         }
     } else {
@@ -58,6 +74,7 @@ void main() {
                 if (observe) atomicOr(chunk_changed, 1u);
                 g.w[i] = v;
                 s.w[i] = v;
+                if (stamped) Words(stamps).w[i] = pc.stamp;
             }
         }
     }

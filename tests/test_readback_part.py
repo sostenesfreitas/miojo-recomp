@@ -17,7 +17,9 @@ meanwhile. The statements are cut from the source and run against stand-ins for 
     look was under way; every time while a queue is stopped at an event nobody has set (its value is guest memory's,
     where a store meets the wait with no signal); and not otherwise;
   - the part wait gives way to the last part when a part after the range's own reads guest memory in place (a pool
-    with no mirror, a mirror's pages no capture holds): vk_memory.cpp notes each such read.
+    with no mirror, a mirror's pages no capture holds): vk_memory.cpp notes each such read;
+  - a range RX_VK_READBACK_LATE names (readback_late.h: its writer is the newest submission, or its size) is read without
+    its wait, and every other range waits as before.
 
 python -I -B tests/test_readback_part.py [--cxx g++]
 """
@@ -60,6 +62,7 @@ FIXTURE = r"""
 #include <memory>
 #include <mutex>
 #include <vector>
+#include "readback_late.h"
 constexpr uint64_t kPageShift = 12, kChunkPages = 16, kPages = 64;
 static bool env_on(const char*) { return false; }   // (no switch set)
 namespace {
@@ -98,12 +101,16 @@ static const bool by_part = true, unforced = true;
 static uint64_t in_place_part;   // (the newest part that reads guest memory in place, as vk_memory.cpp keeps it)
 static uint64_t memory_in_place_part() { return in_place_part; }
 static int held_back;
+static uint64_t fence_handed;             // (the newest value handed out, as fence() when the readback begins)
+static readback_late::Rules late_rules;   // (RX_VK_READBACK_LATE: none set, until the checks of it)
+static bool readback_late_wanted(uint64_t size, bool newest) { return readback_late::wanted(late_rules, size, newest); }
 /// what a readback of [guest, guest + size) waits for: the recording (0: none)
 static uint64_t readback(uint64_t guest, uint64_t size) {
     bool w = false;
     waited_seq = 0;
     uint64_t part = 0, whole = 0;
     const uint64_t v = memory_writeback_value(guest, size, nullptr, &part, &whole);
+    const uint64_t f0 = fence_handed;
     /* CHOICE */
     (void)w;
     return waited_seq;
@@ -207,6 +214,17 @@ int main() {
     in_place_part = 5;
     check(readback(4 * P, 64) == 5 && held_back == 1, "guest memory read in place in a later part: the submission's last part");
     in_place_part = 0;
+    // RX_VK_READBACK_LATE: a range the rule names is read without its wait, the others wait as before (page 4: value 11)
+    late_rules = readback_late::parse("newest");
+    fence_handed = 11;
+    check(readback(4 * P, 64) == 0, "newest: a range the newest submission writes is read without its wait");
+    fence_handed = 12;
+    check(readback(4 * P, 64) == 4, "newest: a range an older submission writes still waits for its part");
+    late_rules = readback_late::parse("40");
+    check(readback(4 * P, 0x40) == 0 && readback(4 * P, 0x20) == 4, "a size: the ranges of that size are read without their wait, no other");
+    late_rules = readback_late::parse(nullptr);
+    fence_handed = 11;
+    check(readback(4 * P, 64) == 4, "no rule: the wait, as before");
 
     // the look at the stopped queues: only after a CPU signal nobody has looked at
     const uint64_t event = 0x1000;
@@ -271,7 +289,9 @@ def main():
     inv = replay[replay.index("void invalidate(uint64_t gpu, uint64_t size) {"):]
     lookup = "const uint64_t v = memory_writeback_value(host->gpu_guest(gpu), size, nullptr, &part, &whole);"
     after = inv[inv.index(lookup):]
-    choice = block(after, "if (v > completed()) {\n                int ok = 0;")
+    marker = "if (pending && !late) {\n                int ok = 0;"
+    choice = after[after.index("const bool pending = v > completed()"):after.index(marker)] + block(after, marker)
+    assert "readback_late_wanted(size, newest)" in choice, "the readback's late rule is no longer asked before its wait"
     assert "wait_recorded_part(part" in choice, "the readback no longer waits for its pages' part: update this test"
     # (the settle before the lookup goes through sync_settle_met with per-queue fences)
     before = inv[:inv.index(lookup)]
@@ -290,6 +310,8 @@ def main():
     noted = 0
     for site in ("return remember({p->buffer, off, size, 0});", "vkCmdCopyBuffer(upload_command_buffer(), p.buffer, p.mirror,",
                  "vkCmdCopyBuffer(upload_command_buffer(), p->buffer, p->mirror, 1, &all);",
+                 "vkCmdCopyBuffer(upload_command_buffer(), p->buffer, p->mirror, (uint32_t)parts.size(), parts.data());",
+                 "vkCmdCopyBuffer(up, p.buffer, p.mirror, (uint32_t)fill.size(), fill.data());",
                  "return {p->buffer, guest - p->lo, size, p->address + (guest - p->lo)};"):
         at = 0
         while (at := memory_src.find(site, at)) >= 0:
@@ -297,10 +319,11 @@ def main():
                 "a read of guest memory in place is not noted for the readback's part wait: " + site
             at += 1
             noted += 1
-    assert noted == 6, "the reads of guest memory in place have changed (%d found): look at each again" % noted
+    # (9: a sparse mirror's binding of a block with no memory, its first fill of the blocks with memory, and sparse_grow's fill)
+    assert noted == 9, "the reads of guest memory in place have changed (%d found): look at each again" % noted
     import re
     sources = re.findall(r"vkCmdCopyBuffer\([^,]+, (?:p|pp)(?:->|\.)buffer, [^,]+", memory_src)
-    assert len(sources) == 4, "a new copy out of a guest pool (%d found): is it noted for the readback's part wait?" % len(sources)
+    assert len(sources) == 6, "a new copy out of a guest pool (%d found): is it noted for the readback's part wait?" % len(sources)
     assert memory_src.count("note_in_place_read(!mirror_upload);") == 2, \
         "a binding outside a recording's uploads must count for the next part (no part begun yet is the one that reads it)"
     refresh = block(memory_src, "bool memory_rb_refresh(VkCommandBuffer up) {")
@@ -319,7 +342,8 @@ def main():
         src = Path(temp) / "readback_part.cpp"
         exe = Path(temp) / "readback_part.exe"   # (the name llvm-mingw writes on Windows; any name runs on Linux)
         src.write_text(fixture, encoding="utf-8")
-        subprocess.run([a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Werror", str(src), "-o", str(exe)], check=True)
+        subprocess.run([a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Werror", "-I", str(a.source / "gpu/vk"), str(src),
+                        "-o", str(exe)], check=True)
         r = subprocess.run([str(exe)], text=True, capture_output=True, timeout=20)
         print(r.stdout, end="")
         raise SystemExit(r.returncode)

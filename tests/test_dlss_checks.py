@@ -46,6 +46,14 @@ def check_sources():
     assert '"its feature was not made", -1' not in prepare, "prepare: a failed creation turns DLSS off for the run"
     assert "s.refused = key;" in prepare and "if (s.refused == key)" in prepare, \
         "prepare: a failed creation tried again once a DLSS setting changes"
+    # (issue 17: the DLSS model row stepped K, M, L made a feature for M too, and NGX kept both in video memory for
+    # seconds. The preset comes through PresetSettle, before anything compares it with the feature's)
+    assert re.search(r"const unsigned preset = s\.settle\.pick\(wanted_preset\(\), s\.feature_preset, s\.feature != nullptr,"
+                     r"\s*texture_frame_no\(\),", prepare), "prepare: the row's preset taken once it has held it"
+    assert prepare.index("s.settle.pick(") < prepare.index("s.feature_preset == preset"), \
+        "prepare: the settled preset is the one the feature is compared with"
+    assert "wanted_preset()" not in prepare.replace("s.settle.pick(wanted_preset()", ""), \
+        "prepare: the row's preset read only through the settle"
 
 
 def main():

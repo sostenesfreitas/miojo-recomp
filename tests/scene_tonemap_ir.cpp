@@ -19,7 +19,8 @@ namespace PV = Shader::Optimization::PsychoV35;
 
 constexpr u32 kBank = 3, kGain = 0x38, kPeak = 0x40;
 
-enum class Shape { Game, NoLuminance, TwoExposures, GainFirst, RedFirst };
+enum class Shape { Game, NoLuminance, TwoExposures, GainFirst, RedFirst, Adapted, AdaptedFirst,
+                   AdaptedRedFirst, DifferentAdaptation, MixedAdaptation, NonExposureScale, AdaptedTwoExposures };
 
 struct Built {
     ObjectPool<IR::Inst> insts{256};
@@ -36,18 +37,30 @@ void build(Built& b, Shape shape) {
     IR::IREmitter ir{*block};
     const IR::F32 gain = ir.GetFloatCbuf(ir.Imm32(kBank), ir.Imm32(kGain));
     const IR::F32 other_gain = ir.GetFloatCbuf(ir.Imm32(kBank), ir.Imm32(kGain + 4));
+    const bool red_first = shape == Shape::RedFirst || shape == Shape::AdaptedRedFirst;
+    const bool adapted = shape == Shape::Adapted || shape == Shape::AdaptedFirst || shape == Shape::AdaptedRedFirst ||
+                         shape == Shape::DifferentAdaptation || shape == Shape::MixedAdaptation ||
+                         shape == Shape::NonExposureScale || shape == Shape::AdaptedTwoExposures;
+    const IR::F32 scale = shape == Shape::NonExposureScale ? IR::F32{ir.FPMax(other_gain, ir.Imm32(0.5f))}
+                                                          : ir.FPExp2(ir.FPMin(other_gain, ir.Imm32(1.0f)));
+    const IR::F32 other_scale = ir.FPExp2(ir.FPMin(IR::F32{ir.FPNeg(other_gain)}, ir.Imm32(1.0f)));
     std::array<IR::F32, 3> fitted;
     // (RedFirst: red's colour written before blue's and green's fits are made, then theirs after the luminance)
-    const IR::F32 early_peak = shape == Shape::RedFirst ? ir.GetFloatCbuf(ir.Imm32(kBank), ir.Imm32(kPeak)) : IR::F32{};
-    for (const int c : shape == Shape::RedFirst ? std::array<int, 3>{0, 2, 1} : std::array<int, 3>{2, 0, 1}) {
+    const IR::F32 early_peak = red_first ? ir.GetFloatCbuf(ir.Imm32(kBank), ir.Imm32(kPeak)) : IR::F32{};
+    for (const int c : red_first ? std::array<int, 3>{0, 2, 1} : std::array<int, 3>{2, 0, 1}) {
         // (the fits out of the channels' order: the luminance names them)
         const IR::F32 scene = ir.GetAttribute(IR::Attribute(int(IR::Attribute::Generic0X) + c));
-        const IR::F32 g = shape == Shape::TwoExposures && c == 1 ? other_gain : gain;
-        const IR::F32 x = shape == Shape::GainFirst ? IR::F32{ir.FPMul(g, scene)} : IR::F32{ir.FPMul(scene, g)};
+        const IR::F32 g = (shape == Shape::TwoExposures || shape == Shape::AdaptedTwoExposures) && c == 1 ? other_gain : gain;
+        const IR::F32 base = shape == Shape::GainFirst || shape == Shape::AdaptedFirst
+                                 ? IR::F32{ir.FPMul(g, scene)} : IR::F32{ir.FPMul(scene, g)};
+        const IR::F32 factor = shape == Shape::DifferentAdaptation && c == 1 ? other_scale : scale;
+        const bool scaled = adapted && (shape != Shape::MixedAdaptation || c == 1);
+        const IR::F32 x = !scaled ? base : shape == Shape::AdaptedFirst ? IR::F32{ir.FPMul(factor, base)}
+                                                                 : IR::F32{ir.FPMul(base, factor)};
         const IR::F32 num = ir.FPMul(x, ir.FPFma(x, ir.Imm32(2.51f), ir.Imm32(0.03f)));
         const IR::F32 den = ir.FPFma(x, ir.FPFma(x, ir.Imm32(2.43f), ir.Imm32(0.59f)), ir.Imm32(0.14f));
         fitted[c] = ir.FPSaturate(ir.FPMul(num, IR::F32{ir.FPRecip(den)}));
-        if (shape == Shape::RedFirst && c == 0) ir.SetFragColor(0, 0, ir.FPMin(ir.FPMax(ir.Imm32(0.0f), fitted[0]), early_peak));
+        if (red_first && c == 0) ir.SetFragColor(0, 0, ir.FPMin(ir.FPMax(ir.Imm32(0.0f), fitted[0]), early_peak));
     }
     IR::F32 luminance = ir.Imm32(0.0f);
     if (shape != Shape::NoLuminance)
@@ -55,7 +68,7 @@ void build(Built& b, Shape shape) {
                              ir.FPFma(fitted[0], ir.Imm32(0.29890000820159912109375f),
                                       ir.FPMul(fitted[1], ir.Imm32(0.586600005626678466796875f))));
     const IR::F32 peak = ir.GetFloatCbuf(ir.Imm32(kBank), ir.Imm32(kPeak));
-    for (u32 c = shape == Shape::RedFirst ? 1 : 0; c < 3; c++) {
+    for (u32 c = red_first ? 1 : 0; c < 3; c++) {
         const IR::F32 expanded = ir.FPFma(luminance, ir.Imm32(0.25f), fitted[c]);
         ir.SetFragColor(0, c, ir.FPMin(ir.FPMax(ir.Imm32(0.0f), expanded), peak));
     }
@@ -192,7 +205,23 @@ int main() {
         for (int c = 0; c < 3; c++) CHECK(std::fabs(float(e(b.writes[c]->Arg(2))) - want[c]) < 1e-5f);
     }
     std::printf("red written before the other channels' fits: PsychoV35 made before the last write, each value before its use\n");
-    for (const Shape shape : {Shape::NoLuminance, Shape::TwoExposures}) {
+    for (const Shape shape : {Shape::Adapted, Shape::AdaptedFirst, Shape::AdaptedRedFirst}) {
+        Built b;
+        build(b, shape);
+        CHECK(Optimization::SceneToneMapPass(b.program) == nullptr);
+        CHECK(defined_before_use(*b.program.blocks[0]));
+        for (const float stops : {-4.0f, -1.0f, 0.0f, 0.5f, 1.0f, 3.0f}) {
+            const std::array<float, 3> scene{0.6f, 3.0f, 0.1f};
+            Eval e{scene, 1.2f, stops, 6.0f, {}};
+            FloatOps ops;
+            const float gain = 1.2f * std::exp2(std::fmin(stops, 1.0f));
+            const auto want = PV::SceneToneMap(ops, scene, gain, 6.0f);
+            for (int c = 0; c < 3; c++) CHECK(std::fabs(float(e(b.writes[c]->Arg(2))) - want[c]) < 1e-5f);
+        }
+    }
+    std::printf("adapted exposure: complete gain preserved, either product order and early colour write\n");
+    for (const Shape shape : {Shape::NoLuminance, Shape::TwoExposures, Shape::DifferentAdaptation,
+                              Shape::MixedAdaptation, Shape::NonExposureScale, Shape::AdaptedTwoExposures}) {
         Built b;
         build(b, shape);
         std::array<IR::Value, 3> before;
@@ -205,7 +234,7 @@ int main() {
         for (const IR::Inst& inst : b.program.blocks[0]->Instructions()) (void)inst, after++;
         CHECK(after == count);
         for (int c = 0; c < 3; c++) CHECK(b.writes[c]->Arg(2) == before[c]);
-        std::printf("%s: left as it is (%s)\n", shape == Shape::NoLuminance ? "no luminance" : "two exposures", why);
+        std::printf("%s: left as it is (%s)\n", shape == Shape::NoLuminance ? "no luminance" : "mismatched exposure or unsupported factor", why);
     }
     std::printf("PASS\n");
 }

@@ -369,7 +369,10 @@ static void item_choice_tick(void) {
 }
 
 static void mouse_tick_locked(Ctx *c, uint64_t screen) {
+    /* a left press on a panel page, its click at the release (below) */
+    static int ldown, ldrag, lx0, ly0, llx, lly;
     if (peek64(screen) == ITEM_CHOICE_VTABLE) {
+        ldown = ldrag = 0;
         item_choice_tick();
         return;
     }
@@ -377,7 +380,10 @@ static void mouse_tick_locked(Ctx *c, uint64_t screen) {
     int px, py, w, h, wheel;
     uint32_t pressed;
     const int got = hos_mouse_game_pointer(&px, &py, &w, &h, &pressed, &wheel);
-    if (!got) return;
+    if (!got) {   /* (outside the window or under the Insert menu: a release there is not seen, so no click on return) */
+        ldown = ldrag = 0;
+        return;
+    }
     const int hidden = got == 2;   /* (the cursor hidden while the pad is in use: the wheel only, no pointing) */
     const int pause = screen == pause_screen_now();
     const float scale = 3840.0f / (float)w > 2160.0f / (float)h ? 3840.0f / (float)w : 2160.0f / (float)h;
@@ -396,7 +402,6 @@ static void mouse_tick_locked(Ctx *c, uint64_t screen) {
        Key Items' stones are): a drag there turns it, off the buttons; the page's slots at the left (to x about 100),
        the tabs above (y 900), the prompts below (-960) */
     const int item_model = pause && page_now == 2, pan = page >= 0 || item_model;
-    static int ldown, ldrag, lx0, ly0, llx, lly;
     if (pan) {
         const int held = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         const int was_down = ldown;
@@ -815,6 +820,11 @@ void hos_oot_menu_tick(Ctx *c, uint64_t screen) {
     if (screen == pause_screen_now()) InterlockedIncrement(&ticks);
 }
 #else
-void hos_oot_menu_focus(Ctx *c, uint64_t screen, uint64_t pane, uint64_t lr) { (void)c, (void)screen, (void)pane, (void)lr; }
+void hos_input_clear_toggles(void);
+/* The pause page's focus hook also runs on Linux, even without mouse menu navigation. */
+void hos_oot_menu_focus(Ctx *c, uint64_t screen, uint64_t pane, uint64_t lr) {
+    (void)c, (void)screen, (void)pane, (void)lr;
+    hos_input_clear_toggles();
+}
 void hos_oot_menu_tick(Ctx *c, uint64_t screen) { (void)c, (void)screen; }
 #endif

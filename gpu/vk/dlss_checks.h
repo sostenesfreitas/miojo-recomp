@@ -44,6 +44,23 @@ inline int mode_for(uint32_t w, uint32_t h, uint32_t ow, uint32_t oh, const Mode
     return -1;
 }
 
+/// The preset DLSS draws with while the DLSS model row is stepped through (vk_dlss.cpp prepare). The row goes K, M, L,
+/// NVIDIA's default, so K to L passes M, and a feature made for each preset passed over costs 20 to 35 ms of CPU and its
+/// video memory, which NGX keeps for some seconds after the feature is let go: issue 17's 12 GB card at 3440x1440 DLAA held
+/// 1419 MB of DLSS's for K, M and L at once against 631 MB for L alone, its driver's allowance nearly used up. A new preset is
+/// taken once the row has held it for `frames`; until then the feature already made draws on with its own. With no feature
+/// (the first, or one let go) the row's preset is taken at once.
+struct PresetSettle {
+    unsigned wanted = ~0u;   // (the row's preset, last seen)
+    uint64_t since = 0;      // (the frame it was first seen)
+    /// The preset for frame `now`: `want` the row's, `have` the feature's (has: there is one)
+    unsigned pick(unsigned want, unsigned have, bool has, uint64_t now, uint64_t frames) {
+        if (want != wanted) wanted = want, since = now;
+        if (!has || want == have) return want;
+        return now - since >= frames ? want : have;
+    }
+};
+
 /// Whether s is all ASCII: NGX's Linux library takes only such paths (vk_dlss.cpp wide())
 inline bool ascii(std::string_view s) {
     for (const char c : s)

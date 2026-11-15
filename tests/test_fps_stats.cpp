@@ -17,10 +17,36 @@ int main() {
     // the row's values: an options file from before the levels (0 Off, 1 On) keeps its meaning, On is the number alone
     CHECK("old off", fs::level_of(0) == fs::kOff);
     CHECK("old on is FPS", fs::level_of(1) == fs::kFps);
-    CHECK("a hand-edited value past the last", fs::level_of(9) == fs::kBreakdown && fs::level_of(-3) == fs::kOff);
+    CHECK("a hand-edited value past the last", fs::level_of(9) == fs::kDev && fs::level_of(-3) == fs::kOff);
     CHECK("names", !std::strcmp(fs::level_name(0), "Off") && !std::strcmp(fs::level_name(1), "FPS") &&
                        !std::strcmp(fs::level_name(2), "Frame time") && !std::strcmp(fs::level_name(3), "Graph") &&
-                       !std::strcmp(fs::level_name(4), "Breakdown") && fs::kLevels == 5);
+                       !std::strcmp(fs::level_name(4), "Breakdown") && !std::strcmp(fs::level_name(5), "Dev") &&
+                       fs::kLevels == 6);
+    CHECK("Dev is past the Breakdown", fs::kDev > fs::kBreakdown);
+
+    // the Dev level's lines: a name each, and their values
+    for (int i = 0; i < fs::kDevLines; i++) CHECK("a Dev line's name", fs::dev_name(i)[0] != 0);
+    CHECK("no name past the lines", !std::strcmp(fs::dev_name(fs::kDevLines), ""));
+    {
+        char b[32];
+        const uint64_t gb = 1ull << 30;
+        fs::vram_line(b, sizeof b, 5 * gb + gb / 5, 8 * gb, true);
+        CHECK("VRAM of the budget", !std::strcmp(b, "5.2 of 8.0 GB"));
+        fs::vram_line(b, sizeof b, 5 * gb + gb / 5, 0, false);
+        CHECK("VRAM without a budget", !std::strcmp(b, "5.2 GB"));
+        fs::textures_line(b, sizeof b, 1843, 2 * gb + gb / 10);
+        CHECK("textures", !std::strcmp(b, "1843, 2.1 GB"));
+        fs::per_frame_line(b, sizeof b, 74430, 30);
+        CHECK("draws a frame", !std::strcmp(b, "2481"));
+        fs::per_frame_line(b, sizeof b, 5, 0);
+        CHECK("no frame: no count", !std::strcmp(b, "-"));
+        fs::per_frame_line(b, sizeof b, -4, 10);
+        CHECK("a counter that went back: none", !std::strcmp(b, "0"));
+        fs::rate_line(b, sizeof b, 6 * 1024 * 1024, 0.5);
+        CHECK("uploads a second", !std::strcmp(b, "12.0 MB/s"));
+        fs::rate_line(b, sizeof b, 1, 0);
+        CHECK("no time: no rate", !std::strcmp(b, "-"));
+    }
 
     CHECK("corners", !std::strcmp(fs::corner_name(0), "Top right") && !std::strcmp(fs::corner_name(3), "Bottom left") &&
                          !std::strcmp(fs::corner_name(7), "Bottom left"));

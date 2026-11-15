@@ -10,6 +10,7 @@
    While the Insert menu is open the mouse is free (the cursor shown, for the menu's clicks: hos_mouse_pointer) and
    the game gets none of it; the capture it had comes back when the menu closes. */
 #include "../hos.h"
+void hos_input_clear_toggles(void);
 #include "../hos_sdl.h"
 
 /* (the window's app id: the applications menu's entry names it as its StartupWMClass, builder/linux/hookshot_builder.py) */
@@ -32,6 +33,9 @@ void rx_close_asked(void);
 void hos_sdl_pads_pump(void);   /* host/pad_sdl.c: controllers, on this thread, as SDL's queue wants */
 void hos_relaunch_ask(void);        /* (host/hos_relaunch.c: the Insert menu's Restart now) */
 void hos_window_closed_exit(void);
+int hos_text_focus(void);           /* (host/rx_backend.c: the Insert menu's text fields, MkwVkHost.take_text) */
+void hos_text_put(uint32_t c);
+void hos_text_put_utf8(const char *s, int first_line);
 
 volatile LONG64 hos_present_count;   /* (nvn_native.c: the game's presents) */
 __attribute__((visibility("default"))) volatile uint8_t hos_posix_keys[256];
@@ -114,6 +118,26 @@ static void keys_update(void) {
     for (int i = 0; i < 256; i++) hos_posix_keys[i] = v[i];
 }
 
+/* ---- (hookshot) typed text, for the Insert menu's text field that has the keyboard (MkwVkHost.take_text): SDL's text input on
+   only while one has it (hos_text_focus), so no input method opens over the game; its editing keys, repeats too; paste ---- */
+static volatile int paste_asked;
+void hos_display_paste(void) { __atomic_store_n(&paste_asked, 1, __ATOMIC_RELEASE); }   /* (the menu's Paste: on this thread) */
+static void paste_clipboard(void) {   /* (the clipboard's first line, as typed) */
+    char *t = hos_sdl_clipboard();
+    hos_text_put_utf8(t, 1);
+    hos_sdl_free(t);
+}
+static void text_key(const HosSdlEvent *e) {
+    static const struct { int scancode, vk; } keys[] = {{80, VK_LEFT}, {79, VK_RIGHT}, {74, VK_HOME}, {77, VK_END}, {42, VK_BACK},
+                                                       {76, VK_DELETE}, {40, VK_RETURN}, {88, VK_RETURN}, {41, VK_ESCAPE}};
+    if ((e->key == 'v' && (e->mod & 0xC0)) || (e->scancode == 73 && (e->mod & 3))) {   /* (Ctrl+V, Shift+Insert) */
+        if (!e->repeat) paste_clipboard();
+        return;
+    }
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0] && !(e->mod & 0x300); i++)   /* (not with Alt: Alt+Enter is fullscreen) */
+        if (e->scancode == keys[i].scancode) hos_text_put(HOS_TEXT_KEY | (uint32_t)keys[i].vk);
+}
+
 /* ---- the window ---- */
 static volatile int renderer;   /* the renderer presents into the window */
 static HANDLE renderer_up;   /* (set once rx_start has returned, ready or not: hos_renderer_wait) */
@@ -139,6 +163,8 @@ static MkwVkWindow vk_window = {MKWVK_WINDOW_VERSION, create_surface, drawable_s
    the capture that comes back when the menu closes. Spent by the next capture or menu */
 static int esc_had_capture;
 static void mouse_capture(int on) {
+    int rx_option(int id, int otherwise);
+    if (on && rx_option(6, 0) == 2) return;   /* (Mouse camera Off: the mouse plays no part) */
     if (on == (int)mouse_captured) return;
     mouse_captured = on;
     InterlockedExchange(&mouse_dx, 0);
@@ -199,6 +225,7 @@ static void menu_mouse(int request) {
     if (open == menu_open) return;
     menu_open = open;
     if (open) {
+        hos_input_clear_toggles();
         captured_before_menu = (int)mouse_captured || (request == 2 && esc_had_capture);   /* (opened by Esc, which let it go) */
         esc_had_capture = 0;
         mouse_capture(0);
@@ -284,6 +311,8 @@ void hos_display_loop(void) {
         hos_log("display: SDL_CreateWindow: %s: no window", hos_sdl_error());
         fprintf(stderr, "display: SDL_CreateWindow: %s: no window\n", hos_sdl_error());
         hos_log_flush();
+        void hos_crash_clean_end(void);
+        hos_crash_clean_end();
         ExitProcess(1);
     }
     vk_window.window = window;
@@ -306,6 +335,8 @@ void hos_display_loop(void) {
     pointer_update(0, 0);
     CloseHandle(CreateThread(NULL, 0, renderer_main, NULL, 0, NULL));
     DWORD refresh_asked = GetTickCount();
+    int text_on = 0;
+    hos_sdl_text_input(window, 0);   /* (SDL2 starts with it on: off until a text field of the menu has the keyboard) */
     for (;;) {
         hos_sdl_pads_pump();
         if (GetTickCount() - refresh_asked >= 1000) {   /* (the window may have moved to another display) */
@@ -331,6 +362,7 @@ void hos_display_loop(void) {
                     hos_posix_window[0] = 1;
                     break;
                 case HOS_SDL_EV_FOCUS_LOST:
+                    hos_input_clear_toggles();
                     hos_posix_window[0] = 0;
                     esc_had_capture = 0;
                     mouse_capture(0);
@@ -353,6 +385,7 @@ void hos_display_loop(void) {
                         mouse_capture(0);
                     }
                     if (!e.repeat && ((scancode == 68 && !(mod & 0x0FC3)) || (scancode == 40 && (mod & 0x300)))) set_fullscreen(!fullscreen);   /* F11, Alt+Enter */
+                    if (hos_text_focus()) text_key(&e);   /* (a text field of the Insert menu has the keyboard) */
                     break;
                 }
                 case HOS_SDL_EV_MOUSE_DOWN:
@@ -378,10 +411,15 @@ void hos_display_loop(void) {
                         InterlockedExchangeAdd(&mouse_dy, dy);
                     }
                     break;
+                case HOS_SDL_EV_TEXT:
+                    hos_text_put_utf8(e.text, 0);
+                    break;
                 }
                 pointer_update(0, 0);
             } while (hos_sdl_poll_event(&e));
         }
+        if (hos_text_focus() != text_on) hos_sdl_text_input(window, text_on = hos_text_focus());
+        if (__atomic_exchange_n(&paste_asked, 0, __ATOMIC_ACQ_REL)) paste_clipboard();
         const int asked = __atomic_exchange_n(&fullscreen_asked, -1, __ATOMIC_ACQ_REL);
         if (asked >= 0) set_fullscreen(asked);
         const int menu = __atomic_exchange_n(&menu_asked, -1, __ATOMIC_ACQ_REL);

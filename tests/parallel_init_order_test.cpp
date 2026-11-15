@@ -267,6 +267,7 @@ void draw_flush_recording(int slot) { CHECK(slot >= 0 && slot < 8); published_sl
 void queue_flush_locked() {}
 void checkpoints_report() {}
 const void* reflex_submit_id(const void* next, uint64_t = ~0ull) { return next; }   // (vk_reflex.cpp: no tag without Reflex)
+bool memory_sparse_wait(VkSemaphoreSubmitInfo*) { return false; }   // (vk_memory.cpp: no sparse mirror binds here)
 [[noreturn]] void device_lost() { std::_Exit(3); }   // (vk_replay.cpp: the report, then the process ends)
 struct {
     VkDevice device = VK_NULL_HANDLE;

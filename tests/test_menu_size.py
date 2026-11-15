@@ -43,7 +43,8 @@ def main():
     banner = banner[:banner.index("\n    }\n")]
     check("ui::fit_px(px, opts.menu_size == 3 ? px : kVersionMinPt * s, 0.5f * s, room, width)" in banner and "if (fit > 0)" in banner,
           "the banner's version is not shrunk to fit at Small and Medium (and kept at its size at Large)")
-    check(banner.index('ver.resize(ver.find(" ("))') < banner.index("ui::fit_px("), "the version shrinks before it drops its source")
+    check('std::string("Miojo ") + version_text(HOOKSHOT_VERSION)' in banner and "(source" not in banner.split("ui::fit_px(")[0].split("version_text")[1],
+          "the banner's version is not shown as players see it (version_text: no source fingerprint)")
     check("constexpr float kVersionMinPt = 10;" in menu, "the version's smallest size is not 10 points")
 
     src = "#include <cmath>\n#include <cstdio>\n#include <cstring>\n" + block(ui, "inline float unit(") + "\n" + \

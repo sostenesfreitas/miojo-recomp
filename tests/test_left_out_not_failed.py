@@ -25,6 +25,7 @@ DRIVER = r'''#define _CRT_SECURE_NO_WARNINGS 1
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -37,6 +38,10 @@ static void logf(const char* f, ...) {
     va_end(a);
     lines.push_back(b);
 }
+// (the generic catch's left-out branch, gpu/vk/vk_internal.h's log levels: a trace line is not a line of this log)
+enum LogLevel : int { log_error, log_warn, log_info, log_debug, log_trace };
+static void logf_at(LogLevel, const char*, ...) {}
+constexpr char network_left_out[] = "a network left out on this card";
 std::atomic<int64_t> st_failed, st_left_out;
 struct Forced { std::string want; };
 static Forced* forced;

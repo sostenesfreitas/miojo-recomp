@@ -7,7 +7,8 @@ through one connection, with replies. Presses are timed in frames, and every rep
 
 - The game side is `host/control.c`. Hooks: `host/nn_hid.c` (the controller's read), `gpu/vk/vk_replay.cpp` (shots at a
   present), `gpu/vk/vk_menu.cpp` (the Insert menu's settings, through its own setter), `host/hos_thread.c` (log lines),
-  `host/hos_main.c` (the start, and for OoT the current map and the debug teleport), `host/hos_mem.c` (guest memory's
+  `host/hos_main.c` (the start, and for OoT the current map and debug teleport), `host/oot_state_tap.c` (OoT snapshots
+  from Link's update, copied to the bridge thread), `host/hos_mem.c` (guest memory's
   bounds), `host/nn_fs.c` (the save folder), `host/rx_backend.c` (the renderer's side, `MkwVkRenderer`).
 - The client is `scripts/hookshot_ctl.py` (standard library only).
 - Tests: `tests/test_control.py` (the bridge against a fake game) and `tests/test_hookshot_ctl.py` (the client against a
@@ -23,9 +24,9 @@ It is off unless `HOS_CONTROL` is set. When it is on, the log says so once:
 `control: listening on <path> (HOS_CONTROL: ...)`. On Windows the value is a named pipe, `\\.\pipe\<name>`; a bare name
 gets that prefix.
 
-`hookshot_ctl.py launch <game folder>` starts a game folder this way. It makes a run folder of its own (mode 0700) and
-puts the socket (`control.sock`), the log (`log.txt`) and the screenshots (`shots/`) there. It waits until the bridge
-answers, then prints the socket's path.
+`hookshot_ctl.py launch <game folder>` starts a game folder this way. It makes a persistent run folder (mode 0700 on
+Linux) with a manifest, `log.txt` and `shots/`. The socket stays in a separate short private folder; the manifest records
+it. The default waits until the bridge answers, then prints the socket's path. See [Sessions](#sessions).
 
 ## Security
 
@@ -83,6 +84,10 @@ game's presents so far):
 Requests on one connection may be answered out of order: a `status` sent while a `wait` is pending is answered first.
 Match replies by `id`. Lines with an `"event"` key and no `"ok"` key are subscription events (see `subscribe`).
 
+`protocol:1` allows additive fields, commands and explicitly requested event kinds. Clients ignore unknown fields.
+The OoT snapshot fields and `oot` subscription below are compatible additions: existing fields keep their types and
+the default subscription is unchanged.
+
 A client may shut its sending side once its requests are sent (`printf '...\n' | socat - UNIX-CONNECT:<path>`): the
 bridge reads no more from it, ends its subscription, answers what it waits for, and closes the connection once those
 replies are out. (Linux; a Windows pipe has no half-close.)
@@ -118,6 +123,12 @@ axes it sets, its sticks replace a script's (`HOS_INPUT_SCRIPT`); the player's o
 it, the larger deflection winning, unless the input is exclusive. `"exclusive": true` keeps the player's own pad, keyboard and mouse out from
 the request until the input ends (compare `HOS_INPUT_EXCLUSIVE`).
 
+The client's `press` and `stick` take frame counts unchanged. For `sequence --hos`, it converts seconds (`at`) and
+milliseconds (hold) at **60 game presents per second, rounding to the nearest frame with halves up**, and clamps a
+positive hold to at least one frame, just as the bridge's HOS-script parser does. The fake receives those integer
+`steps`, not a seconds/ms string: `0.025:A/25,1:B/1` becomes `(at=2, frames=2), (at=60, frames=1)`.
+These are game-clock times, not a promise of elapsed wall time; the bridge still accepts HOS scripts from other clients.
+
 Buttons use the names `HOS_INPUT_SCRIPT` uses: `A B X Y L R ZL ZR PLUS MINUS LS RS LEFT UP RIGHT DOWN`. The stick
 directions are `LUP LDOWN LLEFT LRIGHT RUP RDOWN RLEFT RRIGHT`, and `LX= LY= RX= RY=` set an axis from -32767 to 32767
 (positive y is up). Names are given as `"A+B"` or `["A", "B"]`.
@@ -140,10 +151,34 @@ version.
 ```
 
 `map` is the game's own name for the map (`Sequence_CurrentBanc`), read on the game's thread with the player's update
-every 250 ms: the last one known, so it stays through loads and menus, and it is `null` until Link was first seen. `game`
-(OoT, read with it) says whether an event is playing (a cutscene, a map change's), whether a map is loading
-(`Sequence_IsLoadingBanc`) and Link's age: `{"event":false,"loading":false,"age":"child"}`, `null` until then. A script
-that steps through places waits for `event` and `loading` to be false before its next step, instead of a log line.
+every 250 ms: the last one known, so it stays through loads and menus, and it is `null` until Link was first seen.
+`game` is OoT's read-only snapshot from Link's update. A `status` request asks for one fresh snapshot; requests
+waiting together share that capture. The socket thread never reads the guest or blocks waiting for the game.
+If no Link update arrives within 250 ms (title, pause or loading), the reply keeps the last snapshot and its
+original `frame`/`t`. Before a snapshot is available it returns only the original typed fields if known, or `null`.
+
+| `game` field | meaning |
+|---|---|
+| `frame`, `t` | Present number at sampling, and host monotonic-clock seconds; `status.frame` is the reply's present |
+| `map` | The sampled map, or `null` if unreadable (top-level `map` retains the last known map) |
+| `pos` | Link's `[x,y,z]` in metres, or `null`; during a cutscene the actor's position, not necessarily his drawn pose |
+| `facing`, `camera` | Link's yaw and the gameplay camera's yaw in degrees, 0 toward +z, 90 toward +x |
+| `event`, `loading`, `age` | Event playing (cutscene/conversation/map change), map loading, `"child"` or `"adult"` |
+| `life`, `max_life`, `rupees` | Current and maximum quarter hearts, rupees |
+| `prompt`, `music` | A-button action and music, as named by the game |
+
+Unreadable or non-finite sampled fields are `null`, except that `status.game` keeps the original `event`,
+`loading` and `age` types by falling back to their last typed values. If neither source has those values,
+`status.game` is `null`; `oot` events keep unreadable fields as `null`. Guest reads are range-checked in Link's
+update, never on the socket thread. This is not a whole-game atomic snapshot.
+Samples stop on the title, while paused and wherever Link is not updated. Compare `game.frame` with the reply's
+`frame` before steering: a retained snapshot during a load is not evidence of current control. Scripts wait for
+fresh samples with `event` and `loading` false before their next step.
+
+`status` does not scan all flags. Watched values and changed flags belong to each `oot` subscription below.
+With no pending `status` request, due `oot` subscriber or unfinished requested change pass, the snapshot path
+returns after a cheap atomic deadline check: no guest reads, clock queries, JSON formatting or snapshot lock. Merely
+opening the bridge does not capture every present. A disconnected/timed-out status request drops its demand.
 
 `state` is a guess from the draws a frame, the way test scripts read the log:
 
@@ -242,9 +277,33 @@ were, and replies `failed`. A `fixed` row replies `failed` too. The reply has th
 **subscribe**: a stream of events on this connection until `unsubscribe` or a disconnect; another `subscribe` replaces
 it. Arguments:
 
-- `events`: any of `present`, `state`, `log` and `map`. The default is `["present", "state"]`.
-- `every`: frames between present events (default 60, 1 to 216000).
+- `events`: any of `present`, `state`, `log`, `map` and `oot`. The default remains `["present", "state"]`.
+- `every`: frames between present/OoT samples (default 60, 1 to 216000).
 - `log`: only log lines that contain this text (it also turns `log` on).
+- `flags`: with `oot`, up to 64 flag names (1 to 47 letters, digits, `_` or `.`) or `0x` and eight hex digits, as an
+  array of strings. Values are looked up in Bool, Int, Float, Enum, String64 and UInt order; absent/unreadable values
+  are `null`. An Enum value is `"#"` followed by eight hex digits (MurmurHash3 of its value's name).
+- `changes`: with `oot`, `true` includes changed Bool/Int/Enum/UInt flags by hash (`false` by default). The first
+  sample reports `{}`. One baseline per table is shared by all subscribers, with at most 4096 slots scanned per
+  present across the four tables. A moved, resized, torn or unreadable table discards its current slice and starts
+  a fresh baseline. Both direct lookups and change scans reject tables above 2^22 slots.
+  Each subscriber keeps up to 32 distinct pending changes until its next sample, including while an earlier
+  sample waits to be consumed; a later change to a queued key replaces its value. If that queue is full, the
+  existing `more` field counts omitted changes (saturating at 4294967295): any nonzero `more` means the client must
+  re-read the flags it cares about. Replacement, unsubscribe and disconnect clear that subscriber's queue.
+
+A change is reported when a value differs from the shared baseline when its slice is scanned, so a value that changes
+and changes back between scans of that slice is not reported. With continuously due subscribers and stable tables, a
+full pass takes `ceil(total table slots / 4096)` presents, which bounds detection delay; delivery also waits for the
+subscriber's cadence and any pending sample (the fixture's four 2049-slot tables take three presents, and real table
+sizes and cost have not been measured).
+Read `control: oot changes scan:` in `hookshot_log.txt` after the first complete set of change baselines.
+The line gives the Bool, Int, Enum and UInt slot counts, their sum, the slice size and presents per full pass.
+It is written once, then again only after a table size changes and its new baseline is complete. This makes the
+real-table delay visible in an ordinary run; it is not a frame-time cost measurement.
+
+A `flags` or `changes` subscription can read any GameDataMgr value, the save's whole flag state, without
+`HOS_CONTROL_MEM`. This is part of what a same-user client can see when the control bridge is enabled.
 
 The events carry `sub`, the subscribe request's `id`:
 
@@ -255,6 +314,21 @@ The events carry `sub`, the subscribe request's `id`:
 < {"event":"map","sub":10,"frame":5900,"map":"HyruleField_Child","from":"KokiriForest_Child"}
 < {"event":"log_dropped","sub":10,"lines":40}
 ```
+
+```
+> {"id":11,"cmd":"subscribe","events":["oot"],"every":6,"flags":["PlayerStatus.Life","0x31ab5580"],"changes":true}
+< {"id":11,"ok":true,"frame":6000,"events":["oot"],"every":6}
+< {"event":"oot","sub":11,"frame":6002,"game":{"t":102.1,"frame":6001,"map":"...","pos":[0,0,0],
+   "facing":0,"camera":0,"event":false,"loading":false,"age":"child","life":12,"max_life":12,"rupees":0,
+   "prompt":"...","music":"...","flags":{"PlayerStatus.Life":12,"0x31ab5580":12},"changed":{}}}
+```
+
+`oot` is a sampled event, unlike `state` (a change in the draw-count guess). Its first sample comes at the next
+Link update, then no sooner than `every` presents after the preceding sample. Its nested `game.frame` dates the
+sample; the envelope's `frame` is the bridge's current present. No repeated old samples are emitted during a pause.
+A pending sample is retained until the bridge takes it; if the bridge is delayed, sampling resumes afterwards rather
+than overwriting its changes. Frame gaps can therefore exceed `every`. A client that stops reading is still dropped
+at the bridge's output limit. Flag scanning is off unless that connection asks for it and stops when it leaves.
 
 **teleport** (OoT): the Debug tab's teleport, by destination: `to`, the destination's index or one of its maps' names
 (any case). Without `to`, the destinations: `{"destinations":[{"index":0,"child":"KokiriForest_Child","adult":
@@ -334,7 +408,8 @@ The client:
 - `launch --save FOLDER [--slot NN]` copies a save folder (`account.sav`, `option.sav`, `slot_NN/`) into the run's
   data folder before the game starts: `--data`, or `data/` in the run folder. With `--slot` (`03` or `slot_03`) only
   that slot is copied, so Continue loads it. The source is only read. A destination that already holds saves is
-  refused. Linux only (on Windows the game keeps its saves in its own folder).
+  refused. On Windows, use `--profile test` or an explicit `--user DIR`: the game supports `--user` on both platforms.
+  With either, the copy goes into `DIR/save/<user id>` instead of the Linux data folder.
 
 ## Guest memory
 
@@ -390,10 +465,9 @@ address past 2^53, which a JSON number cannot hold exactly; no sign, no octal). 
 < {"id":31,"ok":true,"frame":5001,"wrote":4,"addr":4300000000}
 ```
 
-TODO: named game values (scene and room id, Link's position, health, rupees, ...) through `mem get NAME` and a
-`symbols` command: planned, once addresses are located and verified for this build. `symbols` replies `unavailable` for
-now. Slot details from caption.sav or progress.sav beyond the scene and the picture (the player's name, hearts, play
-time): planned.
+Named read-only game values (Link's position, life, rupees and flags) are available through `status`/`subscribe`,
+without enabling arbitrary guest-memory access. `symbols` still replies `unavailable`. Slot details from caption.sav
+or progress.sav beyond the scene and picture (the player's name, hearts, play time) are not served.
 
 ## The client
 
@@ -418,6 +492,7 @@ python -I scripts/hookshot_ctl.py teleport 1 --arrive 30                # sent (
 python -I scripts/hookshot_ctl.py age adult --arrive 30                 # the Debug tab's Switch age, then reloaded
 python -I scripts/hookshot_ctl.py release                               # this client's inputs and abandoned ones (--all)
 python -I scripts/hookshot_ctl.py watch --events present,state --log "hid:"
+python -I scripts/hookshot_ctl.py --json watch --events oot --every 6 --flags PlayerStatus.Life,0x31ab5580 --changes
 python -I scripts/hookshot_ctl.py raw '{"cmd": "wait", "event": "frame", "frame": 9000}'
 python -I scripts/hookshot_ctl.py mem read 0x80000000 8               # needs HOS_CONTROL_MEM=ro or rw
 python -I scripts/hookshot_ctl.py mem read 0x1000000000 16 --format u32
@@ -466,6 +541,139 @@ game's clock goes on: a dialogue that a time of day brings can land in it). `sum
 (`bench-runs/<time>-<name>`, which git ignores) holds them per place, with the build's version and the lines `--grep` asked for. The log,
 the screenshots and the summary stay in that folder. Compare runs made with the same save, settings and cache state:
 the first visit to a place after a cache change compiles pipelines, so run a route once first, or measure twice.
+`launch` finds `bin/hookshot.exe` on Windows or `bin/hookshot` on Linux before the folder's top level. When `bin/`
+exists but its game is missing it refuses: the root executable is the Builder launcher, not a fallback game.
+`--exe FILE` selects a development executable. `--image FILE`, `--romfs DIR` and `--user DIR` pass the game's own
+arguments (the image is positional), on both platforms; see [the runtime parser](../host/hos_main.c) and
+[the game's command line](../README.md#running-the-game-from-the-command-line).
+
+### Sessions
+
+The default profile keeps the existing window, audio, inherited environment and save-location choices. A launch now
+also leaves a run folder under `work/control-runs` in the caller's folder. `--root DIR` chooses that parent; `--run DIR`
+chooses one new or empty folder. A non-empty folder is never reused. The short socket folder is independent of the run
+path's length. `--json launch` still returns `socket`, `pid`, `run` and `log`, now with the rest of the manifest.
+
+```sh
+python -I scripts/hookshot_ctl.py --json launch GAME_DIR --profile test --run work/my-run --ready present
+python -I scripts/hookshot_ctl.py runs work/control-runs
+python -I scripts/hookshot_ctl.py --run work/my-run show
+python -I scripts/hookshot_ctl.py --run work/my-run press A --frames 8
+python -I scripts/hookshot_ctl.py --run work/my-run shot
+python -I scripts/hookshot_ctl.py --run work/my-run stop --timeout 10
+```
+
+`--run DIR` re-attaches from any later invocation, without depending on the first client's memory or environment.
+It is an alternative to `--sock`. The client checks the game's pid **and birth identity** before connecting. A small
+background instance of the same script remains the parent of the game, waits for it, and records its actual exit code,
+even after the launching shell or a server goes away. `finish` marks an orphaned run whose game and owner are both gone;
+it does not invent an exit code. `show` and `log` work after exit without connecting to the game.
+
+`--profile test` sets `HOS_HEADLESS=1`, `HOS_AUDIO=0` and `HOS_ENV_FILE` to the run's owned empty file, and passes
+`--user <run>/user`. These profile choices win over conflicting `--env` entries. The runtime reads that file
+**instead of** the ambient `hookshot_env.txt` (`load_hookshot_env` in `host/hos_main.c`), not as another layer.
+The profile starts fresh, or `--save FOLDER [--slot NN]` makes a plain-file copy using the existing source checks.
+An ordinary symlinked parent (such as `/home` on Linux) is allowed; source/destination overlap is checked by resolved
+paths. Existing `save/` and user-id entries inside the chosen user root must be real folders, not links.
+It refuses `--data` and `--user`: neither can redirect a test run onto the source save. The same explicit runtime
+`--user` argument makes isolation possible on Windows; the old Windows `--save` without it still refuses.
+Inherited environment, the game's own options and driver caches are not isolated by this profile.
+
+Inputs sent **by run folder** default to `exclusive:true` for test runs; `--no-exclusive` opts out. This covers each
+queued input's delay and hold, not the gaps between requests or an unrelated `--sock` client. Raw JSON is sent as given.
+It is not a run-long physical-device lock. No new game command or native input policy is added.
+
+`--ready bridge|present|play` selects what launch waits for:
+
+| Level | Required status |
+|---|---|
+| `bridge` (default) | A successful `status` reply |
+| `present` | A successful reply with at least one game-present frame |
+| `play` | A presented frame, `state=play`, `stalled=false`, and known-false `game.event` and `game.loading` |
+
+`play` does not press through the title or load a save for you. Another `--run` invocation can send inputs while
+launch waits, or the game can have an explicit input script. The state is still the bridge's draw-count heuristic;
+main's `game` snapshot has no sample timestamp, so this is **not a freshness guarantee**. `--timeout` bounds readiness
+after admission. A failed start or readiness timeout terminates and reaps the game it started, leaves a failed
+manifest and log, and explains the last condition. It never silently abandons a timed-out game.
+Readiness checks the child's exit status before and after each bridge poll and again at the deadline: an observed exit
+is reported with its code, not hidden behind a readiness timeout.
+
+`stop` asks the original owner to send the bridge's `quit`, then waits for the game, supervisor and optional wrapper
+to exit and close their log handles. `finish` also refuses while any of those identities is still live. A quit timeout
+returns status 3 with `process_exited:false`; the game stays owned and running. Only `--terminate` allows the original
+owner to terminate its child after that timeout (and kill it after five more seconds). The manifest reports the method
+and actual exit code. An attaching client never sends an OS signal to a pid from disk; if the owner is gone it refuses
+forced stopping. There is no command to adopt an arbitrary `--sock` game as an owned process.
+Stop also rechecks the child at a wait deadline before reporting a timeout or escalating. A child found already exited
+is not reported as forcibly terminated.
+The bridge's `game_quit` flushes the log and exits, **but has no save-in-progress barrier**. `save_drain` is
+`unsupported`, or `unknown` for an observed orphan exit, never `clean`. A copied save is not a validated checkpoint.
+
+For a development build, `--cwd DIR --image FILE --romfs DIR --user DIR` separates working/cache files from the image
+and user files. `--cwd` needs `--image`: without an image argument the runtime changes back to the game folder.
+`--wrapper '["admission-program","argument"]'` puts an optional command before the **lifetime supervisor**, not before
+the short-lived launch client. It must run the remaining argv unchanged and wait for it, so its admission remains held
+until the game exits. Queue time is separate from the readiness timeout. The wrapper supplies machine policy and any
+wall-time bound; the client contains no GPU locks or machine-specific paths. No shell parses the JSON argv.
+
+### Run log
+
+```sh
+python -I scripts/hookshot_ctl.py --json --run work/my-run log --lines 40
+python -I scripts/hookshot_ctl.py --json --run work/my-run log --since 1234
+python -I scripts/hookshot_ctl.py --json --run work/my-run log --since 1234 --expect 'some new line' --timeout 10
+python -I scripts/hookshot_ctl.py --run work/my-run log --since 1234 --expect 'input.*completed' --regex
+```
+
+The cursor is a **byte offset**, returned with `text`, `start`, `more` and `truncated`; keep it before sending the input
+whose log you want to observe. `--expect` requires `--since` and cannot match text before it. Matching is case-sensitive;
+`--regex` uses Python regular expressions, supplied by the trusted caller. Read/output defaults to 65,536 bytes
+(`--bytes`, at most 1 MiB); the tail is at most 10,000 lines. `more` means continue at `cursor`; `truncated` means the
+tail's byte bound omitted older text. Very long matches beyond the bounded search window are not promised. A cursor
+past EOF refuses, rather than treating an old cursor as a new file. No bridge log subscription is needed.
+A read ending inside a UTF-8 character leaves its at-most-three trailing bytes for the next read; `cursor` points
+before those bytes. This applies at a live log's current EOF too. Only a finished run's true EOF replaces an incomplete
+character. A byte limit smaller than one encoded character cannot advance over it; use at least four bytes for UTF-8.
+
+### Manifest version 1
+
+`manifest.json` is UTF-8 JSON, atomically replaced under `manifest.lock`; readers hold the same lock so they cannot
+prevent replacement on Windows. Consumers reject unknown schema versions. Paths use the platform's absolute spelling
+(a Windows short name is not a link). Times are UTC ISO-8601; unavailable values are JSON `null`. Only explicitly set environment names
+and values are recorded, not the inherited environment (explicit `--env` values can themselves be private).
+
+| Field | Meaning |
+|---|---|
+| `schema_version`, `client_version` | Schema integer `1`; client session-format release string `1` |
+| `run`, `game`, `executable`, `command`, `cwd` | Run folder, game folder, resolved executable, exact game argv, working folder |
+| `environment`, `profile` | Effective environment additions/overrides made by the client; `default` or `test` |
+| `user`, `save_source`, `slot` | Effective user folder, copied source or null, selected slot or null |
+| `socket`, `socket_dir`, `log` | Unix socket or Windows pipe name, allocated socket folder or null, run log |
+| `pid`, `process_start` | Game pid and birth identity: Linux boot ID/start ticks, Windows process-creation FILETIME |
+| `owner`, `launcher` | Supervisor and optional wrapper process `pid`/`birth` identities; never authority to signal an arbitrary process |
+| `created_at`, `started_at`, `ended_at` | Run creation, game start and final receipt times |
+| `state` | `queued`, `starting`, `running`, `stopping`, `finished` or `failed` |
+| `ready`, `ready_timeout`, `ready_reply` | Requested level, seconds after admission, observed successful status when available |
+| `wrapper` | Optional lifetime admission argv prefix |
+| `exit_code`, `process_exited`, `stop_method`, `save_drain` | Child receipt and honest shutdown result; a signal is a negative exit code on Linux |
+| `artifacts` | Acknowledged shots: `kind`, `path`, game `frame`, renderer `present`, `width`, `height` |
+| `error`, `error_code` | Failure explanation and client exit category, when available |
+| `stop_request`, `stop_result` | Owner mailbox and last reply, matched by `id`; reply has `method`, `process_exited`, `forced`, `save_drain`, and any error |
+
+**Trust:** the client starts programs and writes files with the user's authority. A run folder is not a sandbox.
+Do not load manifests, wrapper commands or executable paths from an untrusted caller. Use an owned game copy if options
+or cache writes must not affect ordinary play.
+
+The standard-library API for a future thin server is `start_session(...)`, `list_runs(root)`, `Session.attach(folder)`,
+`Session.info()`, `Session.request(cmd, timeout=None, **args)`, `Session.log(...)`, `Session.expect_log(...)`,
+`Session.stop(timeout=10, terminate=False)` and `Session.finish()`. `Session.connect()` returns a separate `Bridge`
+for streaming; serialize requests on a connection, and keep subscriptions on their own connection.
+`start_session` and `Session.attach` return a session handle; its methods return ordinary dictionaries, and `list_runs`
+returns a list of manifest dictionaries. Filesystem, JSON and argument failures at these API boundaries raise `Failed`
+with `code=2`; a game refusal has code 1 and a timeout code 3. A timed-out graceful stop instead returns the manifest
+with its explicit `process_exited:false` result, so callers can decide whether to request force.
+
 
 ## Known limits
 
@@ -478,7 +686,7 @@ the first visit to a place after a cache change compiles pipelines, so run a rou
 - **The first `option_get` or `option_set`** after start can wait, on the bridge's thread, for the start-up check of
   the upscalers (NVIDIA's NGX start: about 3 s). The game does not wait for it; other replies to every client wait
   that long.
-- **Named game values** (`mem get NAME`, `symbols`) are not served yet (see Guest memory).
+- **OoT samples** stop when Link is not updated. They contain no actor list and do not turn `symbols` into a supported command.
 - `HOS_CONTROL_MEM=rw` writes were checked against the game's memory (written, read back, put back), not against the
   picture the GPU draws from a written value.
 
@@ -488,7 +696,12 @@ the first visit to a place after a cache change compiles pipelines, so run a rou
 Linux, the named pipe on Windows (the CI's windows-2022 runner). On Windows it also checks the pipe's access control:
 another first instance of the name and a second bridge on it are refused, and the DACL, read back through a client's
 handle, is protected with a single ACE for the current user. `tests/test_hookshot_ctl.py` drives the client against a
-fake bridge on the same transports. `tests/test_hookshot_bench.py` checks the benchmark route's steps against a stand-in
-bridge on a fake clock, and its sums against log lines in the game's own format.
+fake bridge on the same transports. It covers durable-session reattachment with sampled status, watched flags and
+changes, escaped text and null snapshots as well as readiness and shutdown. `--source-root OTHER_CHECKOUT` selects
+another checkout's client for negative checks; `HOOKSHOT_CTL_SOURCE` selects a client file when that argument is absent.
+`tests/test_hookshot_bench.py` checks the benchmark route's steps against a stand-in bridge on a fake clock, and its
+sums against log lines in the game's own format.
+`tests/test_oot_state_tap.py` uses bounded fake guest memory and the real bridge transport for sampled values,
+per-connection watches/changes, cadence, nulls, table limits, hashes, subscription lifecycle and wiring.
 
 What is not tested is under Known limits.

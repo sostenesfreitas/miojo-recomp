@@ -37,7 +37,7 @@ def main():
     if hook.index("if (!reactive::wanted()) return;") > hook.index("texture_frame_no()"):
         raise SystemExit("reactive_scene_draw: work is done for every draw before RX_VK_REACTIVE is asked")
     for part in ("temporal_jitter_size(0)", "fsr3_inputs::jitter_size(0)", "upscaler_rows::is_fsr4(temporal_mode())", "at.width != seen.w || at.height != seen.h", "!at.depth",
-                 "at.color_format[0] != VK_FORMAT_B10G11R11_UFLOAT_PACK32",
+                 "!temporal_scene_format(at.color_format[0])",
                  "reactive_policy::classify(target_write_mask(p, s, 0) != 0, (s.color.blend_en & 1) != 0, s.ds.dt != 0, s.ds.dw != 0)"):
         if part not in hook:
             raise SystemExit("reactive_scene_draw: %s is gone (the mask is of the jittered scene's transparent draws alone)" % part)

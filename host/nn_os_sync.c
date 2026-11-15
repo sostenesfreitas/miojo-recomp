@@ -443,7 +443,6 @@ static int handoff_on(void) {   /* HOS_NO_HANDOFF=1: the old way (any thread may
     if (v < 0) v = env_on("HOS_NO_HANDOFF") ? 0 : 1;
     return v;
 }
-/* a waiter in: (cv->lk held) */
 /* a waiter counted in for SignalConditionVariable's check, before it takes cv->lk: a signal that reads 0 then came
    before this waiter started to wait. Counted after cv->lk instead, a signal made without the guest mutex could read 0
    while the waiter held cv->lk between its generation read and cv_enter, and return without the wake the old Signal
@@ -451,6 +450,7 @@ static int handoff_on(void) {   /* HOS_NO_HANDOFF=1: the old way (any thread may
 static void cv_count_in(Obj *cv) {
     __atomic_add_fetch(&cv->cv_waiting, 1, __ATOMIC_SEQ_CST);
 }
+/* a waiter in: (cv->lk held) */
 static void cv_enter(Obj *cv, Obj *m) {
     if (cv->cv_in && cv->cv_mutex != m) cv->cv_mixed = 1;
     if (!cv->cv_in) cv->cv_mixed = 0;
@@ -587,13 +587,17 @@ HLE(_ZN2nn2os28IsMutexLockedByCurrentThreadEPKNS0_9MutexTypeE) {
 HLE(_ZN2nn2os27InitializeConditionVariableEPNS0_21ConditionVariableTypeE) { fresh(ARG(0), K_COND); }
 HLE(_ZN2nn2os25FinalizeConditionVariableEPNS0_21ConditionVariableTypeE) { drop(ARG(0)); }
 /* A signal with no waiter returns at once (~2,500 signals a frame in Hyrule: each took cv->lk and made a wake call, a
-   waiter there or not), as glibc's pthread_cond_signal does, and as Horizon's user mode does when the key reads 0. No
-   waiter that can still miss its predicate's change is missed: a waiter counts itself in (cv_enter) under cv->lk before
-   mutex_release_all gives the guest mutex back (sequentially consistent), so a signaller that holds the mutex, having
-   taken it after that, reads the count with the waiter in; a waiter woken and not yet out (cv_leave) still counts. A
-   signaller that does not hold the mutex can miss a waiter between its gen snapshot and its sleep, as on Horizon: with
-   the predicate changed under the mutex that waiter has not yet looked at it. HOS_CV_SIGNAL_ALWAYS=1: every signal takes
-   the lock, as before (tests/test_cv_signal_early.py) */
+   waiter there or not), as glibc's pthread_cond_signal does, and as Horizon's user mode does when the key reads 0. It
+   skips only a signal the old one (which always took cv->lk) could equally have made before the wait began. A waiter
+   counts itself in (cv_count_in, sequentially consistent) while it still holds the guest mutex, before it takes cv->lk
+   and reads gen. A signaller that reads 0 is ordered before that count-in, and so before the waiter's gen read: the
+   old Signal, run in full at that point, raised gen before the waiter read it, and the waiter slept past it all the
+   same. A signaller that holds the mutex took it after mutex_release_all gave it back (sequentially consistent, after
+   the count-in), so it always reads the waiter in; a predicate changed under the mutex before a signal that reads 0
+   was changed before the waiter took the mutex, and the waiter sees it when it checks. Every count-in has its
+   count-out, in cv_leave under cv->lk, on every way out of Wait and TimedWait, a timeout included: a waiter woken and
+   not yet out still counts (a signal then takes the lock, as before), and the count never drifts up to turn the early
+   return off. HOS_CV_SIGNAL_ALWAYS=1: every signal takes the lock, as before (tests/test_cv_signal_early.py) */
 static int cv_signal_always(void) {
     static int v = -1;   /* (atomic: the first signals of several threads read it at once) */
     int on = __atomic_load_n(&v, __ATOMIC_RELAXED);
@@ -891,6 +895,7 @@ HLE(_ZN2nn2os19TimedWaitLightEventEPNS0_14LightEventTypeENS_8TimeSpanE) {
 /* System events are created by other HLE APIs (vsync, audio device changes ...) with hos_system_event_init. */
 void hos_system_event_init(uint64_t key, int autoclear) { event_init(key, 0, autoclear); }
 void hos_system_event_signal(uint64_t key) { event_signal(obj(key, K_EVENT)); }
+void hos_system_event_clear(uint64_t key) { event_clear(obj(key, K_EVENT)); }   /* (nn_video.c: a decoder that is full) */
 HLE(_ZN2nn2os18DestroySystemEventEPNS0_15SystemEventTypeE) { drop(ARG(0)); }
 HLE(_ZN2nn2os16ClearSystemEventEPNS0_15SystemEventTypeE) { event_clear(obj(ARG(0), K_EVENT)); }
 HLE(_ZN2nn2os15WaitSystemEventEPNS0_15SystemEventTypeE) { logged_wait(c, obj(ARG(0), K_EVENT), 0, 0, "system"); }

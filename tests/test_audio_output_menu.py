@@ -1,4 +1,4 @@
-"""The Insert menu's Audio output (Auto, Stereo, 5.1) reaches the speakers the game is told about (host/nn_audio.c).
+"""The Insert menu's Audio output (Auto, Stereo, 5.1, Mono) reaches the speakers the game is told about (host/nn_audio.c).
 
 The real au_speakers and au_menu_output from host/nn_audio.c and the menu's ini_key, tx_audio_output and hn_audio_output
 from gpu/vk/vk_menu.cpp are compiled together: the fixture saves the row's choice under the key the menu would write, then
@@ -18,12 +18,21 @@ RUN_ALL_ARGS = ["--cxx", "g++"]
 ROOT = Path(__file__).resolve().parents[1]
 
 FIXTURE = r"""
+#include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <cstdint>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
+#include "host/hos_wide_size.h"
+#include "gpu/vk/display_modes.h"
+using namespace mkwvk;
+std::vector<display_modes::Size> screen_modes() { return {}; }
+bool screen_size(uint32_t*, uint32_t*) { return false; }
+bool host_screen_size(uint32_t*, uint32_t*) { return false; }
 
 using DWORD = unsigned long;
 constexpr int MAX_PATH = 260;
@@ -45,18 +54,28 @@ struct { int output_res, vsync, resolution, fps_cap, upscale, dlss, handheld, ul
 MENU
 int main(int argc, char **argv) {
     assert(argc == 7);
+    const Row output_row = {1, "Audio output", &opts.audio_output};
+    for (int v = 0; v <= 3; v++) {
+        opts.audio_output = v;
+        assert(row_restart_value(output_row) == (v == 3 ? 1 : v));
+    }
+    const Row other_row = {1, "VSync", &opts.vsync};
+    opts.vsync = 3;
+    assert(row_restart_value(other_row) == 3);   /* no other row's restart tracking changes */
     const char *saved = argv[2];
     device_channels = atoi(argv[3]);
     const int want = atoi(argv[4]), want_asked = atoi(argv[5]);
     /* (plain values: the menu adds " (after restart)" to a restart row's label itself) */
     assert(!strcmp(tx_audio_output(0), "Auto") && !strcmp(tx_audio_output(1), "Stereo"));
-    assert(!strcmp(tx_audio_output(2), "5.1") && !strcmp(tx_audio_output(3), "Auto") && !strcmp(tx_audio_output(-1), "Auto"));
-    for (int v = 0; v <= 2; v++) assert(hn_audio_output(v, -1) && hn_audio_output(v, 0) && !hn_audio_output(v, 1));
+    assert(!strcmp(tx_audio_output(2), "5.1") && !strcmp(tx_audio_output(3), "Mono") && !strcmp(tx_audio_output(4), "Auto"));
+    assert(!strcmp(tx_audio_output(-1), "Auto"));
+    for (int v = 0; v <= 3; v++) assert(hn_audio_output(v, -1) && hn_audio_output(v, 0) && !hn_audio_output(v, 1));
     if (strcmp(saved, "-")) {   /* (the lines as the menu's save writes them: the row's key, around others) */
         const Row row = {1, argv[1], &opts.audio_output};
         FILE *f = fopen("hookshot_options.ini", "w");
         assert(f);
-        fprintf(f, "output_res=1\n%s=%s\nmicrophone=1\noptions_version=3\n", ini_key(row), saved);
+        fprintf(f, "output_res=1\nmicrophone=1\noptions_version=3\n");
+        if (strcmp(saved, "missing")) fprintf(f, "%s=%s\n", ini_key(row), saved);
         fclose(f);
     }
     const int n = au_speakers();
@@ -79,7 +98,10 @@ CASES = (
     ("0", None, 2, 2, 1, "the default output has 2 channels"),
     ("1", None, 6, 2, 0, "stereo for the game (the Insert menu's Audio output)"),
     ("2", None, 2, 6, 0, "5.1 for the game (the Insert menu's Audio output)"),
-    ("3", None, 2, 6, 0, "5.1 for the game (the Insert menu's Audio output)"),   # (the menu shows a hand-edited 3 as 5.1)
+    ("3", None, 6, 2, 0, "stereo for the game (the Insert menu's Audio output)"),
+    ("4", None, 6, 2, 0, "stereo for the game (the Insert menu's Audio output)"),   # clamped to Mono
+    ("3", "6", 2, 6, 0, "5.1 for the game (HOS_AUDIO_CHANNELS)"),
+    ("missing", None, 6, 6, 1, "the default output has 6 channels"),
     ("-1", None, 6, 6, 1, "the default output has 6 channels"),
     ("2", "2", 6, 2, 0, "stereo for the game (HOS_AUDIO_CHANNELS)"),
     ("1", "6", 2, 6, 0, "5.1 for the game (HOS_AUDIO_CHANNELS)"),
@@ -105,18 +127,22 @@ def main():
     assert row, "the Insert menu has no Audio output row"
     tab, name, lo, hi, step, text, hint, restart, exempt = row.groups()
     assert (tab, lo, hi, step, text, hint, restart, exempt) == \
-        ("AUDIO", "0", "2", "1", "tx_audio_output", "hn_audio_output", "true", "true"), row.groups()
+        ("AUDIO", "0", "3", "1", "tx_audio_output", "hn_audio_output", "true", "true"), row.groups()
     host = between(audio, "/* (hookshot) The Insert menu's Audio output", "/* The device's format,")
     hints = re.search(r'MENU_HINTS\(hn_audio_output,.*?\)\n(?=\S)', menu, re.S)
     assert hints, "no MENU_HINTS(hn_audio_output, ...)"
     menu_part = between(menu, "/// A row's hints from a table", "const char* tx_framegen(") + hints.group(0) + \
         between(menu, "const char* tx_audio_output(int v) {", "const char* tx_robust(") + \
         between(menu, "const char* ini_key(const Row& r) {", "// (hookshot) the controls, kept by the host")
+    menu_part += between(menu, "struct Out {", "/// The choice of size w x h:")
+    menu_part += between(menu, "int row_restart_value(const Row& r) {", "void restart_init() {")
+    assert "restart_state.add(row_restart_value(rows[i]))" in menu
+    assert "now[restart_slot[i]] = row_restart_value(rows[i]);" in menu
     with tempfile.TemporaryDirectory(prefix="audio-output-menu-") as tmp:
         work = Path(tmp)
         source, exe = work / "fixture.cpp", work / "fixture.exe"
         source.write_text(FIXTURE.replace("HOST", host).replace("MENU", menu_part), encoding="utf-8")
-        subprocess.run([args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", str(source), "-o", str(exe)], check=True)
+        subprocess.run([args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-I" + str(ROOT), str(source), "-o", str(exe)], check=True)
         for saved, env_channels, device, want, asked, log in CASES:
             ini = work / "hookshot_options.ini"
             if ini.exists():
@@ -126,7 +152,7 @@ def main():
             if env_channels is not None:
                 env["HOS_AUDIO_CHANNELS"] = env_channels
             subprocess.run([str(exe), name, saved, str(device), str(want), str(asked), log], cwd=work, env=env, check=True)
-    print("PASS: Audio output: a restart row; Auto follows the device, Stereo and 5.1 are told to the game, HOS_AUDIO_CHANNELS "
+    print("PASS: Audio output: a restart row; Auto follows the device, Stereo/Mono use two speakers, 5.1 uses six, HOS_AUDIO_CHANNELS "
           "over them")
 
 

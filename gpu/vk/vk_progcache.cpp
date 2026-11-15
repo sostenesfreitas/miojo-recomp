@@ -1,7 +1,7 @@
 // (hookshot) The program cache: hookshot_programs.bin (and its .idx) beside the game, what translation made, kept between runs; its
 // reads for play, the precompile, the prediction and the prepare; and the sizes of the prepare's worker pools.
 //
-// Not part of the translator stamp (nx2/build.py hashes vk_shader.cpp, vk_bank.cpp, vk_state.h, vk_api.h and the recompiler's
+// Not part of the translator stamp (nx2/translator_files.py: vk_shader.cpp, vk_bank.cpp, vk_state.h and the recompiler's
 // folders): a change here keeps every player's translated programs. What the cache is good for is program_cache_stamp: the
 // translator's stamp (translator_stamp, vk_shader.cpp) and kProgramCacheFormat below. A change to what a record holds or how it is
 // laid out (put_head/get_head, put_info/get_info, program_cache_save/program_cache_read, the file and index heads) must raise
@@ -40,6 +40,7 @@
 #include "vk_paths.h"
 #include "vk_internal.h"
 #include "vk_progcache.h"
+#include "prepare_workers.h"
 #include "vk_programs.h"
 
 namespace mkwvk {
@@ -75,7 +76,7 @@ uint64_t program_cache_stamp() {
 // ---- (hookshot) The program cache, hookshot_programs.bin beside the executable: what translation made, by the key of the
 // stages' code and inputs. A program met for the first time stopped the frame for its translation, 9 s of it each run,
 // the long stutters when walking somewhere (replay workers in jobs_wait for up to 150 ms). The pipelines themselves were
-// already kept (mkw_vk_pipelines.bin). Written as made; good for this translator (HOOKSHOT_SHADER_STAMP) and these switches only
+// already kept (hookshot_vk_pipelines.bin). Written as made; good for this translator (HOOKSHOT_SHADER_STAMP) and these switches only
 // (a file made by another starts again). RX_VK_NO_PROGRAM_CACHE=1: off ----
 std::mutex disk_mu;
 // (read as wanted: with every program of the game in it the file is gigabytes, and it was read into memory whole)
@@ -132,10 +133,7 @@ void disk_init() {
         // (hookshot) RX_VK_PROGRAM_CACHE_ZSTD=1: each record compressed with zstd, in a file of its own so that a build
         // without this switch never reads it. SPIR-V compresses about 7.7x at zstd's level 3.
         disk_zstd = env_on("RX_VK_PROGRAM_CACHE_ZSTD");
-        char exe[MAX_PATH];
-        const DWORD n = game_module_path(exe, MAX_PATH);
-        std::string path(exe, n);
-        path = path.substr(0, path.find_last_of("\\/") + 1) + (disk_zstd ? "hookshot_programs.zst.bin" : "hookshot_programs.bin");
+        const std::string path = cache_path(disk_zstd ? "hookshot_programs.zst.bin" : "hookshot_programs.bin");   // (vk_paths.h)
         // (one Hookshot at a time on a cache: a second one, started while the first wrote, took the record being written for one
         // cut short and cut the file there, under the first, whose list of records then named bytes written over since. Held
         // until the process ends)
@@ -502,7 +500,7 @@ void program_cache_read(FILE* in, std::mutex* mu, uint64_t key, const std::vecto
                 ok = false;
                 break;
             }
-            st.module = make_module(spirv);
+            st.module = make_module(spirv, key, nullptr);
             st.phis = fallback_size::spirv_phis(spirv.data(), spirv.size());
             ok = ok && st.module;
         }
@@ -597,11 +595,13 @@ std::unique_ptr<Program> program_cache_read_light(FILE* in, std::mutex* mu, uint
     return p;
 }
 namespace {
-/// (in: a handle on the cache's file, used under mu when given) the code read and the module made
-bool complete_from(Program& p, FILE* in, std::mutex* mu) {
+/// (in: a handle on the cache's file, used under mu when given) the code read and the module made. busy: Intel's compiler
+/// gate only tried (make_module); while another thread holds it, *busy is set, false comes back and the program is as it was
+bool complete_from(Program& p, FILE* in, std::mutex* mu, bool* busy = nullptr) {
     if (!p.code_words) return !p.failed;
     const int64_t code_at = p.code_at;
-    std::vector<uint32_t> spirv((size_t)p.code_words);
+    const uint64_t words = p.code_words;
+    std::vector<uint32_t> spirv((size_t)words);
     p.code_words = 0;
     bool ok = in != nullptr;
     if (ok) {
@@ -611,7 +611,11 @@ bool complete_from(Program& p, FILE* in, std::mutex* mu) {
         ok = fread(spirv.data(), 4, spirv.size(), in) == spirv.size();
     }
     Stage& st = p.stages[0];
-    if (ok) st.module = make_module(spirv);
+    if (ok) st.module = make_module(spirv, p.key, busy);
+    if (ok && !st.module && busy && *busy) {   // (not made yet, not failed: a worker completes it, behind the gate)
+        p.code_at = code_at, p.code_words = words;
+        return false;
+    }
     if (!ok || !st.module) {
         static std::atomic<int> logged{0};
         if (logged++ < 20)
@@ -628,6 +632,13 @@ bool complete_from(Program& p, FILE* in, std::mutex* mu) {
 bool program_cache_complete(Program& p) {
     std::lock_guard lk(light_mu);
     return complete_from(p, disk_in, &disk_mu);
+}
+/// (the dispatch's, on the replay thread) program_cache_complete with Intel's compiler gate only tried: while a worker holds
+/// it, *busy is set, false comes back and the program is left as it was, for a worker to complete (vk_draw.cpp dispatch)
+bool program_cache_complete_ask(Program& p, bool* busy) {
+    *busy = false;
+    std::lock_guard lk(light_mu);
+    return complete_from(p, disk_in, &disk_mu, busy);
 }
 /// (the load at a program's create call, vk_programs.cpp) the same for a program no other thread has yet, with the worker's
 /// own handle on the file: neither light_mu nor disk_mu is held through its read, which a dispatch on the replay's thread
@@ -949,6 +960,21 @@ unsigned usable_cpus() {
 }
 unsigned half_cpus() {
     return std::max(1u, std::min(std::max(1u, std::thread::hardware_concurrency()) / 2, usable_cpus()));
+}
+bool segment_heap() {
+#ifdef _WIN32
+    return prepare_workers::segment_heap_signature(GetProcessHeap());
+#else
+    return false;
+#endif
+}
+unsigned prepare_cpus() {
+    uint64_t avail_mb = 0;
+#ifdef _WIN32
+    MEMORYSTATUSEX m{sizeof m};
+    if (GlobalMemoryStatusEx(&m)) avail_mb = m.ullAvailPhys >> 20;
+#endif
+    return prepare_workers::count(half_cpus(), usable_cpus(), avail_mb, segment_heap());
 }
 
 } // namespace mkwvk

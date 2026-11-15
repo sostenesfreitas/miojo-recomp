@@ -7,6 +7,11 @@ image.bin nor its log's folder and closed with nothing on screen. activeCodePage
 every A function and the C runtime's narrow file functions UTF-8 for the whole process, its DLLs too (hookshot_vk.dll,
 SDL2, FFmpeg). host/hos_main.c says so in a message box when the Windows is too old for it and the folder's name needs it.
 
+heapType SegmentHeap (Windows 10 2004 and newer; older ones ignore it): the process heap is the segment heap, not the NT heap.
+The shader preparation's workers compile in the graphics driver, and AMD's compiler allocates and frees through the process heap
+from all of them at once: on the NT heap they queued on its one lock, and more workers ran slower. gpu/vk/prepare_workers.h has
+the measurements, and gives the first part of the preparation more workers when this heap is the one in use.
+
     python nx2/win_manifest.py [out.res]
 """
 import os
@@ -19,6 +24,7 @@ MANIFEST = b"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+      <heapType xmlns="http://schemas.microsoft.com/SMI/2020/WindowsSettings">SegmentHeap</heapType>
     </windowsSettings>
   </application>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">

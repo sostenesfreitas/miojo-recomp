@@ -15,8 +15,8 @@ never will. That includes:
 
 - the `.nup`, `romfs`, `exefs`, `.nso`, `.nca`, `.nsp`, `.xci` or `.nsz`/`.xcz` files, and any title keys;
 - `work/` and everything in it: the extracted dump, `image.bin`, the lifted C, test builds, runs and screenshots;
-- `hookshot.exe`, `hookshot_vk.dll`, `hookshot_programs.bin` (and its `hookshot_programs.idx`), `hookshot_pipelines.bin`,
-  `mkw_vk_pipelines.bin` and other build output;
+- `hookshot.exe`, `hookshot_vk.dll` and other build output, and the game folder's `cache/` (`hookshot_programs.bin` and
+  its `.idx`, `hookshot_pipelines.bin`, `hookshot_vk_pipelines.bin`);
 - saves (`user/`), `hookshot_options.ini`, `hookshot_env.txt` and `language.txt`.
 
 Do not open an issue or a PR asking where to get the game, how to decrypt it, or for someone else's files. A

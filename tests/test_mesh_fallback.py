@@ -183,7 +183,7 @@ def main():
         raise SystemExit("the fallback still makes a record and payload pair for every program")
     if "fallback_buffers()[&p]" in draw:
         raise SystemExit("the fallback buffers are still keyed by the program")
-    if "(!p.fallback || dw().prog == &p)" not in draw or "dw().prog = &p;" not in draw:
+    if "(!p.fallback || dw().prog == &p)" not in draw or "out.prog = &p;" not in draw:
         raise SystemExit("a fallback draw reusing its descriptors after a dispatch pushes the dispatch's at the compute bind point")
     if "VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT" not in VMA.read_text(encoding="utf-8"):
         raise SystemExit("the allocator does not make the fallback's buffers addressable")

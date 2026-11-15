@@ -5,7 +5,11 @@
 // native HDR, dlss_prep.comp's kSquare), and its picture is written as it is.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D src;
+#ifdef DLSS_RGBA16F
+layout(binding = 1, rgba16f) uniform writeonly image2D dst;
+#else
 layout(binding = 1, r11f_g11f_b10f) uniform writeonly image2D dst;
+#endif
 layout(push_constant) uniform P { ivec2 size; } pc;
 layout(constant_id = 0) const bool kSquare = true;   // (the square-root encoded picture made linear: off when it is linear)
 void main() {

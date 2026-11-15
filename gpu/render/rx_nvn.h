@@ -16,6 +16,9 @@
 #include "nvn_api.h"
 
 #ifdef __cplusplus
+#ifndef _Static_assert   /* (C++ spells C11's _Static_assert static_assert: clang takes either, g++ only the latter) */
+#define _Static_assert static_assert
+#endif
 extern "C" {
 #endif
 

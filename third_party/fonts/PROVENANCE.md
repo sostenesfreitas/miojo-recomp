@@ -10,3 +10,5 @@ sha256 of the files:
 9ebce4e4463c806336ee7ab353c06fe40a6ee8691b5187f32118458726e3ed82  libertinus/LibertinusSans-Bold.ttf
 a488d956f64d88b14df8a01708c5b480815107695e711d45e13561038004f0af  libertinus/LibertinusSans-Regular.ttf
 a51b4c1c5664750f4e5a758b33735863c33b6db577fa68cc236b05002f11f077  libertinus/LibertinusSerif-Semibold.ttf
+
+tree-sha256: 641138dc97e2b5887bd9a21a276075d811e23415586f1a1cabff4a0983da9532

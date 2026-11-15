@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -16,6 +17,7 @@
 #include <limits>
 #include <boost/container/small_vector.hpp>
 
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "shader_recompiler/environment.h"
@@ -32,6 +34,8 @@ struct TextureInst {
     ConstBufferAddr cbuf;
     IR::Inst* inst;
     IR::Block* block;
+    /// (Lichii 282a585a) The handle word reaches the handle only as the address of a load (ReachesOutsideLoads)
+    bool pointer_word{};
 };
 
 using TextureInstVector = boost::container::small_vector<TextureInst, 24>;
@@ -246,12 +250,21 @@ bool IsStorageImageOpcode(IR::Opcode opcode) {
     }
 }
 
+// The size_shift of the descriptor of the handle at cbuf (see TextureDescriptor). The index of an
+// array of handle program results is the element itself.
+u32 DescriptorSizeShift(const ConstBufferAddr& cbuf) {
+    return cbuf.count <= 1              ? DESCRIPTOR_SIZE_SHIFT
+           : cbuf.handle_program != ~0U ? 0U
+                                        : DynamicDescriptorSizeShift(cbuf.dynamic_offset);
+}
+
 u32 DynamicSampledTextureArrayCount(const TextureInstVector& to_replace) {
     u32 count{};
     for (const TextureInst& inst : to_replace) {
         const auto flags{inst.inst->Flags<IR::TextureInstInfo>()};
-        if (inst.cbuf.count > 1 && !IsStorageImageOpcode(IndexedInstruction(*inst.inst)) &&
-            flags.type != TextureType::Buffer) {
+        // (a handle table's array has its own size, HANDLE_TABLE_SIZE, which the cap leaves alone)
+        if (inst.cbuf.count > 1 && inst.cbuf.handle_program == ~0U &&
+            !IsStorageImageOpcode(IndexedInstruction(*inst.inst)) && flags.type != TextureType::Buffer) {
             ++count;
         }
     }
@@ -401,6 +414,14 @@ bool IsMemoryLoad(IR::Opcode opcode) {
     }
 }
 
+bool IsFloatValue(const IR::Inst& inst) {
+    constexpr IR::Type floats{IR::Type::F16 | IR::Type::F32 | IR::Type::F64 | IR::Type::F16x2 |
+                              IR::Type::F16x3 | IR::Type::F16x4 | IR::Type::F32x2 |
+                              IR::Type::F32x3 | IR::Type::F32x4 | IR::Type::F64x2 |
+                              IR::Type::F64x3 | IR::Type::F64x4};
+    return (inst.Type() & floats) != IR::Type::Void;
+}
+
 std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, const HostTranslateInfo& host_info, const IR::Block* block) {
     // A value loaded from memory is not a constant buffer word, whatever its address is built
     // from: the search does not look into a load's operands (a handle read from a storage
@@ -422,6 +443,15 @@ std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, c
         if (IsMemoryLoad(inst->GetOpcode())) {
             continue;
         }
+        // (Lichii bd0171f7) Nor into a texture instruction or floating-point math: no handle is
+        // made from them, while a register the program reuses for the handle and for a sample
+        // result (a Phi of both: OoT's clustered lights) would lead the search through the
+        // sample's coordinates to an unrelated word (c6[0x430], a float). With handle tables only
+        // (support_handle_table_arrays): RX_VK_HANDLE_TABLES=0 translates as before them.
+        if (host_info.support_handle_table_arrays &&
+            (IsTextureInstruction(*inst) || IsFloatValue(*inst))) {
+            continue;
+        }
         for (size_t arg = inst->NumArgs(); arg--;) {
             const IR::Value arg_value{ResolveTexturePhi(inst->Arg(arg), block)};
             if (arg_value.IsImmediate()) {
@@ -434,6 +464,40 @@ std::optional<ConstBufferAddr> Track(const IR::Value& value, Environment& env, c
         }
     }
     return std::nullopt;
+}
+
+// (Lichii 282a585a) Whether target is reachable from value without passing through a memory load.
+// A word reached only through loads is part of an address the program dereferences, never the
+// handle itself.
+bool ReachesOutsideLoads(const IR::Value& value, const IR::Inst* target, const IR::Block* block) {
+    const IR::Value start{ResolveConditionalPhi(value, block)};
+    if (target == nullptr || start.IsImmediate()) {
+        return true;
+    }
+    std::unordered_set<const IR::Inst*> visited{start.InstRecursive()};
+    std::queue<const IR::Inst*> queue;
+    queue.push(start.InstRecursive());
+    while (!queue.empty()) {
+        const IR::Inst* const inst{queue.front()};
+        queue.pop();
+        if (inst == target) {
+            return true;
+        }
+        if (IsMemoryLoad(inst->GetOpcode())) {
+            continue;
+        }
+        for (size_t arg = inst->NumArgs(); arg--;) {
+            const IR::Value arg_value{ResolveConditionalPhi(inst->Arg(arg), block)};
+            if (arg_value.IsImmediate()) {
+                continue;
+            }
+            const IR::Inst* const arg_inst{arg_value.InstRecursive()};
+            if (visited.insert(arg_inst).second) {
+                queue.push(arg_inst);
+            }
+        }
+    }
+    return false;
 }
 
 // Builds a handle program (shader_info.h) for a value computed from constant buffer and storage
@@ -451,6 +515,21 @@ bool IsUndefined(IR::Opcode opcode) {
 thread_local std::unordered_map<const IR::Inst*, u32> g_handle_slots;
 thread_local u32 g_handle_slot_count{};
 thread_local int g_handle_depth{};
+
+// (Lichii bd0171f7) A handle read from a table at an index each invocation reads for itself (a
+// light index from a per-pixel light list: OoT's clustered lights' shadow maps) has no single
+// value for a draw. With g_handle_index_allowed, the build takes that index word as the element
+// index of a descriptor array instead (HandleOp::Index), and g_handle_index is the word, which the
+// shader then indexes the array with. Only a word read at an address no draw-wide value gives
+// (g_handle_load_depth counts the reads whose address is being built), which is scaled to a byte
+// offset (g_handle_scaled) to give the address of another read, qualifies, and one word per program.
+thread_local bool g_handle_index_allowed{};
+// HostTranslateInfo::support_handle_table_arrays of the pass running on this thread (TexturePass):
+// without it the handle builder reads no word of a 12- or 16-byte load, as before handle tables.
+thread_local bool g_handle_tables{};
+thread_local IR::Value g_handle_index{};
+thread_local int g_handle_load_depth{};
+thread_local int g_handle_scaled{};
 
 bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget,
                      const IR::Block* block);
@@ -490,11 +569,14 @@ bool BuildHandleProgram(const IR::Value& value, std::vector<u32>& code, int& bud
         g_handle_slots.emplace(inst, ~0U);
         const size_t start = code.size();
         const u32 first_slot = g_handle_slot_count;
+        const IR::Value index_before{g_handle_index};
         result = BuildHandleNode(value, code, budget, block);
         g_handle_slots.erase(inst);
         if (!result) {
             // The Tee of every value the dropped code kept goes with it: a later use of one of
-            // them (another Phi input) must build it again, not load a slot nothing wrote.
+            // them (another Phi input) must build it again, not load a slot nothing wrote. So
+            // does an index word the dropped code took.
+            g_handle_index = index_before;
             code.resize(start);
             std::erase_if(g_handle_slots, [first_slot](const auto& entry) {
                 return entry.second != ~0U && entry.second >= first_slot;
@@ -544,6 +626,30 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
                 emit(Op::Add);
             }
         };
+        // The read's address. One for a word that gives another read's address must be
+        // computable on its own: the word is the index word otherwise (see index_word).
+        const auto address = [&](const IR::Value& offset) {
+            const bool allowed{g_handle_index_allowed};
+            const int scaled{g_handle_scaled};
+            g_handle_index_allowed = allowed && g_handle_load_depth == 0;
+            g_handle_scaled = 0;
+            ++g_handle_load_depth;
+            const bool built{BuildHandleProgram(offset, code, budget, block)};
+            --g_handle_load_depth;
+            g_handle_scaled = scaled;
+            g_handle_index_allowed = allowed;
+            return built;
+        };
+        // This word as the element index of a descriptor array (g_handle_index_allowed).
+        const auto index_word = [&] {
+            if (!g_handle_index_allowed || g_handle_load_depth == 0 || g_handle_scaled == 0 ||
+                (!g_handle_index.IsEmpty() && g_handle_index.InstRecursive() != inst)) {
+                return false;
+            }
+            g_handle_index = IR::Value{const_cast<IR::Inst*>(inst)};
+            emit(Op::Index);
+            return true;
+        };
         switch (source->GetOpcode()) {
         case IR::Opcode::GetCbufU32:
         case IR::Opcode::GetCbufU32x2: {
@@ -556,7 +662,7 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
                 code.push_back(offset.U32() + extra);
                 return true;
             }
-            if (!BuildHandleProgram(offset, code, budget, block)) return false;
+            if (!address(offset)) return index_word();
             add_extra();
             emit(Op::CbufDynamic);
             code.push_back(index.U32());
@@ -567,7 +673,7 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
         case IR::Opcode::LoadStorage128: {
             const IR::Value binding{source->Arg(0)};
             if (!binding.IsImmediate()) return false;
-            if (!BuildHandleProgram(source->Arg(1), code, budget, block)) return false;
+            if (!address(source->Arg(1))) return index_word();
             add_extra();
             emit(Op::Storage);
             code.push_back(binding.U32());
@@ -587,9 +693,18 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
     case IR::Opcode::GetCbufU32:
     case IR::Opcode::LoadStorage32:
         return load_word(inst, 0);
-    case IR::Opcode::CompositeExtractU32x2: {
+    case IR::Opcode::CompositeExtractU32x2:
+    case IR::Opcode::CompositeExtractU32x3:
+    case IR::Opcode::CompositeExtractU32x4: {
+        // A word of a wider load (a handle in a table entry read 16 bytes at a time: OoT's light
+        // table, 96 bytes a light, the shadow map's handle the first word of a 16-byte load).
+        // With handle tables only (g_handle_tables).
         const IR::Value element{inst->Arg(1)};
-        if (!element.IsImmediate() || inst->Arg(0).IsImmediate()) return false;
+        if (!element.IsImmediate() || inst->Arg(0).IsImmediate() ||
+            (!g_handle_tables && inst->GetOpcode() != IR::Opcode::CompositeExtractU32x2)) {
+            g_handle_failure = inst->GetOpcode();
+            return false;
+        }
         return load_word(inst->Arg(0).InstRecursive(), element.U32() * 4);
     }
     case IR::Opcode::Phi: {
@@ -634,11 +749,21 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
     }
     case IR::Opcode::IAdd32: return binary(Op::Add);
     case IR::Opcode::ISub32: return binary(Op::Sub);
-    case IR::Opcode::IMul32: return binary(Op::Mul);
+    case IR::Opcode::IMul32:
+    case IR::Opcode::ShiftLeftLogical32: {
+        // By a constant: an index scaled to a byte offset (see index_word).
+        const bool is_shift{inst->GetOpcode() == IR::Opcode::ShiftLeftLogical32};
+        const bool scaled{inst->Arg(1).IsImmediate() || (!is_shift && inst->Arg(0).IsImmediate())};
+        g_handle_scaled += scaled ? 1 : 0;
+        const bool built{build(0) && build(1)};
+        g_handle_scaled -= scaled ? 1 : 0;
+        if (!built) return false;
+        emit(is_shift ? Op::Shl : Op::Mul);
+        return true;
+    }
     case IR::Opcode::BitwiseAnd32: return binary(Op::And);
     case IR::Opcode::BitwiseOr32: return binary(Op::Or);
     case IR::Opcode::BitwiseXor32: return binary(Op::Xor);
-    case IR::Opcode::ShiftLeftLogical32: return binary(Op::Shl);
     case IR::Opcode::ShiftRightLogical32: return binary(Op::Shr);
     case IR::Opcode::ShiftRightArithmetic32: return binary(Op::Sar);
     case IR::Opcode::INeg32: return unary(Op::Neg);
@@ -778,6 +903,124 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
 
 // Programs built while making the texture instructions of the pass running on this thread.
 thread_local std::vector<std::vector<u32>>* g_handle_programs{};
+
+// The operands following op in a handle program.
+size_t HandleOperands(HandleOp op) {
+    switch (op) {
+    case HandleOp::Cbuf:
+        return 2;
+    case HandleOp::Immediate:
+    case HandleOp::CbufDynamic:
+    case HandleOp::Storage:
+    case HandleOp::Tee:
+    case HandleOp::Load:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+// Drops the Tee operations ending a program (they keep the result for nothing), so that two
+// instructions reading the same handle share the program and the descriptor (a light loop samples
+// one table of shadow maps from dozens of places: one array, not dozens).
+void TrimTrailingTees(std::vector<u32>& code) {
+    using Op = HandleOp;
+    size_t end{};
+    for (size_t pc = 0; pc < code.size();) {
+        const Op op{static_cast<Op>(code[pc++])};
+        pc += HandleOperands(op);
+        if (op != Op::Tee) {
+            end = (std::min)(pc, code.size());
+        }
+    }
+    code.resize(end);
+}
+
+// Elements of the descriptor array of a handle read from a table at an index word (see
+// g_handle_index_allowed): the table entries a draw binds, larger indices taking the last one.
+constexpr u32 HANDLE_TABLE_SIZE = 64;
+
+// The block of each instruction and the immediate dominator of each block of the program the
+// pass on this thread runs on, built when a handle program first needs them (Cooper, Harvey and
+// Kennedy, over post order numbers).
+class Dominance {
+public:
+    explicit Dominance(const IR::Program& program) : order{program.post_order_blocks} {
+        for (size_t number = 0; number < order.size(); ++number) {
+            numbers.emplace(order[number], number);
+            for (const IR::Inst& inst : order[number]->Instructions()) {
+                blocks.emplace(&inst, order[number]);
+            }
+        }
+        idom.assign(order.size(), NONE);
+        if (order.empty()) {
+            return;
+        }
+        const size_t entry{order.size() - 1};
+        idom[entry] = entry;
+        const auto intersect = [this](size_t lhs, size_t rhs) {
+            while (lhs != rhs) {
+                while (lhs < rhs) lhs = idom[lhs];
+                while (rhs < lhs) rhs = idom[rhs];
+            }
+            return lhs;
+        };
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (size_t number = entry; number-- > 0;) {
+                size_t dominator{NONE};
+                for (const IR::Block* const predecessor : order[number]->ImmPredecessors()) {
+                    const auto it{numbers.find(predecessor)};
+                    if (it == numbers.end() || idom[it->second] == NONE) {
+                        continue;
+                    }
+                    dominator = dominator == NONE ? it->second : intersect(it->second, dominator);
+                }
+                if (dominator != idom[number]) {
+                    idom[number] = dominator;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    /// Whether def runs before use on every path to use.
+    [[nodiscard]] bool Dominates(const IR::Inst* def, const IR::Inst* use) const {
+        const auto def_block{blocks.find(def)};
+        const auto use_block{blocks.find(use)};
+        if (def_block == blocks.end() || use_block == blocks.end()) {
+            return false;
+        }
+        if (def_block->second == use_block->second) {
+            for (const IR::Inst& inst : def_block->second->Instructions()) {
+                if (&inst == def) return true;
+                if (&inst == use) return false;
+            }
+            return false;
+        }
+        const size_t target{numbers.at(def_block->second)};
+        for (size_t number = numbers.at(use_block->second); idom[number] != NONE;) {
+            if (idom[number] == number) {
+                return false; // the entry
+            }
+            number = idom[number];
+            if (number == target) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+private:
+    static constexpr size_t NONE{~size_t{0}};
+    const IR::BlockList& order;
+    std::unordered_map<const IR::Block*, size_t> numbers;
+    std::unordered_map<const IR::Inst*, const IR::Block*> blocks;
+    std::vector<size_t> idom;
+};
+
+thread_local const IR::Program* g_program{};
+thread_local std::optional<Dominance> g_dominance;
 
 std::optional<u32> TryGetConstant(IR::Value& value, Environment& env) {
     const IR::Inst* inst = value.InstRecursive();
@@ -942,18 +1185,73 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
             std::vector<u32> code;
             int budget = 4096;
             g_handle_failure = IR::Opcode::Void;
-            if (!g_handle_programs || !BuildHandleProgram(inst.Arg(0), code, budget, block)) {
+            bool built{g_handle_programs && BuildHandleProgram(inst.Arg(0), code, budget, block)};
+            IR::Value index{};
+            // Only sampled textures: an array of storage images would have every element taken
+            // as written.
+            const bool sampled{!IsStorageImageOpcode(IndexedInstruction(inst)) &&
+                               inst.Flags<IR::TextureInstInfo>().type != TextureType::Buffer};
+            if (!built && g_handle_programs && sampled && host_info.support_handle_table_arrays) {
+                // (Lichii bd0171f7) Read from a table at an index each invocation reads for itself
+                // (OoT's clustered lights: a light index from the pixel's list, then that light's
+                // shadow map from the light table): a descriptor array of the table's entries,
+                // which the shader indexes with that index.
+                code.clear();
+                budget = 4096;
+                g_handle_index = IR::Value{};
+                g_handle_index_allowed = true;
+                built = BuildHandleProgram(inst.Arg(0), code, budget, block);
+                g_handle_index_allowed = false;
+                index = built ? g_handle_index : IR::Value{};
+                g_handle_index = IR::Value{};
+                // The shader indexes the array with the index word, which must be defined wherever
+                // the texture instruction runs. Where it isn't, the program would evaluate its
+                // Index as element 0 and bind table entry 0's texture to every invocation: the
+                // earlier search below instead, as without handle tables.
+                if (built && !index.IsEmpty()) {
+                    if (g_program != nullptr && !g_dominance) {
+                        g_dominance.emplace(*g_program);
+                    }
+                    if (g_program == nullptr || !g_dominance->Dominates(index.InstRecursive(), &inst)) {
+                        static std::atomic<int> told{};
+                        if (told.fetch_add(1, std::memory_order_relaxed) < 8) {
+                            LOG_WARNING(Shader, "Bindless {} handle: its table index does not dominate the sample: "
+                                                "no handle table, the earlier search instead", inst.GetOpcode());
+                        }
+                        built = false;
+                        index = IR::Value{};
+                    }
+                }
+            }
+            if (!built) {
                 // Not computable for a whole draw (a handle that changes in a loop): keep the
                 // earlier search through loads, which at least gives the shader a texture.
+                const IR::Inst* legacy_inst{};
                 const std::optional<ConstBufferAddr> legacy{IR::BreadthFirstSearch(inst.Arg(0),
-                    [&env, &host_info, block](const IR::Inst* candidate) {
-                        return TryGetConstBuffer(candidate, env, host_info, block);
+                    [&env, &host_info, block, &legacy_inst](const IR::Inst* candidate) {
+                        std::optional found{TryGetConstBuffer(candidate, env, host_info, block)};
+                        if (found) legacy_inst = candidate;
+                        return found;
                     }, [&](IR::Value operand) { return ResolveConditionalPhi(operand, block); })};
                 if (!legacy) {
                     throw NotImplementedException("Failed to track bindless texture constant buffer (stopped at {}, budget {})",
                                                   g_handle_failure, budget);
                 }
-                return TextureInst{.cbuf = *legacy, .inst = &inst, .block = block};
+                // (Lichii 282a585a) The word the search found may be the pointer a load reads the
+                // handle through (a light table's address): that binds no texture (vk_draw.cpp).
+                // With handle tables only: RX_VK_HANDLE_TABLES=0 binds that word's texture, as before.
+                const bool pointer_word{host_info.support_handle_table_arrays &&
+                                        !ReachesOutsideLoads(inst.Arg(0), legacy_inst, block)};
+                static std::atomic<int> warnings{};
+                if (warnings.fetch_add(1, std::memory_order_relaxed) < 32) {
+                    LOG_WARNING(Shader, "Bindless {} handle not computable per draw (stopped at {}): taking cbuf{}+{:#x}{}",
+                                inst.GetOpcode(), g_handle_failure, legacy->index, legacy->offset,
+                                pointer_word ? ", a pointer: no texture" : ", likely not the texture the shader reads");
+                }
+                return TextureInst{.cbuf = *legacy, .inst = &inst, .block = block, .pointer_word = pointer_word};
+            }
+            if (host_info.support_handle_table_arrays) {   // (as before handle tables without them)
+                TrimTrailingTees(code);
             }
             auto& programs{*g_handle_programs};
             auto it{std::ranges::find(programs, code)};
@@ -961,6 +1259,9 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
                 programs.push_back(std::move(code));
                 it = programs.end() - 1;
             }
+            // An index word left here dominates the sample (checked above): an array of the
+            // table's first entries.
+            const u32 count{index.IsEmpty() ? 1U : HANDLE_TABLE_SIZE};
             addr = ConstBufferAddr{
                 .index = 0,
                 .offset = 0,
@@ -968,8 +1269,8 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
                 .secondary_index = 0,
                 .secondary_offset = 0,
                 .secondary_shift_left = 0,
-                .dynamic_offset = {},
-                .count = 1,
+                .dynamic_offset = count > 1 ? IR::U32{index} : IR::U32{},
+                .count = count,
                 .has_secondary = false,
                 .handle_program = static_cast<u32>(it - programs.begin()),
             };
@@ -1063,7 +1364,8 @@ public:
                    desc.secondary_cbuf_offset == existing.secondary_cbuf_offset &&
                    desc.secondary_shift_left == existing.secondary_shift_left &&
                    desc.count == existing.count && desc.size_shift == existing.size_shift &&
-                   desc.handle_program == existing.handle_program;
+                   desc.handle_program == existing.handle_program &&
+                   desc.handle_is_pointer_word == existing.handle_is_pointer_word;
         })};
         // TODO: Read this from TIC
         texture_descriptors[index].is_multisample |= desc.is_multisample;
@@ -1197,6 +1499,14 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
     }
     TextureInstVector to_replace;
     g_handle_programs = &program.info.handle_programs;
+    g_program = &program;   // (the dominator tree a handle table's index word is checked against, made when first asked)
+    g_dominance.reset();
+    g_handle_tables = host_info.support_handle_table_arrays;
+    SCOPE_EXIT {
+        g_program = nullptr;
+        g_dominance.reset();
+        g_handle_tables = false;
+    };
     for (IR::Block* const block : program.post_order_blocks) {
         env.track_cache.clear();
         for (IR::Inst& inst : block->Instructions()) {
@@ -1319,7 +1629,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
             break;
         }
         u32 index;
-        u32 size_shift = cbuf.count > 1 ? DynamicDescriptorSizeShift(cbuf.dynamic_offset) : DESCRIPTOR_SIZE_SHIFT;
+        const u32 size_shift{DescriptorSizeShift(cbuf)};
         u32 count = cbuf.count;
         switch (inst->GetOpcode()) {
         case IR::Opcode::ImageRead:
@@ -1389,7 +1699,9 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .handle_program = cbuf.handle_program,
                 });
             } else {
-                count = std::min(count, sampled_dynamic_cap);
+                if (cbuf.handle_program == ~0U) {   // (a handle table's array keeps its size: HANDLE_TABLE_SIZE)
+                    count = std::min(count, sampled_dynamic_cap);
+                }
                 const bool is_integer{!flags.is_depth && is_texture_pixel_format_integer(cbuf)};
                 index = descriptors.Add(TextureDescriptor{
                     .type = flags.type,
@@ -1407,6 +1719,7 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
                     .size_shift = size_shift,
                     .handle_program = cbuf.handle_program,
                     .type_fixed = !type_asked,
+                    .handle_is_pointer_word = texture_inst.pointer_word,
                 });
                 flags.is_integer.Assign(is_integer ? 1 : 0);
             }
@@ -1418,8 +1731,11 @@ void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo
         if (count > 1) {
             const auto insert_point{IR::Block::InstructionList::s_iterator_to(*inst)};
             IR::IREmitter ir{*texture_inst.block, insert_point};
-            const IR::U32 shift{ir.Imm32(size_shift)};
-            inst->SetArg(0, ir.UMin(ir.ShiftRightLogical(cbuf.dynamic_offset, shift), ir.Imm32(count - 1)));
+            // (a handle table's array: the index word is the element itself)
+            const IR::U32 element{size_shift != 0
+                                      ? IR::U32{ir.ShiftRightLogical(cbuf.dynamic_offset, ir.Imm32(size_shift))}
+                                      : cbuf.dynamic_offset};
+            inst->SetArg(0, ir.UMin(element, ir.Imm32(count - 1)));
         } else {
             inst->SetArg(0, IR::Value{});
         }

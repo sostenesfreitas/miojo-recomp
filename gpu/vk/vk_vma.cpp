@@ -328,6 +328,44 @@ bool create_device_buffer(uint64_t size, VkBufferUsageFlags usage, VkBuffer& buf
     if (dedicated) ai.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
     return vmaCreateBuffer(vma, &bi, &ai, &buffer, &allocation, nullptr) == VK_SUCCESS;
 }
+/// (hookshot, RX_VK_MIRROR_SPARSE) A buffer with sparse residency and no memory: its blocks are bound one by one
+/// (vk_memory.cpp, sparse_mirror.h). req: its size, block (alignment) and memory types
+bool create_sparse_buffer(uint64_t size, VkBufferUsageFlags usage, VkBuffer& buffer, VkMemoryRequirements& req) {
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.flags = VK_BUFFER_CREATE_SPARSE_BINDING_BIT | VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT;
+    bi.size = size;
+    bi.usage = usage;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(dev.device, &bi, nullptr, &buffer) != VK_SUCCESS) {
+        buffer = VK_NULL_HANDLE;
+        return false;
+    }
+    vkGetBufferMemoryRequirements(dev.device, buffer, &req);
+    return true;
+}
+/// One block of device memory for a sparse buffer (req's alignment and memory types), from VMA's blocks: counted in its
+/// budget as the rest of the device's memory is
+bool alloc_sparse_block(const VkMemoryRequirements& req, VmaAllocation& allocation, VkDeviceMemory& memory, uint64_t& offset) {
+    VkMemoryRequirements r = req;
+    r.size = req.alignment;
+    VmaAllocationCreateInfo ai{};
+    ai.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    if (dev.memory_budget) ai.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+    VmaAllocationInfo info{};
+    if (vmaAllocateMemory(vma, &r, &ai, &allocation, &info) != VK_SUCCESS) {
+        allocation = nullptr;
+        return false;
+    }
+    memory = info.deviceMemory;
+    offset = info.offset;
+    return true;
+}
+void free_sparse_block(VmaAllocation allocation) {
+    if (allocation) vmaFreeMemory(vma, allocation);
+}
+void destroy_sparse_buffer(VkBuffer buffer) {   // (its blocks' memory is the caller's to free, after)
+    if (buffer) vkDestroyBuffer(dev.device, buffer, nullptr);
+}
 /// (every heap: what VMA has in blocks and allocations there, what the process uses of it, its budget; one line)
 /// The image pools: their blocks, the images in them, and the free ranges between them (every 600 presents, with the heaps)
 void vma_log_image_blocks() {

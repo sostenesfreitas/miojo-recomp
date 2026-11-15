@@ -11,6 +11,7 @@
    while one of the game's own menus is open (host/oot_menu.c: hos_mouse_game_menu each frame it runs), its clicks and
    wheel for that menu (hos_mouse_game_pointer). */
 #include "hos.h"
+void hos_input_clear_toggles(void);
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,6 +27,8 @@ void rx_close_asked(void);   /* host/rx_backend.c */
 
 void hos_relaunch_ask(void);        /* (host/hos_relaunch.c) */
 void hos_window_closed_exit(void);
+int hos_text_focus(void);          /* (host/rx_backend.c: the Insert menu's text fields, MkwVkHost.take_text) */
+void hos_text_put(uint32_t c);
 #ifndef WM_DPICHANGED
 #define WM_DPICHANGED 0x02E0
 #endif
@@ -63,17 +66,27 @@ static int esc_had_capture;
 static int game_menu_open;
 static volatile LONG64 game_menu_seen_ns;
 static HosPointer game_pointer = HOS_POINTER_INIT;
-/* The cursor over the game's menus is hidden until the mouse is used (moved or a button pressed) and again once the
-   pads or the keys are (nn_hid.c: hos_player_input_ns): a player on a controller never sees it, and a mouse at rest
-   takes no part (no pointing or clicks while hidden). The wheel works hidden too, and does not show it: a button held
-   (R, for the item choice) counts as the pad in use, and hid the cursor again at each notch */
+/* The cursor over the game's window, in play and in the game's menus (not the Insert menu), is shown until the pads or
+   the keys are used (nn_hid.c: hos_player_input_ns) and again once the mouse is (moved or a button pressed): a player on
+   a controller sees it only until the first input, and a mouse at rest takes no part in the menus (no pointing or clicks
+   while hidden). The wheel works hidden too, and does not show it: a button held (R, for the item choice) counts as the
+   pad in use, and hid the cursor again at each notch. gm_mx, gm_my: the last point a move counted at, in screen
+   coordinates */
 int64_t hos_player_input_ns(void);
-static volatile LONG gm_shown, gm_mx = -1, gm_my = -1;
+static volatile LONG gm_shown = 1, gm_mx = -1, gm_my = -1;
 static volatile LONG64 gm_mouse_ns;
 static void gm_mouse_used(void) { InterlockedExchange64(&gm_mouse_ns, (LONG64)hos_now_ns()); InterlockedExchange(&gm_shown, 1); }
 static int gm_cursor_shown(void) {
     if (gm_shown && hos_player_input_ns() > InterlockedCompareExchange64(&gm_mouse_ns, 0, 0)) InterlockedExchange(&gm_shown, 0);
     return (int)gm_shown;
+}
+/* Whether a move to (x, y) is the mouse used, from the last point one counted at (ax, ay). While the cursor is shown any
+   other point is. While it is hidden only one more than slack pixels away: a bumped desk or a sensor's noise does not
+   bring it back in a cutscene. In screen coordinates, so the WM_MOUSEMOVE Windows sends when the window moves or
+   resizes under a cursor at rest (F11, a DPI change: its client point changes, its screen point does not) is no move */
+static int gm_move_counts(int shown, LONG x, LONG y, LONG ax, LONG ay, LONG slack) {
+    const LONG dx = x > ax ? x - ax : ax - x, dy = y > ay ? y - ay : ay - y;
+    return shown ? dx || dy : dx > slack || dy > slack;
 }
 
 int hos_mouse_pointer(MkwVkPointer *out) { return hos_pointer_take(&pointer, out); }
@@ -153,7 +166,18 @@ static UINT window_dpi(HWND w) {
     return dpi ? dpi : 96;
 }
 
+/* WM_MOUSEMOVE, also under the Insert menu: a click that closes it leaves the cursor shown. 4 pixels of slack at 96 dpi */
+static void gm_mouse_moved(HWND w) {
+    const DWORD at = GetMessagePos();
+    const LONG x = (short)LOWORD(at), y = (short)HIWORD(at);
+    if (!gm_move_counts(gm_cursor_shown(), x, y, gm_mx, gm_my, MulDiv(4, (int)window_dpi(w), 96))) return;
+    gm_mx = x, gm_my = y;
+    gm_mouse_used();
+}
+
 static void mouse_capture(HWND w, int on) {
+    int rx_option(int id, int otherwise);
+    if (on && rx_option(6, 0) == 2) return;   /* (Mouse camera Off: the mouse plays no part) */
     if (on == (int)mouse_captured) return;
     mouse_captured = on;
     InterlockedExchange(&mouse_dx, 0);
@@ -189,6 +213,7 @@ static void gm_cursor_off(HWND w) {
    back, if the window still has the focus */
 static void menus_mouse(HWND w, int insert_open, int game_open) {
     const int was = menu_open || game_menu_open, now = insert_open || game_open, game_was = game_menu_open;
+    if ((insert_open && !menu_open) || (game_open && !game_was)) hos_input_clear_toggles();
     menu_open = insert_open, game_menu_open = game_open;
     /* (hidden till used; a menu back within a second, a moment between its screens, keeps the cursor as it was) */
     static int64_t game_closed_ns;
@@ -196,7 +221,6 @@ static void menus_mouse(HWND w, int insert_open, int game_open) {
     if (game_open && !game_was && (!game_closed_ns || hos_now_ns() - game_closed_ns > 1000000000LL)) {
         POINT at = {0};
         GetCursorPos(&at);
-        ScreenToClient(w, &at);
         InterlockedExchange(&gm_shown, 0), gm_mx = at.x, gm_my = at.y;
     }
     if (now && !was) {
@@ -265,16 +289,29 @@ static void menu_press(HWND w, LPARAM lp, LONG bit) {   /* (a click while the me
     SetCapture(w);   /* a drag past the window edge still reaches it */
     pointer_publish_at(w, at, (uint32_t)bit, 0);
 }
+/* (hookshot) the clipboard's first line into the Insert menu's text field that has the keyboard (Ctrl+V, Shift+Insert, or the
+   menu's own Paste: WM_APP + 12), as typed: its characters as code points, a pair of UTF-16 halves as one */
+static void paste_clipboard(HWND w) {
+    if (!hos_text_focus() || !OpenClipboard(w)) return;
+    HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    const WCHAR *t = data ? (const WCHAR *)GlobalLock(data) : NULL;
+    for (size_t i = 0; t && t[i] && t[i] != '\r' && t[i] != '\n'; i++) {
+        uint32_t c = t[i];
+        if (c >= 0xD800 && c < 0xDC00 && t[i + 1] >= 0xDC00 && t[i + 1] < 0xE000) c = 0x10000 + ((c - 0xD800) << 10) + (t[++i] - 0xDC00);
+        hos_text_put(c);
+    }
+    if (t) GlobalUnlock(data);
+    CloseClipboard();
+}
+void hos_display_paste(void) {
+    if (hwnd) PostMessageA(hwnd, WM_APP + 12, 0, 0);
+}
 
 static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_MOUSEMOVE: {
         if (mouse_captured) return 0;
-        const int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
-        if (game_menu_open && !menu_open && (x != gm_mx || y != gm_my)) {   /* (a move: not a repeat at rest) */
-            gm_mx = x, gm_my = y;
-            gm_mouse_used();
-        }
+        gm_mouse_moved(w);
         if (!pointer_tracking) {
             TRACKMOUSEEVENT t = {sizeof t, TME_LEAVE, w, 0};
             pointer_tracking = TrackMouseEvent(&t) != 0;
@@ -333,7 +370,8 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         if (game_menu_open && seen && (LONG64)hos_now_ns() - seen > 300000000LL &&
             InterlockedCompareExchange64(&game_menu_seen_ns, 0, seen) == seen)
             menus_mouse(w, menu_open, 0);
-        if (game_menu_open && !menu_open && !gm_cursor_shown()) gm_cursor_off(w);   /* (hidden by the pads or keys: at once) */
+        /* (hidden by the pads or keys: at once, not at the next move's WM_SETCURSOR) */
+        if (!menu_open && !gm_cursor_shown() && GetForegroundWindow() == w) gm_cursor_off(w);
         return 0;
     }
     case WM_SYSCOMMAND:
@@ -369,6 +407,24 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             const int mod = (GetKeyState(VK_SHIFT) | GetKeyState(VK_CONTROL) | GetKeyState(VK_MENU)) & 0x8000;
             if (!mod) set_fullscreen(w, !fullscreen);
         }
+        if (hos_text_focus()) {   /* (a text field of the Insert menu has the keyboard: its editing keys, repeats too, and paste) */
+            if ((wp == 'V' && GetKeyState(VK_CONTROL) < 0) || (wp == VK_INSERT && GetKeyState(VK_SHIFT) < 0)) {
+                if (!(lp & (1 << 30))) paste_clipboard(w);
+            }
+            else if (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_HOME || wp == VK_END || wp == VK_BACK || wp == VK_DELETE ||
+                     wp == VK_RETURN || wp == VK_ESCAPE)
+                hos_text_put(HOS_TEXT_KEY | (uint32_t)wp);
+        }
+        return 0;
+    }
+    case WM_CHAR: {   /* (hookshot) a character typed, for the Insert menu's text fields (TranslateMessage, by the keyboard's
+                         layout). The window is an ANSI one: a byte of the code page, ASCII as itself, which is what a field
+                         takes; a double-byte character's two (a lead byte, then its trail) are left out together */
+        static int trail;
+        const BYTE c = (BYTE)wp;
+        if (trail) trail = 0;
+        else if (IsDBCSLeadByte(c)) trail = 1;
+        else if (c >= 0x20 && c != 0x7F) hos_text_put(c);   /* (Backspace, Enter, Esc and Ctrl+letters: WM_KEYDOWN above) */
         return 0;
     }
     case WM_SYSKEYDOWN:   /* Alt+Enter, as on Linux (display_sdl.c); other Alt keys (Alt+F4) go on to Windows */
@@ -383,6 +439,9 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP + 7:   /* (the Insert menu's row) */
         set_fullscreen(w, (int)wp);
         return 0;
+    case WM_APP + 12:   /* (hookshot: the Insert menu's Paste, MkwVkHost.take_text) */
+        paste_clipboard(w);
+        return 0;
     case WM_DPICHANGED:
         if (!fullscreen) {
             const RECT *s = (const RECT *)lp;
@@ -396,13 +455,14 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_KILLFOCUS:
     case WM_CANCELMODE:
+        hos_input_clear_toggles();
         esc_had_capture = 0;
         mouse_capture(w, 0);
         hos_pointer_reset(&pointer);
         hos_pointer_reset(&game_pointer);
         break;
     case WM_SETCURSOR:
-        if ((mouse_captured || (game_menu_open && !menu_open && !gm_cursor_shown())) && LOWORD(lp) == HTCLIENT) {
+        if ((mouse_captured || (!menu_open && !gm_cursor_shown())) && LOWORD(lp) == HTCLIENT) {
             SetCursor(NULL);
             return TRUE;
         }
@@ -439,6 +499,8 @@ static void display_start_failed(const char *operation) {
     const DWORD error = GetLastError();
     hos_log("display: %s failed (error %lu)", operation, (unsigned long)error);
     hos_log_flush();
+    void hos_crash_clean_end(void);
+    hos_crash_clean_end();
     ExitProcess(1);
 }
 

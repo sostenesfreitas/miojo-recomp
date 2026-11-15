@@ -7,7 +7,8 @@ Off; 0 never) and sampler_cache (off by default, no version rule):
 
 - no file: the default; a file without the line: the default;
 - options_version 3 with descriptor_reuse=0: on (the old default, moved); 4 with 0: off (chosen); 4 with 1: on;
-- RX_VK_DESC_REUSE over all of it, with the row's values (0/off its Off, 1 its On) and never.
+- RX_VK_DESC_REUSE over all of it, with the row's values (0/off its Off, 1 its On) and never;
+- the rows applying in play (menu_debug_rows): the menu's values over the file's, unless RX_VK_DESC_REUSE holds the level.
 
 python -I -B tests/test_menu_env_on.py [--cxx clang++]
 """
@@ -26,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 FIXTURE = r"""
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,10 +42,21 @@ LEVEL
 int main(int argc, char **argv) {
     if (argc != 3) return 2;
     const int reuse = desc_reuse_level();
-    const bool sampler = menu_env_on("RX_VK_SAMPLER_CACHE", "sampler_cache");
+    const bool sampler = sampler_cache_on();
     if (reuse != atoi(argv[1]) || sampler != (atoi(argv[2]) != 0)) {
         fprintf(stderr, "FAIL: descriptor reuse level %d (want %s), sampler_cache %d (want %s)\n", reuse, argv[1], sampler, argv[2]);
         return 1;
+    }
+    // (the menu loaded, then each row changed in play: RX_VK_DESC_REUSE holds the level, the rows' values apply otherwise)
+    const bool held = getenv("RX_VK_DESC_REUSE") != nullptr;
+    for (const int on : {0, 1, 0}) {
+        menu_debug_rows(on, !on);
+        const int want = held ? reuse : on ? 2 : 1;
+        if (desc_reuse_level() != want || sampler_cache_on() != !on) {
+            fprintf(stderr, "FAIL: in play, rows %d/%d: level %d (want %d), sampler_cache %d\n", on, !on, desc_reuse_level(), want,
+                    sampler_cache_on());
+            return 1;
+        }
     }
     return 0;
 }
@@ -72,7 +85,10 @@ def main():
     args = parser.parse_args()
     draw = (ROOT / "gpu/vk/vk_draw.cpp").read_text(encoding="utf-8")
     body = block(draw, "bool menu_env_on(const char* env_name, const char* ini_key_name, bool def = false, int since = 0) {")
-    level = block(draw, "int desc_reuse_level() {")
+    # (the rows' atomics and menu_debug_rows, outside the file's anonymous namespace, then the level and the sampler cache's switch)
+    start = draw.index("std::atomic<int> desc_reuse_row{-1}")
+    level = draw[start:draw.index(block(draw, "int desc_reuse_level() {"))] + block(draw, "int desc_reuse_level() {")
+    level = level.replace("} // namespace\n", "").replace("namespace {\n", "") + "\n" + block(draw, "bool sampler_cache_on() {")
     with tempfile.TemporaryDirectory(prefix="menu-env-on-") as tmp:
         work = Path(tmp)
         source, exe = work / "fixture.cpp", work / "fixture.exe"
@@ -92,7 +108,7 @@ def main():
                 env["RX_VK_DESC_REUSE"] = env_value
             subprocess.run([str(exe), str(reuse), str(sampler)], cwd=work, env=env, check=True)
     print("PASS: Descriptor reuse on by default and for options files before version 4; a version 4 choice kept; "
-          "RX_VK_DESC_REUSE with the row's values, and never; Sampler cache unchanged")
+          "RX_VK_DESC_REUSE with the row's values, and never; Sampler cache unchanged; both rows in play")
 
 
 if __name__ == "__main__":

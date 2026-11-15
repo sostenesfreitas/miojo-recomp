@@ -80,14 +80,14 @@ class PipelineCacheFile {
         return true;
     }
     static bool temporary_name(const std::string& name) {
-        const std::string marker = ".bin.tmp-", play = "mkw_vk_pipelines_play_";
+        const std::string marker = ".bin.tmp-", play = "hookshot_vk_pipelines_play_";
         const size_t at = name.find(marker);
         if (at == std::string::npos) return false;
         const std::string stem = name.substr(0, at), suffix = name.substr(at + marker.size());
         const auto digits = [](const std::string& s) {
             return !s.empty() && s.find_first_not_of("0123456789") == std::string::npos;
         };
-        if (stem != "mkw_vk_pipelines") {
+        if (stem != "hookshot_vk_pipelines") {
             if (stem.compare(0, play.size(), play)) return false;
             const std::string number = stem.substr(play.size());
             if (number.size() > 9 || !digits(number)) return false;

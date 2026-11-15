@@ -23,7 +23,6 @@ CPU only: no game directory. The only paths written are --out, --spv-dir and the
 """
 import argparse
 import concurrent.futures
-import hashlib
 import json
 import os
 import shutil
@@ -42,19 +41,14 @@ TARGETS = ("plain", "tensor", "tensor-emulate", "eden-tensor", "tensor-software"
 
 
 def translator_stamp(root=ROOT):
-    """The sha1 half of HOOKSHOT_SHADER_STAMP, exactly as nx2/build.py:693-699 computes it: every file under
-    gpu/vk/{eden,sirit,compat} plus vk_shader.cpp, vk_bank.cpp, vk_state.h, vk_api.h, relative path + CRLF-
-    normalized bytes, sorted, first 16 hex. The cache stamp also mixes in sizeof(Shader::Info)/sizeof(Program),
-    the library marker and RX_VK_*/EDEN_* env; bake_ds does that half (disk_stamp)."""
-    vk = os.path.join(root, "gpu", "vk")
-    files = [os.path.join(d, f) for top in ("eden", "sirit", "compat")
-             for d, _, fs in os.walk(os.path.join(vk, top)) for f in fs]
-    files = sorted(files) + [os.path.join(vk, n) for n in ("vk_shader.cpp", "vk_bank.cpp", "vk_state.h", "vk_api.h")]
-    h = hashlib.sha1(usedforsecurity=False)
-    for f in files:
-        with open(f, "rb") as src:
-            h.update(os.path.relpath(f, vk).replace(os.sep, "/").encode() + src.read().replace(b"\r\n", b"\n"))
-    return h.hexdigest()[:16]
+    """The sha1 half of HOOKSHOT_SHADER_STAMP, as nx2/build.py makes it (nx2/translator_files.py: the translator's files
+    below root's gpu/vk). The cache stamp also mixes in sizeof(Shader::Info)/sizeof(Program), the library marker and
+    RX_VK_*/EDEN_* env; bake_ds does that half (disk_stamp)."""
+    nx2 = os.path.join(ROOT, "nx2")
+    if nx2 not in sys.path:
+        sys.path.insert(0, nx2)
+    import translator_files
+    return translator_files.stamp(os.path.join(root, "gpu", "vk"))
 
 
 def run(cmd, **kw):

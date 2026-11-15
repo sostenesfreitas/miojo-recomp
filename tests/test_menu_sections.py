@@ -2,7 +2,7 @@
 
 A heading row (Row::heading) is a section's title: draw_options draws it (a gold title and a rule, nothing to click) and
 menu_tick's keys step over it. The Graphics tab is grouped as Resolution and upscaling, Frame generation and latency,
-Screen, HDR, Detail, and GPU and memory, after the Quality preset that sets rows in all of them. Each section must keep a
+Screen, HDR, Detail, Ray traced lighting, and GPU and memory, after the Quality preset that sets rows in all of them. Each section must keep a
 row on every PC: a row row_shown can hide (Reflex, Anti-Lag 2, the Upscaler, the DLSS model, HDR's levels) cannot be a
 section's only row, or a GPU without it would show a title over nothing. The rows table is read from the source; nothing
 runs.
@@ -21,6 +21,7 @@ GRAPHICS = [
     ("Screen", ["Fullscreen", "V-Sync", "Window scaling filter", "Ultrawide menus"]),
     ("HDR", ["HDR", "HDR paper white", "HDR peak brightness", "HDR contrast", "HDR tone mapper"]),
     ("Detail", ["Texture detail", "Anisotropic filtering"]),
+    ("Ray traced lighting", ["Ray tracing", "Ambient occlusion", "Sun shadows", "Light shadows", "Traced ambient", "Bounce light"]),
     ("GPU and memory", ["GPU device", "VRAM budget"]),
 ]
 

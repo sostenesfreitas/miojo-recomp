@@ -13,3 +13,5 @@ It is built into `zbic.dll` by `nx2/zbic.py` on first use, and used only to unpa
 also builds `zstd.c` as `vk_zstd.o` (`nx2/build.py`, for the program cache's `RX_VK_PROGRAM_CACHE_ZSTD` and the
 game's font files) with `ZSTD_ZBIC_SUPPORT` off: that object has only the stock zstd code (BSD), not the ZBIC
 parts from Atmosphere-NX (GPLv2). `zbic_api.c` is not built there.
+
+tree-sha256: aa360328a7bd90f893c2fe33eed425f41e334576e0a1beb0ad64293a5e6d3f29

@@ -1,6 +1,6 @@
 // The Insert menu's Bug report (vk_menu.cpp, the Gameplay tab): one press writes what an issue needs into a folder of its
 // own, bug-reports/<date>_<time> in the game folder, and nothing else. report.txt holds the answers the issue form asks for
-// (.github/ISSUE_TEMPLATE/1-game-problem.yml: the version, where the player is, the GPU and its driver, CPU, RAM and system,
+// (.forgejo/ISSUE_TEMPLATE/1-game-problem.yml: the version, where the player is, the GPU and its driver, CPU, RAM and system,
 // the options and switches changed from their defaults) under the form's own headings, so scripts/hardware_report.py reads
 // them as it reads an issue; beside it this run's log and the last run's, the home folder and the user's name taken out of
 // their paths, and a picture of the game's frame without the menu (vk_replay.cpp's shot_ask takes it at its next present). Nothing is
@@ -20,9 +20,11 @@ struct Inputs {
     std::string version;   // HOOKSHOT_VERSION, as the log's first line has it
     std::string gpu;       // the device the game runs on and its driver, as the form asks: "NVIDIA GeForce RTX 4090, NVIDIA 580.95.05"
     std::string options;   // the menu's rows that are not at their defaults, a "Name: value (default: value)" line each
+    std::string pc_options; // the rows whose defaults depend on this PC, "Name: value (default depends on this PC)": in the same
+                            // answer after options, under a line of their own, not counted as changes
     std::string system;    // CPU, RAM and system (system_text)
     std::vector<std::string> env;   // the environment, NAME=VALUE: the game's switches set, and software hooked in
-    std::string game_dir;  // the game folder, its separator at the end: the logs are there, and the report's folder goes there
+    std::string game_dir;  // the game folder, its separator at the end: the logs are in its logs/, and the report's folder goes there
     std::string current_log;   // the file this run logs to (stderr), "" when that is no file (a terminal, a pipe)
     std::string home, user;    // taken out of the logs: the home folder and the user's name
     bool windows = false;      // paths as Windows writes them: either slash, and case does not matter

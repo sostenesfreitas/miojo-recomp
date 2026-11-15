@@ -43,7 +43,7 @@ def check_source():
                                # (the measured tuning in play: from the replay's windows, finished once for this PC, its steps
                                # kept across restarts)
                                "::auto_settings::tune(tuning,", 'fprintf(f, "auto_tuned=%016llx\\n"', 'fprintf(f, "auto_steps=%d,%d\\n"',
-                               'if (!strcmp(line, "auto_steps"))', 'fprintf(f, "auto_output=%ux%u\\n"',
+                               'if (!strcmp(line, "auto_steps"))',
                                # (the hardware changed: the exempt rows the player set under Auto stay theirs)
                                "apply_auto(!first);", "apply_auto(false);"])
     need("vk_menu.h", (ROOT / "gpu/vk/vk_menu.h").read_text(encoding="utf-8"), ["constexpr int kAutoPreset = 6;"])
@@ -53,9 +53,12 @@ def check_source():
     auto = body(menu, "void apply_auto(bool keep_own) {")
     if not auto.index("opts.dlss = c.upscaler;") < auto.index("apply_preset(c.tier);"):
         raise SystemExit("apply_auto: opts.dlss must be set before apply_preset")
-    # (the Output resolution Auto set is kept by its size: the choices' numbers follow the screen's modes, #2566)
-    need("apply_auto", auto, ["auto_output.w = o.w, auto_output.h = o.h;",
-                              "!(set.w == auto_output.w && set.h == auto_output.h)"])
+    # (Auto never sets the Output resolution: host/hos_main.c reads it at boot, before the card is known, so a size chosen here
+    # only applied at the next start, and a new install's first close of the menu asked to restart for it)
+    if "output_res" in auto or "output_w" in (ROOT / "gpu/vk/auto_settings.h").read_text(encoding="utf-8"):
+        raise SystemExit("apply_auto: Auto sets the Output resolution (a new install's first menu close asks to restart)")
+    if 'fprintf(f, "auto_output=' in menu:
+        raise SystemExit("save(): auto_output= is written again (Auto sets no Output resolution)")
     # (the CPU holding the frame rate ends the tuning for this run only: no auto_tuned for it)
     tune = body(menu, "void menu_auto_tune(double gpu_ms, double draws, double fps) {")
     need("menu_auto_tune", tune, ["::auto_settings::resolution_for(c, ur::engine(u), v,"])

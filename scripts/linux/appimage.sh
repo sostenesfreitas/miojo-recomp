@@ -65,6 +65,9 @@ mkdir -p "$T/third_party/zbic" "$T/third_party/a64-kit"
 # compiles the back end from the sources inside the read-only image and reads third_party/zbic's zstd.c, zstd.h and
 # zstd_errors.h for its vk_zstd.o; shipping only zbic.so stopped those builds at FileNotFoundError on third_party/zbic/zstd.h)
 cp -a third_party/zbic "$T/third_party/"
+# (AMD FSR 4, when chosen: AMD's MIT FSR API headers, which the Vulkan back end compiled here builds with (make_game.py --fsr,
+# nx2/build.py). AMD's runtime is not among them: on Linux the player's own amd_fidelityfx_upscaler_vk.so, the readme)
+cp -a third_party/fidelityfx "$T/third_party/"
 cp -a third_party/a64-kit/* "$T/third_party/a64-kit/"
 rm -f "$T/third_party/a64-kit/tools/lld-link.exe"
 if [ -d work ]; then
@@ -92,10 +95,11 @@ for d in "$DEPS"/cpm/*/*; do
 done
 cp -a "$DEPS/licenses" "$T/licenses"   # (LLVM, FFmpeg, dav1d, SDL2: what this AppImage carries besides Hookshot)
 # ---- the licences of the third-party parts compiled into hookshot_vk.so (tests/test_appimage_licenses.py) ----
-mkdir -p "$T/licenses/imgui" "$T/licenses/zstd" "$T/licenses/libertinus"
+mkdir -p "$T/licenses/imgui" "$T/licenses/zstd" "$T/licenses/libertinus" "$T/licenses/fidelityfx"
 cp third_party/imgui/LICENSE.txt third_party/imgui/PROVENANCE.md "$T/licenses/imgui/"
 cp third_party/zstd/LICENSE third_party/zstd/PROVENANCE.md "$T/licenses/zstd/"
 cp third_party/fonts/libertinus/OFL.txt third_party/fonts/PROVENANCE.md "$T/licenses/libertinus/"
+cp third_party/fidelityfx/LICENSE.md third_party/fidelityfx/PROVENANCE.md "$T/licenses/fidelityfx/"   # (with AMD FSR 4)
 # ---- end of the licences ----
 
 # the sysroot: this system's C library (headers, start files, the libraries to link against) and GCC's runtime pieces

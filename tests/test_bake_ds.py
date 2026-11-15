@@ -5,7 +5,7 @@ nx2/shader_census.py's readers on the same bytes; the translation/key part needs
 built by nx2/bake_ds/build.sh (pass --tool, or set BAKE_DS_TOOL; without it that half is skipped, not failed).
 A one-program HMMA fixture pins the --target tensor gate, the emitted form (shuffle expansion vs software
 function, no OpCooperativeMatrixMulAddKHR in either) and the stamp it folds (the real 71-program expansion
-and the compute answer variants need the ROM set: bake_all --target query, see BAKE.md).
+and the compute answer variants need the ROM set: bake_all --target query, see docs/BAKE.md).
 
     python -I -B tests/test_bake_ds.py [--tool ${TMPDIR:-/tmp}/hookshot-ds/bake_ds]
 """

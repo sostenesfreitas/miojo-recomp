@@ -57,6 +57,8 @@ bool prepare_run(void(*progress)(size_t,size_t),bool background=false,bool refre
 }
 void predict_run(void(*)(size_t,size_t)){calls.push_back(5);}
 bool predict_pending(){return false;}   // (no prediction left unfinished by a last start)
+bool all_mode=true;
+bool compile_all(){return all_mode;}   // (Compile shaders: All predicts after a preparation that translated; Most never)
 void precompile_run(void(*progress)(size_t,size_t)){calls.push_back(2);progress(1,2);}
 void pipeline_cache_save(bool force){if(!force)std::exit(2);calls.push_back(3);}
 std::string skipped_path(){return "sentinel";}
@@ -72,11 +74,14 @@ bool run(){
 """+body+r"""
 }
 int main(int argc,char** argv){
- if(argc!=2)return 1;
+ if(argc!=3)return 1;
  const std::string mode=argv[1];
  fresh_seed=mode=="fresh";
  empty_states=mode=="empty";
- if(!run()||calls!=std::vector<int>{1,fresh_seed?5:6,2,3,4})return 2;
+ all_mode=std::string(argv[2])=="all";
+ // (All: a fresh seed predicts (5); Most: never. A prepared seed imports the states (6) and does not predict either way)
+ const std::vector<int> want=fresh_seed?(all_mode?std::vector<int>{1,5,2,3,4}:std::vector<int>{1,2,3,4}):std::vector<int>{1,6,2,3,4};
+ if(!run()||calls!=want)return 2;
  calls.clear();
  if(reuse_seed(nullptr,false,false)||!calls.empty())return 3;
 }
@@ -85,8 +90,11 @@ with tempfile.TemporaryDirectory(prefix='prepare-cache-') as tmp:
     src=Path(tmp)/'fixture.cpp';exe=Path(tmp)/'fixture.exe';src.write_text(cpp)
     subprocess.run([a.cxx,'-std=c++20','-include',str(a.source/'gpu'/'vk'/'compat'/'hookshot_env.h'),'-I',str(a.source/'gpu'/'vk'),str(src),'-o',str(exe)],check=True)   # (env_on: the switches' rule, gpu/vk/compat/hookshot_env.h)
     env={k:v for k,v in os.environ.items() if k not in ('RX_VK_SEED_CHECK','RX_VK_PREPARE_AGAIN')}
-    for mode, expected in [('fresh', ['0.714']), ('refresh', ['0.125','0.500','0.750']), ('empty', ['0.500'])]:
-        result=subprocess.run([str(exe),mode],check=True,capture_output=True,text=True,env=env)
+    # (Most: the prediction's part of the bar goes after a fresh seed too, out of the total (0.600 at half the noted pipelines).
+    # Left in, the step to the noted pipelines counted it done at its guess: the bar jumped by the prediction's share, 0.714)
+    for mode, level, expected in [('fresh', 'all', ['0.714']), ('fresh', 'most', ['0.600']), ('refresh', 'all', ['0.125','0.500','0.750']),
+                                  ('refresh', 'most', ['0.125','0.500','0.750']), ('empty', 'all', ['0.500']), ('empty', 'most', ['0.500'])]:
+        result=subprocess.run([str(exe),mode,level],check=True,capture_output=True,text=True,env=env)
         progress=[line.split()[1] for line in result.stdout.splitlines() if line.startswith('@@progress ')]
-        assert progress == expected, (mode, progress)
-    print("PASS: Builder imports states with a prepared seed, reports progress, then compiles and saves the cache")
+        assert progress == expected, (mode, level, progress)
+    print("PASS: Builder imports states with a prepared seed, reports progress, then compiles and saves the cache (All and Most)")

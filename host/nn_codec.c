@@ -63,7 +63,7 @@ HLE(_ZN2nn5codec29InitializeHardwareOpusDecoderEPNS0_23HardwareOpusDecoderTypeEi
     G64(ARG(0)) = (uint64_t)CODEC_MAGIC << 32 | (uint32_t)i;
     dunlock();
     static int logged;
-    if (logged++ < 8) hos_log("codec: Opus decoder %d: %d Hz, %d channels", i, rate, channels);
+    if (logged++ < 8) hos_log_at(HOS_LOG_DEBUG, "codec: Opus decoder %d: %d Hz, %d channels", i, rate, channels);
     RET(0);
 }
 HLE(_ZN2nn5codec27FinalizeHardwareOpusDecoderEPNS0_23HardwareOpusDecoderTypeE) {
@@ -96,7 +96,7 @@ HLE(_ZN2nn5codec17GetOpusPacketSizeEPKhm) {
     const uint64_t size = ARG(1);
     const uint64_t r = size >= 8 ? 8 + (uint64_t)be32(p) : 0;
     static int logged;
-    if (logged++ < 6) hos_log("codec: GetOpusPacketSize(%#llx, %llu): header %08x %08x -> %llu", (unsigned long long)ARG(0),
+    if (logged++ < 6) hos_log_at(HOS_LOG_TRACE, "codec: GetOpusPacketSize(%#llx, %llu): header %08x %08x -> %llu", (unsigned long long)ARG(0),
                               (unsigned long long)size, be32(p), be32(p + 4), (unsigned long long)r);
     RET(r);
 }

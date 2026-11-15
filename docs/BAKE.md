@@ -21,7 +21,7 @@ Status: **working end-to-end, all tests pass** (results in §7).
 | `tests/test_bake_skeleton.py` | bake-spark | manifest determinism/dedupe/resume, exact-key translate + SPIR-V, stamp-trap, portable verify |
 | `tests/test_bake_mimo.py` | bake-mimo c60fd1d | fixture archives → enumerate → translate → bank, FNV round-trip, `spirv-val` on every module |
 | `tests/test_bake_ds.py` | bake-deepseek | census parity, Python key mirror, translate + 32 modules + bank read-back (needs `--tool`) |
-| `BAKE.md` | this file | the single merged doc (replaces `BAKE-SPARK.md`, `BAKE-MIMO.md`, `BAKE-DEEPSEEK.md`, `BAKE-GLM.md`) |
+| `docs/BAKE.md` | this file | the single merged doc (replaces `BAKE-SPARK.md`, `BAKE-MIMO.md`, `BAKE-DEEPSEEK.md`, `BAKE-GLM.md`) |
 
 One-line change vs the sources: `nx2/bake_mimo.py:spirv_headers` also
 probes `<repo>/buildext/cpm` (the in-tree CPM cache;
@@ -54,7 +54,7 @@ Identity (the whole bake is keyed on this):
 | graphics program key | `:733-743` (`graphics_key`) | `vs.key ^ fs.key*31`, FNV-mixed with used-generic attribute types + written colour types |
 | mesh program key | `:744-752` (`mesh_key`) | `FNV("mesh")` + task/fs keys + primitive SPH + written types |
 | variant | `:642-647` (`answers_hash`) | per texture/image answer actually bound |
-| disk stamp | `:837-864`, `nx2/build.py:691-699` | translator SHA-1 + depth bit + ABI sizes + env allowlist |
+| disk stamp | `:837-864`, `nx2/translator_files.py` | translator SHA-1 + depth bit + ABI sizes + env allowlist |
 
 Deduped on `code_key` (not the census's advisory SHA-1: `seed_open`
 recomputes FNV either way, `:1872`), a stage is the same two runs of bytes
@@ -95,8 +95,9 @@ boost/fmt (same CPM externals the game build uses; `EXT=...` overrides).
 
 Translator stamp (all three agree): `56b84e3925680030` on this tree. The
 formula is `sorted(translator-tree) + [vk_shader.cpp, vk_bank.cpp,
-vk_state.h, vk_api.h]` appended **after** the sort (`nx2/build.py:691-699`);
-see §6 trap #4.
+vk_state.h]` appended **after** the sort (`nx2/translator_files.py`, which
+`nx2/build.py` and the three bake tools all call; `vk_api.h` left it in
+2026-11); see §6 trap #4.
 
 ## 3. What each leg does
 
@@ -302,7 +303,7 @@ file:line evidence from this tree.
   core on every accepted GPU. The only consumer of `dev.vk12` (`:331`) is the
   `shaderFloat16` check (`vk_coopmat.cpp:377`) — no path turns the UBO layout
   back off.
-- CI says it outright (`.github/workflows/source-regressions.yml:147-148`):
+- CI says it outright (`.forgejo/workflows/ci.yml`):
   "the back end's device has uniformBufferStandardLayout ... so constant
   buffers are u32 arrays of stride 4", and validates the back end's own
   modules with `spirv-val --target-env vulkan1.3

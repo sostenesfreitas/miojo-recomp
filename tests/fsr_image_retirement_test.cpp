@@ -79,6 +79,7 @@ void full_barrier(VkCommandBuffer, const char*) {}
 void logf(const char*, ...) {}
 void device_lost() { need(false, "unexpected device loss"); }
 void note_timeline_sent(uint64_t) {}
+bool memory_sparse_wait(VkSemaphoreSubmitInfo*) { return false; }   // (vk_memory.cpp: no sparse mirror binds here)
 uint64_t oldest_unfinished() { return oldest; }
 #define PROF(x) ((void)0)
 VKAPI_ATTR VkResult VKAPI_CALL vkEndCommandBuffer(VkCommandBuffer) { return VK_SUCCESS; }
@@ -106,6 +107,13 @@ void advance() {
     for (auto id : q.uses) need(!bundles[id].image && !bundles[id].views, "GPU accessed a destroyed image bundle");
     if (q.signal) gpu_done = std::max(gpu_done, q.signal);
 }
+namespace rec {   // (vk_recorder.h's RX_VK_RECORDER_OWN marks, as they are with the recorder off)
+inline void slot_begin(uint64_t) {}
+inline void slot_done() {}
+inline uint64_t produced() { return 0; }
+struct OwnSlot { OwnSlot() {} ~OwnSlot() {} };   // (a scope, as the real one)
+}   // namespace rec
+uint64_t rec_end_pos[64];   // (vk_replay.cpp: each slot's end in the recorder's ring)
 // PRODUCTION
 void retire(uintptr_t id, uint64_t required) {
     bundles[id].required = required;

@@ -71,6 +71,19 @@ int vkCreateShaderModule(uintptr_t device, const VkShaderModuleCreateInfo* info,
     made_of[*module] = {info->pCode[1], info->codeSize / 4};
     return 0;
 }
+using VkResult = int;
+constexpr VkResult VK_SUCCESS = 0;
+bool gate_held = false;   // (Windows Intel: a worker inside the compiler, so a gate that is only tried comes back busy)
+struct IntelDriverGate {
+    bool busy = false;
+    explicit IntelDriverGate(bool ask = false) : busy(ask && gate_held) {}
+};
+thread_local uint64_t module_program = 0;
+bool driver_faulted_program(uint64_t) { return false; }
+void driver_faulted_module(uint64_t) {}
+VkResult extern_guarded_shader_module(const VkShaderModuleCreateInfo* ci, VkShaderModule* module) {
+    return vkCreateShaderModule(dev.device, ci, nullptr, module);
+}
 void vkDestroyShaderModule(uintptr_t, VkShaderModule module, const void*) { CHECK(made_of.count(module)); ++destroyed; }
 void disk_init() {}
 void logf(const char*, ...) {}
@@ -195,11 +208,24 @@ int main(int argc, char** argv) {
     }
     // the picks: for each texture type the variant the loop takes, and that one made whole. Printed for the runner, which
     // compares the two ways
+    size_t busy_bytes = 0;   // (the code read by the asks below that found the gate busy, and read again after)
     for (const int bound : {4, 1, 11, 9, 4, 10, 12, 3, 1}) {
         Program* p = pick(variants, (uint8_t)bound);
         if (!p) {
             std::printf("bound %d: none\n", bound);
             continue;
+        }
+        {   // (the dispatch's ask while a worker holds Intel's gate: nothing made nor failed, the program as it was)
+            gate_held = true;
+            bool busy = false;
+            const bool whole = !p->code_words;
+            const uint64_t words = p->code_words;
+            const unsigned made_before = created;
+            const size_t ask_read = bytes_read;
+            CHECK(program_cache_complete_ask(*p, &busy) == whole && busy == !whole && !p->failed && created == made_before);
+            CHECK(p->code_words == words && (whole || !p->stages[0].module));
+            busy_bytes += bytes_read - ask_read;
+            gate_held = false;
         }
         const unsigned before = created;
         const size_t read_before = bytes_read;
@@ -214,7 +240,7 @@ int main(int argc, char** argv) {
     if (!whole_variants) {
         // six different variants were taken (types 4, 1, 11, 9, 3, and 4 and 1 again): five modules made after the load, one each
         CHECK(created == load_modules + 5);
-        CHECK(bytes_read - load_bytes == 5 * kWords * 4);
+        CHECK(bytes_read - load_bytes - busy_bytes == 5 * kWords * 4);
     }
     // a key that is not a compute program's, and a compute key borrowed whole (the prepare's): as before, either way
     {

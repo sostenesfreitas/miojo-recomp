@@ -26,7 +26,9 @@
 //                        it is given, or no ring: the producer waits until the recorder is idle, then makes the call directly.
 //                        Refused (off, logged once) with RX_VK_PARALLEL>=2. RX_VK_RECORDER_RING_MB (default 8),
 //                        RX_VK_RECORDER_POISON=1 (each packet filled with 0xCD once run), RX_VK_RECORDER_STATS=0 (no 10 s stats
-//                        line), RX_VK_RECORDER_SPIN_US (the recorder's spin with nothing to run, before it sleeps: default adaptive 20-200)
+//                        line), RX_VK_RECORDER_SPIN_US (the recorder's spin with nothing to run, before it sleeps: default adaptive 20-200),
+//                        RX_VK_RECORDER_OWN=1 (a recording slot's own resets at its reuse without the wait: OwnSlot, below),
+//                        RX_VK_RECORDER_IDLE=wait (the recorder waits on the ring's counter after a 20 us spin: Recorder::idle)
 //
 // A packet: [Packet header: thunk, next, op, size][the call's closure: its value arguments and the arena pointers of its copies],
 // preceded in the arena by the copied arrays. The arena is the recording thread's own (thread_local: the parallel replay's workers each
@@ -57,6 +59,9 @@
 #endif
 
 #include "vk_loader.h"
+#if __has_include("hookshot_env.h")
+#include "hookshot_env.h"   // (env_on: the switches' one rule; the checks paste it ahead of this file themselves)
+#endif
 
 namespace mkwvk {
 void logf(const char* fmt, ...);        // (vk_main.cpp)
@@ -96,7 +101,7 @@ extern std::atomic<bool> par_active;   // (vk_replay.cpp: a parallel replay's se
     K(vkDestroyPipelineLayout) K(vkDestroyDescriptorSetLayout) K(vkDestroyDescriptorPool) K(vkDestroyQueryPool)                   \
     K(vkDestroyShaderModule) K(vkDestroyPipelineCache) K(vkDestroyFence) K(vkDestroySemaphore) K(vkDestroySwapchainKHR)           \
     K(vkDestroySurfaceKHR) K(vkDestroyDevice) K(vkDestroyInstance) K(vkFreeMemory)                                                 \
-    M(vmaDestroyBuffer) M(vmaDestroyImage) M(vmaInvalidateAllocation)
+    M(vmaDestroyBuffer) M(vmaDestroyImage) M(vmaInvalidateAllocation) M(vmaFreeMemory)
 
 namespace mkwvk::rec {
 
@@ -159,6 +164,16 @@ inline size_t g_publish_bytes = 1024;
 inline uint64_t g_spin_ns = 0;
 constexpr uint64_t kSpinLo = 20000, kSpinHi = 200000;
 inline bool g_stats_log = true;   // (RX_VK_RECORDER_STATS=0: no stats line every 10 s)
+/// (THREAD) RX_VK_RECORDER_OWN=1: a recording slot's own command pool resets and begins, and its descriptor pool's reset, at the
+/// slot's reuse, without the wait for the recorder (OwnSlot, below). Read when the mode is: tests change it
+inline bool g_own = false;
+/// (THREAD) RX_VK_RECORDER_IDLE=wait: with nothing to run the recorder spins 20 us, then waits on W itself (WaitOnAddress; the
+/// futex under host/posix's on Linux), and a publish wakes it; unset or spin: the spin above and a condition variable, as before.
+/// Read when the mode is; off again at the recorder's start without the two functions below: tests change it
+inline bool g_idle_wait = false;
+/// (set by vk_replay.cpp: WaitOnAddress and WakeByAddressSingle, which need windows.h; tests set fakes)
+inline bool (*g_wait_on_address)(volatile void* addr, void* compare, size_t size, uint32_t ms) = nullptr;
+inline void (*g_wake_by_address)(void* addr) = nullptr;
 
 /// RX_VK_PARALLEL as vk_replay.cpp's par_threads() reads it: 2 or more, segments of one command buffer recorded on several threads
 inline bool parallel_configured() {
@@ -188,6 +203,9 @@ inline int mode_init() {
             if (atoi(mb) > 0) g_ring_bytes = size_t(std::min(atoi(mb), 1024)) << 20;
         if (const char* s = getenv("RX_VK_RECORDER_STATS")) g_stats_log = atoi(s) != 0;
         if (const char* s = getenv("RX_VK_RECORDER_SPIN_US")) g_spin_ns = (uint64_t)std::max(1, atoi(s)) * 1000;
+        g_own = env_on("RX_VK_RECORDER_OWN");
+        const char* idle = getenv("RX_VK_RECORDER_IDLE");
+        g_idle_wait = idle && !strcmp(idle, "wait");
     }
     int was = -1;
     if (!g_mode.compare_exchange_strong(was, m, std::memory_order_relaxed)) return was;   // (another thread read it first)
@@ -202,9 +220,12 @@ inline int mode_init() {
     else if (m == THREAD)
         ::mkwvk::logf("vk: RX_VK_RECORDER=thread: vkCmd* packed on the replay thread and run in order by a recorder thread; the "
                       "replay waits for it at each command buffer begin, end and reset, submit, wait, readback, destruction and "
-                      "replay lock release (serial replay only); ring %zu KB, spin %s%llu us%s",
-                      g_ring_bytes >> 10, g_spin_ns ? "" : "adaptive 20-", (unsigned long long)(g_spin_ns ? g_spin_ns / 1000 : 200),
-                      g_poison.load(std::memory_order_relaxed) ? "; packets poisoned once run" : "");
+                      "replay lock release (serial replay only); ring %zu KB, spin %s%llu us%s%s%s",
+                      g_ring_bytes >> 10, g_idle_wait || g_spin_ns ? "" : "adaptive 20-",
+                      (unsigned long long)(g_idle_wait ? kSpinLo / 1000 : g_spin_ns ? g_spin_ns / 1000 : 200),
+                      g_poison.load(std::memory_order_relaxed) ? "; packets poisoned once run" : "",
+                      g_own ? "; a recording slot's own resets at its reuse without the wait (RX_VK_RECORDER_OWN=1)" : "",
+                      g_idle_wait ? "; idle: waits on the ring (RX_VK_RECORDER_IDLE=wait)" : "");
     return m;
 }
 inline int mode() {
@@ -314,6 +335,8 @@ inline uint64_t now_ns() {
 inline void (*g_thread_start_hook)() = nullptr;
 #ifdef RX_REC_TEST_HOOKS
 inline void (*g_test_idle_locked)() = nullptr;   // (tests: called in idle() with sleep_mu held)
+inline void (*g_test_idle_waiting)() = nullptr;   // (tests, RX_VK_RECORDER_IDLE=wait: called in idle() with sleeping set, before the wait)
+inline void (*g_test_producer_waits)() = nullptr;   // (tests: called in wait_idle() as the producer starts waiting for the recorder)
 #endif
 /// The recorder thread cannot go on (an exception out of a driver call): logged, written to stderr and the process ended, as
 /// vk_replay.cpp's replay_fatal does (exit code 3). Never swallowed: a packet not run is a command lost
@@ -331,7 +354,7 @@ struct Recorder {
     std::atomic<bool> stop_req{false};
     std::atomic<bool> ready{false};    // ring made, thread running
     std::atomic<bool> broken{false};   // no ring or no thread: the calls made directly
-    std::atomic<bool> logged_direct{false}, logged_foreign{false};
+    std::atomic<bool> logged_direct{false}, logged_foreign{false}, logged_own{false};
     uint8_t* base = nullptr;
     size_t cap = 0, mask = 0, room = 0;
     // (the producer's: its cursor, what of it is published (W), R as it last read it, and how much it writes before publishing)
@@ -353,6 +376,10 @@ struct Recorder {
     void log_stats(double secs);
 
     void wake() {
+        if (g_idle_wait) {   // (RX_VK_RECORDER_IDLE=wait: idle() waits on W)
+            g_wake_by_address(&W);
+            return;
+        }
         { std::lock_guard lk(sleep_mu); }
         sleep_cv.notify_one();
     }
@@ -390,6 +417,9 @@ struct Recorder {
         flush();
         const uint64_t target = w;
         if (idle_at(target)) return;
+#ifdef RX_REC_TEST_HOOKS
+        if (g_test_producer_waits) g_test_producer_waits();
+#endif
         const uint64_t t0 = now_ns();
         spin([&] { return idle_at(target); });
         note_wait(k, now_ns() - t0);
@@ -475,6 +505,10 @@ inline bool Recorder::start() {   // (the producer, its first packet)
     R.store(at, std::memory_order_release), w = w_pub = r_seen = at, stop_req.store(false);
     batch = std::min(g_publish_bytes, room);
     spin_limit = 0;   // (set by the recorder: g_spin_ns, or adaptive)
+    if (g_idle_wait && (!g_wait_on_address || !g_wake_by_address)) {
+        g_idle_wait = false;
+        ::mkwvk::logf("vk: RX_VK_RECORDER_IDLE=wait: no WaitOnAddress here: the recorder idles with the spin and a condition variable");
+    }
     try {
         th = std::thread([this] { main(); });
     } catch (...) {
@@ -515,7 +549,7 @@ inline void Recorder::main() {
 /// (the recorder, nothing published to run) spins a while, then sleeps until woken (or 2 ms); false: stop asked and nothing left
 inline bool Recorder::idle(uint64_t r, uint64_t& seen, uint64_t& last_log) {
     const uint64_t t0 = now_ns();
-    if (!spin_limit) spin_limit = g_spin_ns ? g_spin_ns : kSpinHi;   // (fixed, or adaptive from the top)
+    if (!spin_limit) spin_limit = g_idle_wait ? kSpinLo : g_spin_ns ? g_spin_ns : kSpinHi;   // (fixed, or adaptive from the top)
     for (uint32_t i = 0;; i++) {
         if ((seen = W.load(std::memory_order_acquire)) != r || stop_req.load(std::memory_order_acquire)) {
             spin_ns.fetch_add(now_ns() - t0, std::memory_order_relaxed);
@@ -531,7 +565,18 @@ inline bool Recorder::idle(uint64_t r, uint64_t& seen, uint64_t& last_log) {
         last_log = t0;
     }
     const uint64_t s0 = now_ns();
-    {
+    if (g_idle_wait) {
+        // (RX_VK_RECORDER_IDLE=wait: sleeping set before W is compared, and WaitOnAddress returns at once when W is no longer r: a
+        // publish before the wait is not missed. The producer wakes the address only when it saw sleeping set (flush, kick); a
+        // publish that looked before it was set finds the recorder at the 2 ms timeout, or kick() while the producer waits)
+        sleeping.store(true, std::memory_order_seq_cst);
+#ifdef RX_REC_TEST_HOOKS
+        if (g_test_idle_waiting) g_test_idle_waiting();
+#endif
+        uint64_t compare = r;
+        if (!stop_req.load()) g_wait_on_address(&W, &compare, sizeof compare, 2);
+        sleeping.store(false, std::memory_order_relaxed);
+    } else {
         std::unique_lock lk(sleep_mu);
 #ifdef RX_REC_TEST_HOOKS
         if (g_test_idle_locked) g_test_idle_locked();
@@ -543,7 +588,7 @@ inline bool Recorder::idle(uint64_t r, uint64_t& seen, uint64_t& last_log) {
     seen = W.load(std::memory_order_acquire);
     const uint64_t slept = now_ns() - s0;
     if (slept < kSpinHi) short_sleeps.fetch_add(1, std::memory_order_relaxed);
-    if (!g_spin_ns) {   // (adaptive: a short sleep means a gap the longest spin covers; a long one, a spin to shorten)
+    if (!g_spin_ns && !g_idle_wait) {   // (adaptive: a short sleep means a gap the longest spin covers; a long one, a spin to shorten)
         if (slept < kSpinHi && seen != r) spin_limit = kSpinHi;
         else if (slept >= kSpinHi) spin_limit = std::max(kSpinLo, spin_limit / 2);
     }
@@ -621,6 +666,49 @@ constexpr bool unordered(Bound k) {
     }
 }
 
+/// (THREAD, RX_VK_RECORDER_OWN=1) A recording slot's own calls at its reuse: vk_replay.cpp's begin_recording resets the slot's two
+/// command pools and begins its command buffers, vk_draw.cpp's draw_begin_recording resets its descriptor pool and destroys the
+/// extra pools it grew. Nothing still in the ring can name those: the slot's last recording ended with a wait for the recorder
+/// (vkEndCommandBuffer, a boundary), was submitted (each submit waits for the ring too) and its submit is done (recording_wait),
+/// so what the ring holds since is other command buffers' and the new use's own (its timestamps), none from these pools. The
+/// producer goes on to allocate and write descriptor sets from the pool itself, so the calls stay direct, on the producer: only
+/// the wait goes. slot_begin() checks the recorder has run the slot's last end (the ring's position after it, produced() at that
+/// end); if not, or with the switch off, the calls wait as before. OwnSlot marks the call sites, and only those: every other
+/// reset, begin and destruction still waits (the frame's command buffer, ImGui, NGX, FSR). tests/test_recorder_own_idle.py
+inline constinit thread_local bool t_slot_ready = false, t_own_slot = false;
+constexpr bool own_slot_call(Bound k) {
+    return k == B_vkResetCommandPool || k == B_vkBeginCommandBuffer || k == B_vkResetDescriptorPool || k == B_vkDestroyDescriptorPool;
+}
+/// (the producer) the ring's position after all it has written: at a slot's end, for that slot's next slot_begin()
+inline uint64_t produced() {
+    const Recorder* g = t_prod;
+    return g ? g->w : 0;
+}
+/// (the producer, a slot's reuse, before its own calls) whether OwnSlot may skip the wait for this slot's calls: the switch on,
+/// the recorder this thread's, and the recorder past the slot's last end
+inline void slot_begin(uint64_t end_pos) {
+    t_slot_ready = false;
+    if (!g_own || g_mode.load(std::memory_order_relaxed) != THREAD) return;
+    const Recorder* g = t_prod;
+    if (!g) return;
+    if (g->idle_at(end_pos)) {
+        t_slot_ready = true;
+        return;
+    }
+    if (!g_rec.logged_own.exchange(true, std::memory_order_relaxed))
+        ::mkwvk::logf("vk: RX_VK_RECORDER_OWN=1: a recording slot reused before the recorder ran its last end: its resets wait for "
+                      "the recorder, as without the switch (logged once)");
+}
+inline void slot_done() { t_slot_ready = false; }
+/// (a slot's own calls, within slot_begin() and slot_done())
+struct OwnSlot {
+    const bool was = t_own_slot;
+    OwnSlot() { t_own_slot = t_slot_ready; }
+    ~OwnSlot() { t_own_slot = was; }
+    OwnSlot(const OwnSlot&) = delete;
+    OwnSlot& operator=(const OwnSlot&) = delete;
+};
+
 /// Before a call that begins, ends or resets command buffers, submits, presents or waits, reads back what the GPU did, or lets go of
 /// what recorded commands use (vk_work.h's second list), and when the replay's lock is let go: the thread's held packets reach the
 /// driver first. DEFER: drained; THREAD: on the producer, waits until the recorder has run all it published (vkDestroyDevice and
@@ -632,6 +720,7 @@ inline void boundary(Bound k) {
     } else if (m == THREAD) {
         if (k == B_vkDestroyDevice || k == B_vkDestroyInstance) g_rec.stop();
         else if (unordered(k)) return;
+        else if (t_own_slot && own_slot_call(k)) return;   // (RX_VK_RECORDER_OWN: a slot's own resets, OwnSlot)
         else if (Recorder* g = t_prod) g->wait_idle(k);
     }
 }

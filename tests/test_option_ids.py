@@ -44,7 +44,7 @@ def main():
             return subprocess.run([args.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-c", str(path), "-o", str(obj)], capture_output=True, text=True)
         result = compile(source)
         assert result.returncode == 0, result.stderr
-        # Prove the guard catches the original collision, an implicit enum value,
+        # Prove the guard catches collisions with Walk's current IDs, an implicit enum value,
         # and a legacy numeric ID, not just collisions among explicit constants.
         for collision in (49, 50, 60, 33, 7):
             broken = source.replace("HOS_OPT_FOV = 51", f"HOS_OPT_FOV = {collision}")

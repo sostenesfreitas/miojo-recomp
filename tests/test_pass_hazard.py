@@ -20,18 +20,18 @@ def main():
     a = p.parse_args()
     source = (ROOT / "gpu" / "vk" / "vk_draw.cpp").read_text(encoding="utf-8")
     haz = block(source, "uint16_t draw_hazards(")
-    if "for (const Texture* t : pass().sampled)" in haz:
+    if "for (const Texture* t : ps.sampled)" in haz or "for (const Texture* t : pass().sampled)" in haz:
         raise SystemExit("a pass hazard walks every texture sampled so far")
     if "writes_sampled_target(" not in haz:
         raise SystemExit("a pass hazard ignores the targets earlier draws sampled")
     if haz.index("gfx_sampled") > haz.index("writes_sampled_target("):
         raise SystemExit("a draw's own samples are treated as an earlier draw's")
     begin = block(source, "void begin_pass(")
-    clear = begin.index("pass().sampled.clear()")
+    clear = begin.index("ps.sampled.clear()")
     if "sampled_targets = 0" not in begin[clear:clear + 80]:
         raise SystemExit("a new pass keeps the targets earlier draws sampled")
-    ins = source.index("pass().sampled.push_back(t);")
-    wrote = source.index("pass().written |= writes;", ins)
+    ins = source.index("ps.sampled.push_back(t);")
+    wrote = source.index("ps.written |= writes;", ins)
     if "sampled_targets" not in source[ins:wrote]:
         raise SystemExit("a sampled target is invisible to the next draw")
     fn = block(source, "bool writes_sampled_target(")

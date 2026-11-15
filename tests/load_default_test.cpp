@@ -28,9 +28,32 @@ int main(int argc, char** argv) {
     CHECK(choose("", true, false).create && choose("1", true, false).create && !choose("yes", false, false).create);
     CHECK(std::strstr(choose(nullptr, true, true).why, "hookshot_load_start.txt"));
     // the safety net: the measured good sessions pass, the measured bad ones do not; at the limits it has not fired
-    using load_default::too_slow;
-    CHECK(!too_slow(6.7, 24.4) && !too_slow(2.0, 10.8) && !too_slow(100.0, 500.0));
-    CHECK(too_slow(713, 3089) && too_slow(884, 2557) && too_slow(100.1, 101) && too_slow(40, 500.1));
+    using load_default::Waits;
+    using load_default::waits_verdict;
+    // only long waits count: a healthy session's (2-7 ms each) never add up, however many there are
+    CHECK(!load_default::counts(2.0) && !load_default::counts(6.7) && !load_default::counts(20.0) && load_default::counts(20.1));
+    CHECK(waits_verdict(0, false) == Waits::kFine && waits_verdict(0, true) == Waits::kFine);
+    // one bad moment on a healthy PC (one wait of 261 ms, with other work taking the memory): nothing, with or without a strike
+    CHECK(waits_verdict(261, false) == Waits::kFine && waits_verdict(261, true) == Waits::kFine);
+    CHECK(waits_verdict(500, false) == Waits::kFine);
+    // over 500 ms: a strike the first time, the marker when the session before was over it too
+    CHECK(waits_verdict(500.1, false) == Waits::kStrike && waits_verdict(1999, false) == Waits::kStrike);
+    CHECK(waits_verdict(500.1, true) == Waits::kStart && waits_verdict(2000, true) == Waits::kStart);
+    // the PC where loads at create do not work (RX 580: tours of 2.5-4.7 s, and one session of 62.6 ms followed by one of
+    // 2,559 ms): the marker in its first session over 2 s, nothing for the 62.6 ms one
+    CHECK(waits_verdict(62.6, false) == Waits::kFine);
+    CHECK(waits_verdict(2557, false) == Waits::kStart && waits_verdict(3089, false) == Waits::kStart &&
+          waits_verdict(4700, false) == Waits::kStart && waits_verdict(2000.1, false) == Waits::kStart);
+    CHECK(waits_verdict(2000, false) == Waits::kStrike);
+    // the strike: not there, written, taken once
+    {
+        const std::string m = std::string(argv[1]) + "/hookshot_load_start.txt";
+        CHECK(!load_default::strike_take(m));
+        CHECK(load_default::strike_write(m, 640.2) && load_default::marker_there(load_default::strike_path(m)));
+        CHECK(!load_default::marker_there(m));   // (a strike is not the marker)
+        CHECK(load_default::strike_take(m) && !load_default::strike_take(m));
+        CHECK(!load_default::strike_write(std::string(argv[1]) + "/no-such-folder/x.txt", 1));
+    }
     // the second part: listed pipelines the loads found in no cache. The clean tours had none (39 at most without mesh
     // shaders); the two sessions of the folder whose caches did not answer had 4,189 and 5,384
     using load_default::caches_lacked;

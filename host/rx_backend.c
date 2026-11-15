@@ -240,6 +240,51 @@ static void host_slept_ns(int64_t out[2]) {
     out[1] = hos_slept_ns[1] + __atomic_load_n(&hos_acquire_slept_ns, __ATOMIC_RELAXED);
 }
 
+/* (hookshot) typed text for the Insert menu's text fields (MkwVkHost.take_text): the window's thread puts each character and
+   editing key in (host/display.c WM_CHAR and WM_KEYDOWN, host/posix/display_sdl.c SDL's text input and key events), the menu
+   takes them out at its frames, in order. Nothing is kept while no field has the keyboard, and the window then takes no text
+   (SDL's text input stopped: no input method's window over the game) */
+void hos_display_paste(void);   /* display.c, posix/display_sdl.c: the clipboard's first line put in, on the window's thread */
+enum { TEXT_QUEUE = 256 };
+static SRWLOCK text_lock = SRWLOCK_INIT;
+static uint32_t text_queue[TEXT_QUEUE];
+static unsigned text_first, text_n;
+static volatile LONG text_focus;
+/* whether a field has the keyboard (the window's thread: whether to take text and editing keys) */
+int hos_text_focus(void) { return InterlockedCompareExchange(&text_focus, 0, 0); }
+/* a character typed (a Unicode code point) or HOS_TEXT_KEY | an editing key; dropped while no field has the keyboard, or when
+   the menu has not taken the last TEXT_QUEUE (it takes them at every frame) */
+void hos_text_put(uint32_t c) {
+    if (!hos_text_focus()) return;
+    AcquireSRWLockExclusive(&text_lock);
+    if (text_n < TEXT_QUEUE) text_queue[(text_first + text_n++) % TEXT_QUEUE] = c;
+    ReleaseSRWLockExclusive(&text_lock);
+}
+/* UTF-8 typed (SDL's text input) or pasted (first_line: up to its first line break), a character at a time; a broken
+   sequence is left out */
+void hos_text_put_utf8(const char *s, int first_line) {
+    while (s && *s) {
+        const unsigned char b = (unsigned char)*s++;
+        const int more = b < 0x80 ? 0 : (b & 0xe0) == 0xc0 ? 1 : (b & 0xf0) == 0xe0 ? 2 : (b & 0xf8) == 0xf0 ? 3 : -1;
+        uint32_t c = more == 0 ? b : more == 1 ? b & 0x1fu : more == 2 ? b & 0x0fu : b & 0x07u;
+        int got = 0;   /* (continuation bytes taken; the byte that broke a sequence is read again as a character's first) */
+        while (more > 0 && got < more && ((unsigned char)*s & 0xc0) == 0x80) c = c << 6 | ((unsigned char)*s++ & 0x3fu), got++;
+        if (more < 0 || got < more) continue;
+        if (first_line && (c == '\n' || c == '\r')) break;
+        hos_text_put(c);
+    }
+}
+static int host_take_text(int focus, uint32_t *out, int max) {
+    InterlockedExchange(&text_focus, focus != HOS_TEXT_OFF);
+    if (focus == HOS_TEXT_PASTE) hos_display_paste();
+    int n = 0;
+    AcquireSRWLockExclusive(&text_lock);
+    if (focus == HOS_TEXT_OFF) text_n = 0;
+    for (; n < max && text_n; n++, text_n--, text_first = (text_first + 1) % TEXT_QUEUE) out[n] = text_queue[text_first];
+    ReleaseSRWLockExclusive(&text_lock);
+    return n;
+}
+
 static const MkwVkHost vk_host = {
     MKWVK_API_VERSION, host_log, hos_guest_base, hos_guest_size, hos_gpu_ptr, nvn_gpu_guest, nvn_gpu_read,
     nvn_gpu_write, host_collect, host_free_pages, host_mark_written, hos_ticks, hos_now_ns, nvn_tex_layout,
@@ -249,6 +294,7 @@ static const MkwVkHost vk_host = {
     hos_mouse_pointer, hos_mic_count, hos_mic_name, hos_mic_select, hos_sdl_gyro_status, hos_log_flush, hos_prompts_face,
     host_romfs_dir, host_wide_menus, host_slept_ns, host_fps_timing, hos_prompts_live_parts, host_screen_size,
     hos_wide_cover,
+    host_take_text,
 };
 
 static const MkwVkRenderer *vk;   /* the Vulkan back end, when it was chosen and started */
@@ -325,8 +371,15 @@ static const MkwVkRenderer *load_vulkan(const char *dll) {
     if (!m) {
 #ifdef _WIN32
         hos_log("rx: RX_BACKEND=vulkan, but %s did not load (%lu): WebGPU", path, GetLastError());
-#else   /* (why: a missing file, or a symbol it needs that this executable lacks, as one from another build) */
-        hos_log("rx: RX_BACKEND=vulkan, but %s did not load (%s): WebGPU", path, hos_load_error());
+#else   /* (why, as dlerror() said: a missing file, a glibc too old, a wrong ELF class. The line names the file
+           LoadLibraryA opened, hookshot_vk.so, and drops dlerror()'s leading "<that file>: ", so the path, home folder
+           included, is in it once. Linux has no WebGPU: wgr_start draws nothing) */
+        char *ext = strrchr(path, '.');
+        if (ext && !strcmp(ext, ".dll")) strcpy(ext, ".so");
+        const char *why = hos_load_error();
+        const size_t n_path = strlen(path);
+        if (!strncmp(why, path, n_path) && !strncmp(why + n_path, ": ", 2)) why += n_path + 2;
+        hos_log("rx: RX_BACKEND=vulkan, but %s did not load (%s): nothing is drawn", path, why);
 #endif
         return NULL;
     }

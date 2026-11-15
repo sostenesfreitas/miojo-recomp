@@ -6,7 +6,10 @@ fg_scale_comp_spv.h names the hash of the fg_scale.comp it was made from (its fi
 is now with or without glslang; with glslangValidator the shader compiles, and with the version the header names, the rest of
 the header is its output byte for byte. --write makes the header: glslang's output with that line on top. The same for
 fg_scale_pq_comp_spv.h, fg_scale.comp compiled with FG_SCALE_PQ (its destination RGB10A2, for the game's own HDR10 picture:
-Native HDR), whose destination and dither this checks too.
+Native HDR), whose destination and dither this checks too. And the scaling filters, the shader's own kernel() compiled as C++
+over its tap range: shrinking (the picture larger than the window), each stretched by the shrink, so detail finer than the
+window can show stays out (it aliased, worse than the plain linear copy, at the picture's own spacing); at stretch 1 the
+4 x 4 Catmull-Rom and Lanczos taps as before.
 
 python -I -B tests/test_fg_scale_sharpen.py [--cxx g++] [--glslang glslangValidator] [--write]
 """
@@ -124,6 +127,50 @@ int main() {
 }
 '''
 
+# (the scaling filters: the shader's kernel() and reach() over its tap range, one axis; a sine finer than the window can show
+# should come out nearly flat, its swing what aliases into the window)
+FILTER = r'''
+#include <vector>
+#define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); std::exit(1); } } while (0)
+static float shrink_alias(int S, int D) {
+    const float r = (float)S / (float)D, s = std::clamp(r, 1.0f, kMaxStretch), nyq = 0.5f / r;
+    std::vector<float> sig(S);
+    float total = 0.0f;
+    for (int k = 0; k < 24; k++) {
+        const float f = nyq * 1.3f + (0.5f - nyq * 1.3f) * (float)k / 23.0f;
+        for (int i = 0; i < S; i++) sig[i] = std::sin(6.2831853f * f * (float)i + 0.3f);
+        float lo = 1e9f, hi = -1e9f;
+        for (int g = D / 8; g < D - D / 8; g++) {   // (away from the clamped edges)
+            const float p = ((float)g + 0.5f) * r - 0.5f;
+            const int a = (int)std::floor(p - reach() * s) + 1, b = (int)std::floor(p + reach() * s);
+            float sum = 0.0f, w = 0.0f;
+            for (int x = a; x <= b; x++) {
+                const float kw = kernel(((float)x - p) / s);
+                sum += kw * sig[std::clamp(x, 0, S - 1)];
+                w += kw;
+            }
+            lo = std::min(lo, sum / w), hi = std::max(hi, sum / w);
+        }
+        total += (hi - lo) / 2.0f;
+    }
+    return total / 24.0f;
+}
+int main() {
+    // (4K, 5K and 1440p pictures in 1440p and 1080p windows: 1.33 to 2.67 picture pixels a window pixel. At the picture's own
+    // spacing these were 0.27 to 0.89 of the sine's swing; stretched, 0.02 to 0.27)
+    const int sizes[][2] = {{3840, 2560}, {5120, 2560}, {2560, 1920}, {3840, 1920}, {5120, 1920}};
+    for (int mode : {0, 1, 2}) {
+        pc.mode = mode;
+        for (const auto& z : sizes) {
+            const float a = shrink_alias(z[0], z[1]);
+            if (!(a < 0.3f)) std::fprintf(stderr, "mode %d, %d to %d: %.3f of the swing aliases\n", mode, z[0], z[1], a);
+            CHECK(a < 0.3f);
+        }
+    }
+    std::printf("PASS: shrinking, each filter is stretched and keeps detail finer than the window from aliasing\n");
+}
+'''
+
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -173,6 +220,16 @@ def main():
         cpp = Path(tmp) / "fixture.cpp"
         exe = Path(tmp) / "fixture"
         cpp.write_text(fixture, encoding="utf-8")
+        subprocess.run([a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Wno-unused-function", str(cpp), "-o", str(exe)], check=True)
+        subprocess.run([str(exe)], check=True)
+        if "clamp(size / vec2(imageSize(dst)), vec2(1.0), vec2(kMaxStretch))" not in block(text, "vec3 filtered("):
+            raise SystemExit("filtered() does not stretch its filter by the picture's pixels per window pixel")
+        filt = "\n".join(re.search(r"const float %s = [^;]*;" % n, text).group(0).replace("const", "static const")
+                         for n in ("PI", "kMaxStretch"))
+        filt += "".join("\nstatic " + block(text, f) for f in ("float lanczos2(", "float catmull(", "float tent(",
+                                                             "float kernel(", "float reach("))
+        cpp.write_text(SHIM + "using std::abs;\nusing std::sin;\nstatic struct { int mode; } pc;\n" + filt + FILTER,
+                       encoding="utf-8")
         subprocess.run([a.cxx, "-std=c++20", "-O1", "-Wall", "-Wextra", "-Wno-unused-function", str(cpp), "-o", str(exe)], check=True)
         subprocess.run([str(exe)], check=True)
         glslang = shutil.which(a.glslang)

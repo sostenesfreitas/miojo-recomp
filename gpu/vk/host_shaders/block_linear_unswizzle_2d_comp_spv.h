@@ -6,7 +6,7 @@
 // src/video_core/host_shaders/block_linear_unswizzle_2d.comp of Eglantine, the Switch 2 fork of the emulator Eden
 // (https://github.com/Eglantine-Community/Eglantine, branch nx2), written for yuzu by ReinUsesLisp (2020), changed in
 // Eden by lizzie (2026), and given the Switch 2 tiling in Eglantine by Takoroka (51207c73c8, 2026-10-28). It carries
-// that file's copyright and license notices above; see readme.md, "License".
+// that file's copyright and license notices above; see README.md, "License".
 // The block-linear unswizzle, with the Switch 2 tiling. The Vulkan back end runs it to turn big textures from the
 // console's block-linear layout into a linear image on the GPU (vk_texture.cpp).
 // Made by scripts/host_shaders.py (glslang 16.6.0, --target-env vulkan1.1, gives these bytes exactly): edit the .comp

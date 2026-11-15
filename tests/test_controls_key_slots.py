@@ -57,7 +57,7 @@ static const int kTop = 1, kControls = 3;
 static bool keys_only(int i) { return i == 2; }
 static int csel, ccol, listening;
 static bool changed, press[16];
-static struct { int pad_layout; } opts;
+static struct { int pad_layout; int hold_toggle; } opts;
 static int detect_pad_layout() { return 0; }
 static void save() {}
 

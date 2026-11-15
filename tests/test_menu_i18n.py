@@ -73,6 +73,34 @@ class MenuI18nTests(unittest.TestCase):
             for name, hint in hints.items():
                 self.assertTrue(hint in keys, "%s: missing current %s hint" % (table, name))
 
+    def test_custom_output_texts_are_translated(self):
+        texts = (
+            "Custom output size",
+            "An Output resolution of your own, typed as width x height: your monitor's size, such as 3440x1440, 2560x1080 or "
+            "2560x1600. Each side is rounded down to a multiple of 8; a size the Output resolution offers is chosen there. Empty: "
+            "none. Docked only. Applies after a restart.",
+            "Type the width, an x, then the height: 3440x1440.",
+            "Not a size the game can draw: at least 640x360, at most 5120x2880's pixels, from 5:4 to 48:9 in shape.",
+            "None", "Edit", "Paste", "Done", "Cancel", "Caret", "Character", "Add", "Remove",
+        )
+        self.assertEqual(len(self.tables), 13)
+        for text in texts:
+            self.assertIn(text, self.menu)
+        for table, pairs in self.tables.items():
+            translated = dict(pairs)
+            for text in texts:
+                with self.subTest(table=table, text=text):
+                    self.assertIn(text, translated)
+                    self.assertNotEqual(translated[text], text)
+
+    def test_custom_output_hint_uses_local_row_name(self):
+        for table, pairs in self.tables.items():
+            translated = dict(pairs)
+            with self.subTest(table=table):
+                hint = translated["Your own size, from Custom output size below."]
+                self.assertNotIn("Custom output size", hint)
+                self.assertIn(translated["Custom output size"], hint)
+
     def test_plural_forms(self):
         # (i18n::plural: Russian and Polish ask for a third form, " settings (many)", for 5 and up; the menu shows it
         # nowhere else, so only their tables have it)

@@ -117,6 +117,30 @@ int main() {
         const dc::ModeRange z[] = {{0, 0, 0, 0}};
         CHECK("no range", dc::mode_for(1472, 622, 4416, 1864, z, 1, &took) == -1);
     }
+    // ---- the DLSS model row stepped through (issue 17): K (11) to L (12) passes M (13) ----
+    {
+        const unsigned K = 11, L = 12, M = 13;
+        dc::PresetSettle p;
+        // (the first feature takes the row's preset at once)
+        CHECK("first feature", p.pick(K, ~0u, false, 100, 30) == K);
+        CHECK("held", p.pick(K, K, true, 101, 30) == K);
+        // (Right twice, 11 frames apart as in the report's log: neither press makes a feature until the row holds L)
+        CHECK("M stepped past", p.pick(M, K, true, 200, 30) == K);
+        CHECK("M still stepped past", p.pick(M, K, true, 205, 30) == K);
+        CHECK("L just picked", p.pick(L, K, true, 211, 30) == K);
+        CHECK("L not yet held", p.pick(L, K, true, 240, 30) == K);
+        CHECK("L held half a second", p.pick(L, K, true, 241, 30) == L);
+        CHECK("L made", p.pick(L, L, true, 242, 30) == L);
+        // (back to the feature's own preset before the wait ended: nothing to make)
+        CHECK("away", p.pick(M, L, true, 300, 30) == L);
+        CHECK("and back", p.pick(L, L, true, 305, 30) == L);
+        CHECK("and back, later", p.pick(L, L, true, 400, 30) == L);
+        // (no feature (let go, or not made): the row's preset at once, held or not)
+        CHECK("no feature", p.pick(M, L, false, 401, 30) == M);
+        // (NVIDIA's default (0) is a preset like the others)
+        CHECK("default stepped to", p.pick(0, M, true, 500, 30) == M);
+        CHECK("default held", p.pick(0, M, true, 530, 30) == 0);
+    }
     std::puts("dlss checks: ok");
     return 0;
 }

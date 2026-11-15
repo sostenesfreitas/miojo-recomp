@@ -809,8 +809,9 @@ static int au_device_channels(void) {
 static int au_device_channels(void) { return hos_sdl_audio_channels(); }
 #endif
 /* (hookshot) The Insert menu's Audio output (gpu/vk/vk_menu.cpp): audio_output= in hookshot_options.ini beside the game,
-   0 Auto, 1 Stereo, 2 5.1 (a number past them is the nearest, as the menu reads it). Read from the file, as
-   host/nn_applet.c reads the Handheld profile: the game asks for its speakers only once, at its start */
+   0 Auto, 1 Stereo, 2 5.1, 3 Mono (stereo with a live final average). A number past them is the nearest, as the menu reads
+   it. Read from the file, as host/nn_applet.c reads the Handheld profile: the game asks for its speakers only once,
+   at its start */
 static int au_menu_output(void) {
     char path[MAX_PATH];
     const DWORD len = hos_game_path_a(path, MAX_PATH);
@@ -824,10 +825,10 @@ static int au_menu_output(void) {
     while (fgets(line, sizeof line, f))
         if (!strncmp(line, "audio_output=", 13)) v = atoi(line + 13);
     fclose(f);
-    return v < 1 ? 0 : v > 2 ? 2 : v;
+    return v < 1 ? 0 : v > 3 ? 3 : v;
 }
-/* The speakers the game mixes for: the Insert menu's Audio output, Stereo 2 or 5.1 6, HOS_AUDIO_CHANNELS=2 or 6 over it;
-   Auto: 6 when the default output has 5.1 or more speakers (au_layout_channels), else 2. The game asks once, at its start
+/* The speakers the game mixes for: the Insert menu's Audio output, Stereo/Mono 2 or 5.1 6, HOS_AUDIO_CHANNELS=2 or 6 over it;
+   Auto: 6 when the default output has 5.1 or more, else 2. The game asks once, at its start
    (GetActiveAudioDeviceChannelCountForOutput), and pans for that many, so a change takes a restart. Told 2 (always,
    before), it put nothing behind the player, and a 5.1 system played the whole game from the front speakers (issue
    1124). Its device sink has the six channels either way; with two speakers they are mixed down. */
@@ -1328,6 +1329,15 @@ static float audio_player_gain(void) {
     return audio_volume_curve(volume);
 }
 
+/* Average in 32 bits so full-scale samples cannot overflow. Surround stays untouched. */
+static void audio_mono(int16_t *pcm, int frames, int channels, int enabled) {
+    if (!enabled || channels != 2) return;
+    for (int i = 0; i < frames; i++) {
+        const int16_t mono = (int16_t)(((int32_t)pcm[2 * i] + pcm[2 * i + 1]) / 2);
+        pcm[2 * i] = pcm[2 * i + 1] = mono;
+    }
+}
+
 /* ---- the renderer thread --------------------------------------------------------------------------------------- */
 static uint64_t renderer_event;
 static volatile int renderer_running;
@@ -1352,6 +1362,8 @@ static DWORD WINAPI renderer_main(void *p) {
         au_unlock();
         if (gain_frames-- <= 0) gain_want = audio_player_gain(), gain_frames = 20;   /* (the menu read every 100 ms) */
         gain = audio_apply_gain(pcm, FRAME, out_channels, gain, gain_want);
+        int rx_option(int id, int otherwise);
+        audio_mono(pcm, FRAME, out_channels, rx_option(HOS_OPT_AUDIO_OUTPUT, 0) == 3);
         output_frame(pcm);
         elapsed_frames++;
         if (renderer_event) hos_system_event_signal(renderer_event);

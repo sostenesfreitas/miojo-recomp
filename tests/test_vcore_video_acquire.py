@@ -99,6 +99,7 @@ static void picture_free(Picture *p) { free(p->rgba), free(p->nv12); memset(p, 0
 static Pending one;
 static int late, end_after;
 static int stopped_now;   /* (the decoder was stopped or flushed and nothing was submitted since) */
+static int prior_acquires;   /* (every acquire waits ~100 ms, the first too) */
 static void decode_next(Dec *d) {
     decodes++;
     decodes_with_core += held;
@@ -112,6 +113,7 @@ static void decode_next(Dec *d) {
     d->qn++;
 }
 static void decode_pending(Dec *d) { decode_next(d); }
+static void input_room(Dec *d) { (void)d; }   /* (the input limit's event: tests/test_video_input_limit.py) */
 
 @ACQUIRE@
 
@@ -127,6 +129,7 @@ static uint64_t acquire(int core, int pending, int registered) {
     dec.slots[0] = registered ? 2 : 0;
     dec.phead = dec.ptail = pending ? &one : NULL;
     dec.stopped = stopped_now;
+    dec.acquires = prior_acquires;
     Ctx c;
     memset(&c, 0, sizeof c);
     c.x[0] = (uint64_t)(uintptr_t)&index, c.x[1] = (uint64_t)(uintptr_t)&sync, c.x[2] = 1;
@@ -160,14 +163,19 @@ int main(void) {
     r = acquire(0, 1, 1);
     check(r == 0 && held == 0 && takes == 0, "a thread that held no core takes none");
 
-    /* the wait for a picture another thread's submission may bring: ~100 ms by the clock, whatever a sleep takes, and none
-       after a Stop or a Flush (a movie's end: the thread its teardown joins sat here for 245-257 ms) */
+    /* the wait for a picture another thread's submission may bring, by the clock, and none after a Stop or a Flush
+       (a movie's end: the thread its teardown joins sat here for 245-257 ms). ~100 ms, the first acquire too, including
+       when a sleep takes 5 ms */
     r = acquire(1, 0, 1);
-    check(r == 0 && sleeps == 50 && sleeps_with_core == 0, "nothing decoded yet: 100 ms of 2-ms sleeps, then the buffer again");
+    check(r == 0 && sleeps == 50 && sleeps_with_core == 0, "the first acquire waits ~100 ms of 2-ms sleeps, then the buffer again");
+    prior_acquires = 1;
+    r = acquire(1, 0, 1);
+    check(r == 0 && sleeps == 50 && sleeps_with_core == 0, "an acquire after the first waits ~100 ms");
     sleep_takes_ns = 5000000;
     const int64_t before = clock_ns;
     r = acquire(1, 0, 1);
     check(r == 0 && sleeps == 20 && clock_ns - before == 100000000, "sleeps that take 5 ms: still 100 ms, not 50 tries (250 ms)");
+    prior_acquires = 0;
     stopped_now = 1;
     r = acquire(1, 0, 1);
     check(r == 0 && sleeps == 0 && dec.acquires == 1, "stopped and nothing submitted since: no wait, the buffer again at once");

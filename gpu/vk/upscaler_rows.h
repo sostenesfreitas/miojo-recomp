@@ -22,6 +22,10 @@ inline unsigned dlss_bits(bool dlss_ok) { return dlss_ok ? bit(DLSS) | bit(DLAA)
 inline unsigned fsr4_bits(bool fsr4_ok) { return fsr4_ok ? bit(FSR4) | bit(FSR4_AA) : 0u; }
 inline bool is_dlss(int upscaler) { return upscaler == DLSS || upscaler == DLAA; }
 inline bool is_fsr4(int upscaler) { return upscaler == FSR4 || upscaler == FSR4_AA; }
+/// The engines that take Native PsychoV35's RGBA16F scene with RX_VK_PSYCHOV35_DLSS=1 (vk_temporal.cpp temporal_scene_format):
+/// those the frame chain gives linear light in an HDR context, DLSS / DLAA and FSR 4 / its native AA. FSR 3.1 has its own
+/// B10G11R11 inputs, and the game's network and Off need no scene
+inline bool takes_psychov35(int upscaler) { return is_dlss(upscaler) || is_fsr4(upscaler); }
 /// The 3D drawn at full size, the upscaler anti-aliasing alone (DLAA, FSR 4's native AA): the Render resolution row does not
 /// apply
 inline bool full_scale(int upscaler) { return upscaler == DLAA || upscaler == FSR4_AA; }
@@ -165,8 +169,8 @@ inline int slider_snap(int v) {
     }
     return best;
 }
-/// The Render resolution after a change of Upscaler or a preset: with an engine that has a Native, the slider's stop nearest it
-/// (its own value when it is one); else snap() as before
+/// The active Render resolution (also used when choosing a quality preset): the nearest supported step. Changing engines
+/// must not save this over the player's choice, so a scale missing on another engine comes back on return.
 inline int snap_render(int upscaler, int v) { return native_of(engine(upscaler)) >= 0 ? slider_snap(v) : snap(upscaler, v); }
 
 /// The Render resolution row's next step from (upscaler, v), dir +1 Right / -1 Left, wrapping: with an engine that has a

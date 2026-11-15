@@ -81,6 +81,7 @@ std::string predict_pending_path() {
     return path;
 }
 void predicted_sample_write(const std::vector<std::unique_ptr<PipeNote>>&) {}
+void predicted_keys_write(std::vector<uint64_t>) {}
 void driver_cache_log(const char*) {}
 unsigned usable_cpus() { return std::max(1u, std::thread::hardware_concurrency()); }
 inline uint64_t mix(uint64_t h, uint64_t v) { return (h ^ v) * 0x100000001b3ull; }
@@ -302,8 +303,10 @@ def check_watchdog(cxx, tmp):
     main = (ROOT / "gpu/vk/vk_main.cpp").read_text(encoding="utf-8")
     watch = main[main.index("struct PrepareSeen {"):]
     watch = watch[:watch.index(block(watch, "void prepare_watchdog() {")) + len(block(watch, "void prepare_watchdog() {"))]
-    pieces = [block(main, "int64_t steady_ms() {"), "std::atomic<int64_t> last_log_ms{0};\n", block(main, "void logf(const char* fmt, ...) {"),
-              watch]
+    internal = (ROOT / "gpu/vk/vk_internal.h").read_text(encoding="utf-8")
+    pieces = [block(main, "int64_t steady_ms() {"), "std::atomic<int64_t> last_log_ms{0};\n",
+              internal[internal.index("enum LogLevel"):internal.index(";", internal.index("enum LogLevel")) + 1],
+              block(main, "static void vlogf("), block(main, "void logf(const char* fmt, ...) {"), watch]
     exe = compile_run(cxx, "watchdog", WATCH_HEAD + "\n".join(pieces) + WATCH_MAIN, tmp)
     for case, code, need, never in (
             ("stuck", 4, ["waiting on the GPU driver or the disk", "the predicted pipelines (5 of 10)", "STOPPED"], ["faulted"]),

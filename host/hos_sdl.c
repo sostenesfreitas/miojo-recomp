@@ -16,6 +16,7 @@ static struct {
     void *CreateWindow, *SetWindowPosition, *SetWindowFullscreen, *SetRelativeMouseMode, *GetPrimaryDisplay,
         *GetDesktopDisplayMode, *Vulkan_CreateSurface, *PixelSize, *GetKeyboardState, *GetMouseState, *WaitEventTimeout,
         *PollEvent, *GetWindowSize, *LoadPNG, *SetWindowIcon, *DestroySurface, *GetWindowDisplay, *GetCurrentDisplayMode;
+    void *StartTextInput, *StopTextInput, *GetClipboardText;   /* (hookshot: the menu's text fields; optional) */
     /* sound */
     void *OpenAudioDevice, *PauseAudioDevice, *OpenAudioDeviceStream, *ResumeAudioStreamDevice, *PutAudioStreamData;
     void *CloseAudioDevice, *DestroyAudioStream;
@@ -81,6 +82,10 @@ static int get_all(HMODULE m, int three) {
     *(FARPROC *)&f.SetHintPriority = GetProcAddress(m, "SDL_SetHintWithPriority");
     *(FARPROC *)&f.JoystickGUID = GetProcAddress(m, three ? "SDL_GetJoystickGUID" : "SDL_JoystickGetGUID");
     *(FARPROC *)&f.PadMapping = GetProcAddress(m, three ? "SDL_GetGamepadMapping" : "SDL_GameControllerMapping");
+    /* (hookshot: the Insert menu's text fields; without them a field takes nothing from the keyboard here) */
+    *(FARPROC *)&f.StartTextInput = GetProcAddress(m, "SDL_StartTextInput");
+    *(FARPROC *)&f.StopTextInput = GetProcAddress(m, "SDL_StopTextInput");
+    *(FARPROC *)&f.GetClipboardText = GetProcAddress(m, "SDL_GetClipboardText");
     if (three) {
         *(FARPROC *)&f.GetJoystick = GetProcAddress(m, "SDL_GetGamepadJoystick");   /* (optional: diagnostics only) */
         GET(SetWindowPosition, "SDL_SetWindowPosition");
@@ -235,6 +240,16 @@ void hos_sdl_icon(void *window, const char *png) {
     CALL(_Bool (*)(void *, void *), SetWindowIcon)(window, icon);
     CALL(void (*)(void *), DestroySurface)(icon);
 }
+void hos_sdl_text_input(void *window, int on) {
+    void *fn = on ? f.StartTextInput : f.StopTextInput;
+    if (!fn) return;
+    if (version == 3) ((_Bool (*)(void *))fn)(window);
+    else ((void (*)(void))fn)();
+}
+char *hos_sdl_clipboard(void) { return f.GetClipboardText ? CALL(char *(*)(void), GetClipboardText)() : NULL; }
+void hos_sdl_free(void *p) {
+    if (p && f.Free) CALL(void (*)(void *), Free)(p);
+}
 uint32_t hos_sdl_mouse_buttons(void) {
     return version == 3 ? CALL(uint32_t (*)(float *, float *), GetMouseState)(NULL, NULL)
                         : CALL(uint32_t (*)(int *, int *), GetMouseState)(NULL, NULL);
@@ -253,6 +268,13 @@ void hos_sdl_window_size(void *window, int *width, int *height) {
 }
 
 /* ---- events ---- */
+/* (the text of a text event, cut at a whole character to fit e->text) */
+static void event_text(HosSdlEvent *e, const char *t) {
+    size_t n = t ? strnlen(t, sizeof e->text - 1) : 0;
+    if (t && t[n]) while (n && ((unsigned char)t[n] & 0xc0) == 0x80) n--;   /* (cut inside a character: before it) */
+    if (n) memcpy(e->text, t, n);
+    e->text[n] = 0;
+}
 static void read_event(const uint8_t *raw, HosSdlEvent *e) {
     uint32_t type;
     memcpy(&type, raw, 4);
@@ -266,11 +288,18 @@ static void read_event(const uint8_t *raw, HosSdlEvent *e) {
         case 0x20e: e->type = HOS_SDL_EV_FOCUS_GAINED; break;
         case 0x20f: e->type = HOS_SDL_EV_FOCUS_LOST; break;
         case 0x210: e->type = HOS_SDL_EV_CLOSE; break;
-        case 0x300:   /* (SDL_KeyboardEvent: scancode at 24, mod at 32, repeat at 37) */
+        case 0x300:   /* (SDL_KeyboardEvent: scancode at 24, keycode at 28, mod at 32, repeat at 37) */
             e->type = HOS_SDL_EV_KEY_DOWN;
-            memcpy(i, raw + 24, 4), e->scancode = i[0];
+            memcpy(i, raw + 24, 8), e->scancode = i[0], e->key = i[1];
             memcpy(&e->mod, raw + 32, 2), e->repeat = raw[37];
             break;
+        case 0x303: {   /* (SDL_TextInputEvent: the text's pointer at 24) */
+            const char *t;
+            memcpy(&t, raw + 24, sizeof t);
+            e->type = HOS_SDL_EV_TEXT;
+            event_text(e, t);
+            break;
+        }
         case 0x20c: e->type = HOS_SDL_EV_MOUSE_ENTER; break;
         case 0x400:   /* (SDL_MouseMotionEvent: x and y at 28 and 32, xrel and yrel at 36 and 40, floats) */
             e->type = HOS_SDL_EV_MOUSE_MOTION;
@@ -300,10 +329,14 @@ static void read_event(const uint8_t *raw, HosSdlEvent *e) {
                 : raw[12] == 12 ? HOS_SDL_EV_FOCUS_GAINED : raw[12] == 13 ? HOS_SDL_EV_FOCUS_LOST
                 : raw[12] == 14 ? HOS_SDL_EV_CLOSE : HOS_SDL_EV_OTHER;
         break;
-    case 0x300:   /* (SDL_KeyboardEvent: repeat at 13, scancode at 16, mod at 24) */
+    case 0x300:   /* (SDL_KeyboardEvent: repeat at 13, scancode at 16, keycode at 20, mod at 24) */
         e->type = HOS_SDL_EV_KEY_DOWN;
-        memcpy(i, raw + 16, 4), e->scancode = i[0];
+        memcpy(i, raw + 16, 8), e->scancode = i[0], e->key = i[1];
         memcpy(&e->mod, raw + 24, 2), e->repeat = raw[13];
+        break;
+    case 0x303:   /* (SDL_TextInputEvent: the text itself at 12, 32 bytes) */
+        e->type = HOS_SDL_EV_TEXT;
+        event_text(e, (const char *)raw + 12);
         break;
     case 0x400:   /* (SDL_MouseMotionEvent: x and y at 20 and 24, xrel and yrel at 28 and 32, whole pixels) */
         e->type = HOS_SDL_EV_MOUSE_MOTION;

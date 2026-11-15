@@ -7,15 +7,13 @@ mixed with kProgramCacheFormat. The cache's reads and the prepare's scheduling a
 files: an edit there kept nothing out before (they were in vk_shader.cpp, so every such change made every player translate the whole
 game again). A change to what a record holds raises kProgramCacheFormat instead.
 
-Checked here: nx2/build.py's real stamp block, run on authored files, changes for a vk_shader.cpp edit and not for a vk_progcache.cpp
-or vk_progcache.h edit; and in the source, that the program cache's file, index, notes and prepared stamps all come from
+Checked here: nx2/build.py's stamp (nx2/translator_files.py), run on authored files, changes for a vk_shader.cpp edit and not
+for a vk_progcache.cpp or vk_progcache.h edit; and in the source, that the program cache's file, index, notes and prepared stamps all come from
 program_cache_stamp, which takes translator_stamp and kProgramCacheFormat, and that the cache's reads are no longer in vk_shader.cpp.
 
 No compiler, Vulkan, GPU or game. python -I -B tests/test_program_cache_format.py
 """
-import ast
-import hashlib
-import os
+import importlib.util
 from pathlib import Path
 import re
 import sys
@@ -37,41 +35,36 @@ def body(text, marker):
     return text[start:at]
 
 
-def stamp_block():
-    tree = ast.parse((ROOT / "nx2" / "build.py").read_text(encoding="utf-8"))
-    assigns = lambda n, name: isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)
-    branches = [n for n in ast.walk(tree) if isinstance(n, ast.If) and any(assigns(s, "translator") for s in n.body)]
-    if len(branches) != 1:
-        raise SystemExit("FAIL: nx2/build.py's translator stamp block not found")
-    body_ = [n for n in branches[0].body if assigns(n, "stamp") or assigns(n, "translator") or
-             isinstance(n, ast.For) and isinstance(n.iter, ast.BinOp) and any(
-                 isinstance(x, ast.Name) and x.id == "translator" for x in ast.walk(n.iter))]
-    if len(body_) != 3:
-        raise SystemExit("FAIL: expected the hash, the translator list and the file loop")
-    return compile(ast.Module(body=body_, type_ignores=[]), "nx2/build.py", "exec")
+def translator_files():
+    """nx2/translator_files.py, which nx2/build.py's HOOKSHOT_SHADER_STAMP is made from"""
+    build = (ROOT / "nx2" / "build.py").read_text(encoding="utf-8")
+    if 'shader_stamp = "-DHOOKSHOT_SHADER_STAMP=0x%sull" % translator_files.stamp(vk)' not in build:
+        raise SystemExit("FAIL: nx2/build.py's HOOKSHOT_SHADER_STAMP is no longer translator_files.stamp: update this check")
+    spec = importlib.util.spec_from_file_location("translator_files_under_test", ROOT / "nx2" / "translator_files.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
 
 
 def main():
-    code = stamp_block()
+    files = translator_files()
     with tempfile.TemporaryDirectory(prefix="program-cache-format-") as tmp:
         vk = Path(tmp) / "gpu/vk"
         for rel in ("eden/a.cpp", "sirit/a.cpp", "compat/a.h", "vk_shader.cpp", "vk_bank.cpp", "vk_state.h", "vk_api.h",
                     "vk_progcache.cpp", "vk_progcache.h"):
             f = vk / rel
             f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_bytes(b"authored input\n")
+            f.write_bytes(b"int authored_input;\n")
 
         def stamp():
-            ns = dict(os=os, hashlib=hashlib, vk=str(vk))
-            exec(code, ns)
-            return ns["stamp"].hexdigest()[:16]
+            return files.stamp(str(vk))
 
         first = stamp()
-        (vk / "vk_progcache.cpp").write_bytes(b"the precompile reads on more threads\n")
-        (vk / "vk_progcache.h").write_bytes(b"a reader's helper moved\n")
+        (vk / "vk_progcache.cpp").write_bytes(b"int the_precompile_reads_on_more_threads;\n")
+        (vk / "vk_progcache.h").write_bytes(b"int a_readers_helper_moved;\n")
         if stamp() != first:
             raise SystemExit("FAIL: an edit to the program cache's reads changes the translator stamp: every player translates again")
-        (vk / "vk_shader.cpp").write_bytes(b"a translation fix\n")
+        (vk / "vk_shader.cpp").write_bytes(b"int a_translation_fix;\n")
         if stamp() == first:
             raise SystemExit("FAIL: an edit to the translator keeps the programs it translated before")
 

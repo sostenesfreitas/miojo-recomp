@@ -59,6 +59,14 @@ VkResult vkCreateComputePipelines(VkDevice, VkPipelineCache, uint32_t count, con
     // Vulkan may return owned pipeline handles together with an error: cleanup must inspect the output.
     *p = allocate('P', info->layout); return fail ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_SUCCESS;
 }
+// Outside Intel on Windows, the gate does not lock and the guarded calls use these same Vulkan entry points.
+struct IntelDriverGate { IntelDriverGate() {} };
+VkResult extern_guarded_shader_module(const VkShaderModuleCreateInfo* ci, VkShaderModule* module) {
+    return vkCreateShaderModule(dev.device, ci, nullptr, module);
+}
+VkResult extern_guarded_compute(VkPipelineCache cache, const VkComputePipelineCreateInfo* ci, VkPipeline* pipeline) {
+    return vkCreateComputePipelines(dev.device, cache, 1, ci, nullptr, pipeline);
+}
 void vkDestroyPipeline(VkDevice, VkPipeline h, const VkAllocationCallbacks*) { release(h, 'P'); }
 void vkDestroyPipelineLayout(VkDevice, VkPipelineLayout h, const VkAllocationCallbacks*) { release(h, 'L'); }
 void vkDestroyDescriptorSetLayout(VkDevice, VkDescriptorSetLayout h, const VkAllocationCallbacks*) { release(h, 'D'); }

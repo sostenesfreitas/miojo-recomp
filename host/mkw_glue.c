@@ -2,6 +2,8 @@
    commit (TOTK commits its whole 4 GB window up front; MKW's 512 GB window is only reserved), and stand-ins for the
    hooks of files not taken into host/ (the renderer and display, the profiler, mods, TOTK's own patches). */
 #include "hos.h"
+#include "hos_crash_record.h"
+#include "hos_paths.h"
 #ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
 #include "../gpu/vk/compat/hookshot_env.h"
 #endif
@@ -51,18 +53,21 @@ static void commit_refused(uint64_t lo, uint64_t size, DWORD err) {
     }
 }
 
-void hos_commit(uint64_t addr, uint64_t size) {
-    if (!size) return;
+/* 1: the range is committed; 0: it is not (outside the guest window, or refused: logged) */
+int hos_commit(uint64_t addr, uint64_t size) {
+    if (!size) return 1;
     if (!hos_guest_range(addr, size)) {   /* (hookshot: guest pages only; the posix layer's commit changes any page's protection) */
         hos_log("mem: commit of %#llx bytes at %#llx: outside the guest window", (unsigned long long)size, (unsigned long long)addr);
-        return;
+        return 0;
     }
     const uint64_t lo = addr & ~0xFFFFULL, hi = (addr + size + 0xFFFF) & ~0xFFFFULL;
     if (!VirtualAlloc(GP(lo), (SIZE_T)(hi - lo), MEM_COMMIT, PAGE_READWRITE)) {
         const DWORD err = GetLastError();
-        if (err == ERROR_COMMITMENT_LIMIT && commit_wait(GP(lo), (SIZE_T)(hi - lo))) return;
+        if (err == ERROR_COMMITMENT_LIMIT && commit_wait(GP(lo), (SIZE_T)(hi - lo))) return 1;
         commit_refused(lo, hi - lo, err);
+        return 0;
     }
+    return 1;
 }
 
 DWORD WINAPI hos_out_of_memory_box(LPVOID unused) {
@@ -84,7 +89,18 @@ static LONG CALLBACK commit_on_touch(EXCEPTION_POINTERS *info) {
     const uint64_t guest = (uint64_t)(p - A64_MEM);
     if (guest < 0x100000) return EXCEPTION_CONTINUE_SEARCH;   /* (a null pointer: the game's own fault) */
     MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery(p, &mbi, sizeof mbi) || mbi.State != MEM_RESERVE) return EXCEPTION_CONTINUE_SEARCH;
+    if (!VirtualQuery(p, &mbi, sizeof mbi)) return EXCEPTION_CONTINUE_SEARCH;
+#ifdef _WIN32
+    /* (another thread committed this 64 KB between the fault and the look: the access is tried again. The heap is committed on
+       touch now (hos_mem.c), and two threads touching one new chunk at once crashed the second in the boot's module loads.
+       Not an execute fault (8, DEP): a jump into guest memory would fault again at once, forever; it goes on to the crash report.
+       Windows only: Linux commits nothing lazily, its VirtualQuery stand-in calls every guest page committed and read-write, and
+       its signal handler never sets 8, so there every SIGSEGV and SIGBUS in the window would be tried again forever, at 100% CPU,
+       rather than reach report_crash) */
+    if (mbi.State == MEM_COMMIT && mbi.Protect == PAGE_READWRITE && rec->ExceptionInformation[0] != 8)
+        return EXCEPTION_CONTINUE_EXECUTION;
+#endif
+    if (mbi.State != MEM_RESERVE) return EXCEPTION_CONTINUE_SEARCH;
     static volatile LONG touched;
     if (InterlockedIncrement(&touched) <= 16)
         hos_log("mem: %#llx committed on first touch (nothing handed it out)", (unsigned long long)guest);
@@ -104,7 +120,76 @@ static uint64_t peek_guest(uint64_t a) {
     return G64(a);
 }
 
+/* The independent record is complete before the legacy logger/loader/CRT calls.
+   Those CRASH lines remain unchanged and are still useful when they can run. */
+static void record_exception(EXCEPTION_POINTERS *info) {
+    Ctx *c = hos_ctx();
+    HosThread *thread = hos_self();
+    const EXCEPTION_RECORD *rec = info->ExceptionRecord;
+    HosCrashContext context = {0};
+    context.reason = "unhandled exception";
+    context.thread = thread ? hos_thread_name(thread) : "host";
+    context.code = rec->ExceptionCode;
+    context.pc = (uintptr_t)info->ContextRecord->Rip;
+    context.sp = (uintptr_t)info->ContextRecord->Rsp;
+    context.fp = (uintptr_t)info->ContextRecord->Rbp;
+    context.fault_address = rec->NumberParameters > 1 ? rec->ExceptionInformation[1] : 0;
+    context.guest_base = (uintptr_t)A64_MEM;
+    context.guest_size = HOS_GUEST_SPACE;
+    context.guest_registers = c ? c->x : NULL;
+#ifdef _WIN32
+    context.native_context = info->ContextRecord;
+    context.exception_filter = 1;
+#else
+    context.signal_number = (int)rec->ExceptionInformation[13];
+    context.signal_code = (int)(intptr_t)rec->ExceptionInformation[14];
+    if (context.signal_number) context.reason = "fatal signal";
+#endif
+    if (hos_crash_record_write(&context)) {
+#ifdef _WIN32
+        hos_crash_record_dump(info);
+#endif
+    }
+}
+
+void hos_crash_record_fatal(const uint64_t *guest_registers, const char *reason) {
+    HosThread *thread = hos_self();
+    HosCrashContext context = {0};
+    context.reason = reason;
+    context.thread = thread ? hos_thread_name(thread) : "host";
+    context.guest_base = (uintptr_t)A64_MEM;
+    context.guest_size = HOS_GUEST_SPACE;
+    context.guest_registers = guest_registers;
+#ifdef _WIN32
+    CONTEXT native;
+    RtlCaptureContext(&native);
+    context.native_context = &native;
+    context.pc = (uintptr_t)native.Rip;
+    context.sp = (uintptr_t)native.Rsp;
+    context.fp = (uintptr_t)native.Rbp;
+#else
+    context.pc = (uintptr_t)hos_crash_record_fatal;
+    context.sp = (uintptr_t)&context;
+    context.fp = (uintptr_t)__builtin_frame_address(0);
+#endif
+    hos_crash_record_write(&context);
+}
+
+/* Before log rotation, so recovery reads the last run rather than this run's
+   new log. hos_game_path_a also understands the installed bin/ layout. */
+void hos_crash_record_prepare(const char *log_path) {
+    char path[4096];
+    DWORD n = hos_game_path_a(path, sizeof path);
+    if (!n || n >= sizeof path) return;
+    while (n && path[n - 1] != '/' && path[n - 1] != '\\') --n;
+    if (!n) return;
+    path[n] = 0;
+    const char *hos_version(void);
+    hos_crash_record_start(path, hos_version(), log_path);
+}
+
 static LONG WINAPI report_crash(EXCEPTION_POINTERS *info) {
+    record_exception(info);
     EXCEPTION_RECORD *rec = info->ExceptionRecord;
     const uint64_t rip = info->ContextRecord->Rip;
     HMODULE mod = NULL;

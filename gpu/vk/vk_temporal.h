@@ -22,6 +22,9 @@ int temporal_mode();
 /// RX_VK_DLSS=1 / 2 or RX_VK_FSR4=1 / 2 set for this run, and that engine runs here: over the row, its FSR 3.1 too
 /// (vk_fsr3.cpp fsr3_wanted). Where it cannot run, a saved FSR 3.1 stays
 bool temporal_env_chosen();
+// Opt-in: RGBA16F is a scene only under Native PsychoV35 with DLSS/DLAA or FSR 4 (upscaler_rows.h takes_psychov35).
+bool temporal_scene_format(VkFormat format);
+bool temporal_colour_pair(VkFormat input, VkFormat output);
 bool temporal_wanted();       // (temporal_mode() != GAME)
 /// The Upscaler row's Off (upscaler_rows.h OFF) with no engine running over it for this run (temporal_mode() is GAME): no
 /// upscaler at all. temporal_upscale then leaves the game's network out too and stretches its input to its output with a plain

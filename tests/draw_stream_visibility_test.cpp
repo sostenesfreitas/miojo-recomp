@@ -30,6 +30,13 @@ bool coherent=false,fail_buffer=false;
 unsigned flushed=0,queued=0;
 std::mutex par_mutex;
 struct ParLock { std::lock_guard<std::mutex> lock{par_mutex}; };
+namespace rec {   // (vk_recorder.h's RX_VK_RECORDER_OWN marks, as they are with the recorder off)
+inline void slot_begin(uint64_t) {}
+inline void slot_done() {}
+inline uint64_t produced() { return 0; }
+struct OwnSlot { OwnSlot() {} ~OwnSlot() {} };   // (a scope, as the real one)
+}   // namespace rec
+uint64_t rec_end_pos[64];   // (vk_replay.cpp: each slot's end in the recorder's ring)
 void logf(const char*,...) {}
 bool create_buffer(uint64_t size,VkBufferUsageFlags,bool,VkBuffer& buffer,VmaAllocation& allocation,void** mapped,bool=false) {
     if(fail_buffer) return false;
@@ -100,6 +107,7 @@ int flush_reason=0;constexpr int FR_CAP=1,FR_OTHER=0,FR_READBACK=7;bool batch_gp
 bool readback_send_now() { return false; }   // (held submits sent for a readback's wait: none waits here)
 void device_lost() { require(false,"unexpected device loss"); }
 void note_timeline_sent(uint64_t) {}
+bool memory_sparse_wait(VkSemaphoreSubmitInfo*) { return false; }   // (vk_memory.cpp: no sparse mirror binds here)
 #define PROF(x) ((void)0)
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue,uint32_t count,const VkSubmitInfo2* submits,VkFence) {
     for(unsigned i=0;i<count;i++) for(unsigned j=0;j<submits[i].commandBufferInfoCount;j++) {

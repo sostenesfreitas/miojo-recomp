@@ -15,7 +15,7 @@
 extern "C" {
 #endif
 
-#define MKWVK_API_VERSION 22
+#define MKWVK_API_VERSION 23
 enum { HOS_OPT_CHEAT_HEARTS = 32, HOS_OPT_CHEAT_FLIGHT, HOS_OPT_CHEAT_ACTION, HOS_OPT_CHEAT_CAMERA, HOS_OPT_CHEAT_SPEED, HOS_OPT_CHEAT_AMMO, HOS_OPT_CHEAT_TIMELOCK, HOS_OPT_CHEAT_MOONJUMP };
 /* (hookshot) the Gameplay tab's Text size (host/oot_text_size.c): 0 the game's, 1 110%, 2 125%, 3 150%, 4 175% */
 enum { HOS_OPT_TEXT_SIZE = 10 };
@@ -28,12 +28,16 @@ enum { HOS_OPT_DLSS_JITTER_W = 24, HOS_OPT_DLSS_JITTER_H, HOS_OPT_DLSS_JITTER_PH
 /* (hookshot) the Audio tab's rows (host/nn_audio.c reads them every 100 ms): the volume in percent, and no sound while
    another window has the focus */
 enum { HOS_OPT_VOLUME = 27, HOS_OPT_MUTE_BACKGROUND };
+/* (hookshot) the Controls tab's Walk mode and Walk speed (host/nn_hid.c: the Walk control, HOS_KEY_WALK): 0 Link walks
+   while its key is held, 1 one press walks and the next runs again; how far the movement keys then tilt the left stick, in
+   percent of the way (15 to 90) */
+enum { HOS_OPT_WALK_MODE = 49, HOS_OPT_WALK_SPEED };
 /* (hookshot) the Insert menu's HDR set to Native (host/nn_vi.c QueryDisplayHdrStatus and QueryDisplayHdrPaperWhite): whether
    the game is told its display is HDR10 (the swapchain is one), and the peak and paper white it is told, in nits */
-/* (HOS_OPT_DISCORD, 43: the Insert menu's Discord status row, host/discord_rpc.c: 1 on) */
-enum { HOS_OPT_HDR_NATIVE = 40, HOS_OPT_HDR_PEAK, HOS_OPT_HDR_WHITE, HOS_OPT_DISCORD };
-/* (HOS_OPT_DISABLE_CAMERA_CENTERING, 45: Controls' movement-follow yaw, host/mouse_native.c: 0 stock, 1 disabled;
-   44 is reserved for HOS_OPT_SKIP_TITLE) */
+/* (HOS_OPT_DISCORD, 43: the Insert menu's Discord status row, host/discord_rpc.c: 1 on; HOS_OPT_SKIP_TITLE, 44: its Skip
+   title screen row, host/oot_autoload.c: 1 on) */
+enum { HOS_OPT_HDR_NATIVE = 40, HOS_OPT_HDR_PEAK, HOS_OPT_HDR_WHITE, HOS_OPT_DISCORD, HOS_OPT_SKIP_TITLE };
+/* (HOS_OPT_DISABLE_CAMERA_CENTERING, 45: Controls' movement-follow yaw, host/mouse_native.c: 0 stock, 1 disabled) */
 enum { HOS_OPT_DISABLE_CAMERA_CENTERING = 45 };
 /* (hookshot) the Insert menu's Camera speed: the right stick's camera turn in percent of the game's, 50 to 400 (host/nn_vi.c
    hos_camera_scale, nx2/oot_patches.py). 48: after the HDR and Discord rows' 40 to 43, Skip title's 44 and camera centering's 45 */
@@ -45,17 +49,25 @@ enum { HOS_OPT_PROMPTS = 46 };
    temporal upscalers, which take only that scene) */
 enum { HOS_OPT_HDR_TONEMAP = 47 };
 /* Gameplay's vertical field of view, percent of the game's current angle; 100 is unchanged. */
-/* 49 and 50 are reserved for Walk mode and Walk speed (#2345). */
+/* Walk mode and Walk speed use 49 and 50 (#2345). */
 enum { HOS_OPT_FOV = 51 };
 /* (HOS_OPT_SKIP_OPENING, 52: Gameplay's Skip opening, host/hos_main.c hos_oot_opening. Off. The new-game story movie
-   and Navi waking Link. 44 stays reserved for Skip title, 49 and 50 for Walk, 60 for the item wheel. A new option id
+   and Navi waking Link. 44 stays reserved for Skip title, 49 and 50 are Walk's, 60 is reserved for the item wheel. A new option id
    answered by the existing option callback does not change MkwVkHost or MkwVkRenderer.) */
 enum { HOS_OPT_SKIP_OPENING = 52 };
 /* The Auto run row (Controls): 0 Off, 1 On, A (the sprint) kept held after it is let go (host/auto_run.h,
    host/nn_hid.c). */
 enum { HOS_OPT_AUTO_RUN = 55 };
 // (miojo) the Cheats page's Infinite rupees row, as the other cheats' (host/hos_main.c oot_infinite_rupees)
-enum { HOS_OPT_CHEAT_RUPEES = 60 };
+enum { HOS_OPT_CHEAT_RUPEES = 61 };   // (60 is held for Hookshot's Item wheel)
+/* (HOS_OPT_FPS_CAP, 53: the Game frame rate cap row, host/nn_vi.c reads it) */
+enum { HOS_OPT_FPS_CAP = 53 };
+/* Damage taken: 0 Half, 1 Normal (unchanged), 2 Double, 3 Quadruple. (56: Hookshot's Auto run has 55) */
+enum { HOS_OPT_DAMAGE_TAKEN = 56 };
+/* Hold-to-toggle's enabled Switch buttons, 1 << HOS_SW_*. Off (zero) by default; the existing option callback. */
+enum { HOS_OPT_HOLD_TOGGLE = 54 };
+/* Audio output: 0 Auto, 1 Stereo, 2 5.1, 3 Mono. Only Mono averages final stereo output live. */
+enum { HOS_OPT_AUDIO_OUTPUT = 57 };
 
 /* (hookshot) the controls' names (host/nn_hid.c, host/pad_sdl.c, the pad_ and key_ lines of hookshot_options.ini):
    the Switch's buttons in nn::hid's bit order, and a gamepad's inputs by position (the bottom face button first:
@@ -80,12 +92,12 @@ enum { HOS_PROMPT_SWITCH, HOS_PROMPT_XBOX, HOS_PROMPT_PS4, HOS_PROMPT_PS5, HOS_P
    the textures (the ocarina's notes, the Talk ring's letters, the System page's controller), the layouts (the Talk ring's
    places, the ocarina hint's spacing), the icons in texts; the rest at the next start */
 enum { HOS_PROMPTS_LIVE_TEXTURES = 1, HOS_PROMPTS_LIVE_LAYOUTS = 2, HOS_PROMPTS_LIVE_TEXTS = 4, HOS_PROMPTS_LIVE_ALL = 7 };
-/* keys only (HOS_BIND_KEY), after the Switch's buttons: the left stick's and the camera's directions, and the
-   ocarina's five note controls (which take a gamepad input too, and share it: a note's key can be some other
-   control's key at once, host/nn_hid.c has_pad) */
+/* keys only (HOS_BIND_KEY), after the Switch's buttons: the left stick's and the camera's directions, and Walk (while its
+   key is held, the movement keys tilt the left stick less: host/nn_hid.c walk_held). The ocarina's five note controls
+   take a gamepad input too, and share it: a note's key can be some other control's key at once, host/nn_hid.c has_pad */
 enum { HOS_KEY_MOVE_UP = HOS_SW_N, HOS_KEY_MOVE_DOWN, HOS_KEY_MOVE_LEFT, HOS_KEY_MOVE_RIGHT, HOS_KEY_CAM_UP,
        HOS_KEY_CAM_DOWN, HOS_KEY_CAM_LEFT, HOS_KEY_CAM_RIGHT, HOS_KEY_OC_NOTE_L, HOS_KEY_OC_NOTE_R,
-       HOS_KEY_OC_NOTE_A, HOS_KEY_OC_NOTE_Y, HOS_KEY_OC_NOTE_X, HOS_KEY_N };
+       HOS_KEY_OC_NOTE_A, HOS_KEY_OC_NOTE_Y, HOS_KEY_OC_NOTE_X, HOS_KEY_WALK, HOS_KEY_N };
 
 /* (hookshot) the mouse over the window while it is free (not captured): the Insert menu's (host/display.c,
    host/posix/display_sdl.c). x and y: the cursor in the window's pixels, of a window width x height pixels (the
@@ -105,6 +117,13 @@ typedef struct MkwVkSetting {
     int value, lo, hi, step;
     int restart, fixed;   /* the change applies at the next start; nothing to choose on this PC (the menu shows it greyed) */
 } MkwVkSetting;
+
+/* (hookshot, version 23) typed text for the Insert menu's text fields (MkwVkHost.take_text, host/rx_backend.c): a character
+   comes as its Unicode code point, an editing key as HOS_TEXT_KEY | its Windows key code (VK_LEFT, VK_RIGHT, VK_HOME, VK_END,
+   VK_BACK, VK_DELETE, VK_RETURN, VK_ESCAPE). The focus take_text is given: none, a field has the keyboard, or that and a paste
+   asked (the clipboard's first line comes as typed) */
+enum { HOS_TEXT_KEY = 0x40000000 };
+enum { HOS_TEXT_OFF, HOS_TEXT_ON, HOS_TEXT_PASTE };
 
 /* what the executable gives the back end */
 typedef struct MkwVkHost {
@@ -203,6 +222,13 @@ typedef struct MkwVkHost {
        while the game draws it in the middle 16:9 with the menus (wide_menus's keep_mask) and so leaves the sides open
        (host/hos_main.c hos_wide_cover); 0 when it covers the whole picture itself. Asked at each present */
     float (*wide_cover)(void);
+    /* (version 23, hookshot: 22 is the host's wide_cover, which main added while this was 22 on its branch) the Insert menu's text fields.
+       focus HOS_TEXT_OFF while none has the keyboard (the window takes no text then: no input method opens over the game,
+       and what was queued is dropped), HOS_TEXT_ON while one has it,
+       HOS_TEXT_PASTE to paste the clipboard's first line into it; then what was typed since the last call into out, at most
+       max, in order (characters and HOS_TEXT_KEY editing keys, repeats included; Ctrl+V and Shift+Insert paste): the count.
+       host/display.c (WM_CHAR, WM_KEYDOWN) and host/posix/display_sdl.c (SDL's text input and key events) put them in */
+    int (*take_text)(int focus, uint32_t *out, int max);
 } MkwVkHost;
 
 /* One completed temporal-upscale sample; all zero while inactive. */
@@ -245,7 +271,7 @@ typedef struct MkwVkRenderer {
     void (*nvn_texture_created)(const nvn_tex *t);
     /* the CPU set an event's value: in order with the submits (the GPU's waits on it) */
     void (*nvn_event_signal)(uint64_t gpu, uint32_t value);
-    int (*option)(int id);   /* (hookshot, the Insert menu) 0: game time follows the clock, 1: the menu is open, 2: dynamic resolution, 3: its fixed scale in percent, 4: the controllers count behind other windows, 5: text speed (0 normal to 3 instant), 6: native mouse look (host/mouse_native.c),
+    int (*option)(int id);   /* (hookshot, the Insert menu) 0: game time follows the clock, 1: the menu is open, 2: dynamic resolution, 3: its fixed scale in percent, 4: the controllers count behind other windows, 5: text speed (0 normal to 3 instant), 6: Mouse camera (host/mouse_native.c; 1 native mouse look, 2 off: the mouse is never captured),
                                 7: the mouse's sensitivity in percent, 8: its up and down swapped (host/nn_hid.c),
                                 18 to 23: the Motion page (HOS_OPT_GYRO*: motion controls from a pad's gyroscope, host/pad_sdl.c;
                                 the horizontal and vertical sensitivity in percent, each turned around, the deadzone),

@@ -52,8 +52,8 @@ int wmain(int argc, wchar_t **argv) {
     int mode = _wtoi(argv[1]);
     if (mode == 4 || mode == 5) {
         Part part = {0};
-        strcpy(part.sha,"authored-checksum"); strcpy(part.dest,"."); strcpy(part.from,"-"); strcpy(part.to,"-");
-        strcpy(part.url,"https://invalid.example/HookshotBuilder-python-authored.zip");
+        strcpy(part.sha,"authored-checksum"); strcpy(part.dest,"HookshotBuilder/tools/python"); strcpy(part.from,"python");
+        strcpy(part.url,"https://invalid.example/python-authored.zip");
         g_home.portable = mode == 4;
         return reuse_part(argv[2],"v-new",&part,argv[3]) == _wtoi(argv[4]) ? 0 : 22;
     }

@@ -133,3 +133,4 @@ inline void note_work() {
 #define vmaDestroyBuffer(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vmaDestroyBuffer), ::vmaDestroyBuffer(__VA_ARGS__))
 #define vmaDestroyImage(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vmaDestroyImage), ::vmaDestroyImage(__VA_ARGS__))
 #define vmaInvalidateAllocation(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vmaInvalidateAllocation), ::vmaInvalidateAllocation(__VA_ARGS__))
+#define vmaFreeMemory(...) (::mkwvk::rec::boundary(::mkwvk::rec::B_vmaFreeMemory), ::vmaFreeMemory(__VA_ARGS__))   // (hookshot: a sparse mirror's blocks, vk_vma.cpp)

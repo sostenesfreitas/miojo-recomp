@@ -57,6 +57,13 @@ def main():
         block(source, "uint64_t gpu_bind_stamp("), block(source, "uint32_t bind_slot("), block(source, "bool bind_memo_hit("),
         block(source, "struct BindMemo {", True), "thread_local BindMemo bind_memo[256];", direct_note,
         block(source, "void shadow_forget(Pool& p, uint64_t at, uint64_t len) {"),
+        # (a sparse mirror's blocks, which gpu_buffer_bind asks: none here, the pools' mirrors are whole)
+        '#include "%s"' % (ROOT / "gpu/vk/sparse_mirror.h").as_posix(),
+        block(source, "uint64_t sparse_block("), block(source, "bool block_has("), block(source, "bool sparse_has("),
+        "std::vector<Pool*> sparse_wanted;\nint64_t st_sparse_in_place = 0, st_sparse_mixed = 0, st_sparse_past = 0;",
+        block(source, "struct GuestPool {", True), "std::vector<GuestPool> guest_pools;",
+        block(source, "bool sparse_none("), block(source, "bool sparse_gaps_outside_pools("), block(source, "void sparse_touch("),
+        block(source, "void sparse_want("),
         block(source, "BufferRef gpu_buffer_bind(")])
     flags = subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
     env = dict(os.environ)

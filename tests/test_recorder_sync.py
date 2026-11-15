@@ -161,7 +161,7 @@ def check_sources():
     timed = {"vkWaitForFences": "fences", "vkWaitSemaphores": "timeline", "vkQueueWaitIdle": "idle",
              "vkDeviceWaitIdle": "idle", "vkGetQueryPoolResults": "queries"}
     bmacros = {f: (b, call) for f, b, call in re.findall(
-        r"^#define (\w+)\(\.\.\.\) \(::mkwvk::rec::boundary\(::mkwvk::rec::B_(\w+)\), (.+)\)$", work, re.M)}
+        r"^#define (\w+)\(\.\.\.\) \(::mkwvk::rec::boundary\(::mkwvk::rec::B_(\w+)\), (.+)\)[ \t]*$", code(work), re.M)}
     for f, k in bounds.items():
         q = "::vkx::" if k == "K" else "::"
         mask = ", VK_QUERY_RESULT_WAIT_BIT" if f == "vkGetQueryPoolResults" else ""

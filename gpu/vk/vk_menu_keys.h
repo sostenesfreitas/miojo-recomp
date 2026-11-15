@@ -27,4 +27,13 @@ inline int dot(int position) {
     }
 }
 
+/// (hookshot) The button that pastes into a text field of the menu while it has the keyboard: the top face button, else the
+/// first of the left, the right and the bottom that neither confirms nor goes back
+inline int paste(int confirm, int back) {
+    const int order[4] = {kNorth, kWest, kEast, kSouth};
+    for (int i = 0; i < 4; i++)
+        if (order[i] != confirm && order[i] != back) return order[i];
+    return kNorth;
+}
+
 } // namespace mkwvk::menu_keys

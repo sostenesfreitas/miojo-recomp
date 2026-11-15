@@ -103,6 +103,8 @@ std::unordered_multimap<uint64_t, Texture*> by_gpu;
 uint64_t frame_no = 1, rec_value = 0;
 thread_local uint64_t tl_seg = 0;
 void logf(const char*, ...) {}
+enum LogLevel : int { log_error, log_warn, log_info, log_debug, log_trace };   // (gpu/vk/vk_internal.h)
+void logf_at(LogLevel, const char*, ...) {}
 void vw_note(Texture&) {}
 void watch_tex(const Texture*, const char*) {}
 void drawn_writeback_note(Texture*) {}

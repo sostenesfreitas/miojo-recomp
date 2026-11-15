@@ -116,7 +116,7 @@ int save_replace(const char* from, const char* to, unsigned flags) {
 // The play generations' part of a save (gpu/vk/vk_draw.cpp, tests/test_pipeline_play_cache.py): at each save, after the
 // cache's own part, whatever that did.
 std::atomic<int> play_saves{0};
-void play_cache_save() { ++play_saves; }
+void play_cache_save(int = -1, bool = true) { ++play_saves; }
 std::atomic<bool> in_play{false};
 bool play_cache_in_use() { return in_play.load(); }
 
@@ -158,6 +158,12 @@ using mkwvk::PipelineCacheFile;
 #undef rename
 #endif
 #endif
+// (vk_draw.cpp PcacheFetch: on Intel the fetch waits for the builds under way; none here)
+constexpr int kFetchPollMs = 2000, kFetchPutOffs = 3, kFetchQueueMs = 10000;
+struct PcacheFetch {
+    explicit PcacheFetch(int, bool = true) {}
+    bool held() const { return true; }
+};
 #include "pipeline_cache_save.inc"
 #ifdef CACHE_VECTOR_BASELINE
 #undef fwrite

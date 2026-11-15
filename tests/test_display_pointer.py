@@ -44,7 +44,7 @@ def main():
         template = template.replace("/* ACTUAL_" + name + " */", "\n".join(functions))
     start = win.index("    case WM_MOUSEMOVE:")
     end = win.index("    case WM_MOUSEWHEEL:", start)
-    template = template.replace("/* ACTUAL_MOVE */", "LRESULT move_event(HWND w, UINT msg, LPARAM lp = 0) { switch(msg) {" + win[start:end] + "} return 0; }")
+    template = template.replace("/* ACTUAL_MOVE */", "LRESULT move_event(HWND w, UINT msg, LPARAM lp = 0) { (void)lp; switch(msg) {" + win[start:end] + "} return 0; }")
     start = win.index("    case WM_MOUSEWHEEL:")
     end = win.index("    case WM_RBUTTONDOWN:", start)
     template = template.replace("/* ACTUAL_WHEEL */", "LRESULT wheel_event(HWND w, WPARAM wp) { switch((int)WM_MOUSEWHEEL) {" + win[start:end] + "} return 0; }")

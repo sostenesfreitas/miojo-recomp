@@ -33,6 +33,7 @@ static bool prepare_is_update() { return is_update; }
 static void prepare_guess(size_t* g) { g[0] = g[1] = g[2] = 0; }
 static bool prepare_run(Progress, bool) { calls += "prepare "; return true; }
 static bool predict_pending() { return false; }
+static bool compile_all() { return true; }   // (Compile shaders All: vk_draw.cpp; the sequence is the same on Most)
 static bool prepare_stopped() { return stopped; }
 static void predict_run(Progress) { calls += "predict "; }
 static void state_list_run() { calls += "state_list "; }

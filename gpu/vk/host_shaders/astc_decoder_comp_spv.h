@@ -8,7 +8,7 @@
 // this file: the compute shader src/video_core/host_shaders/astc_decoder.comp of Eglantine, the Switch 2 fork of the
 // emulator Eden (https://github.com/Eglantine-Community/Eglantine, branch nx2), written for yuzu by ameerj (2021, most
 // of it), changed in Eden by ForrestMarkX and CamilleLaVey (2026), and given the Switch 2 GOB layout in Eglantine by
-// Takoroka (c556de5c9a, 2026-10-28). It carries that file's copyright and license notices above; see readme.md,
+// Takoroka (c556de5c9a, 2026-10-28). It carries that file's copyright and license notices above; see README.md,
 // "License".
 // Eden's ASTC decoder, with the Switch 2 block-linear tiling. The Vulkan back end runs it to decode ASTC textures on
 // the GPU, for cards without native ASTC (vk_texture.cpp).

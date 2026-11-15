@@ -74,15 +74,35 @@ inline std::string left_text(double secs) {
     return b;
 }
 
-/// The version line from the build's name (nx2/version.py, "v2.0.5 (source 1a2b3c4d)"): the release alone, "v2.0.5"; a build
-/// between releases ("v2.0.5-2-g619c897-dirty", git describe) shows as "v2.0.5 dev"; anything else as it is
+/// The version as players see it, from the build's name (nx2/version.py: "<release> (source 1a2b3c4d)"), without the source
+/// fingerprint (the log's first line and bug reports keep it): a release as its tag, "v3.0.0" or "v3.0.0-rc.1"; a nightly
+/// ("nightly-46-434712bb") as the launcher names it, "Nightly 46 · 434712bb"; a build between tags ("v3.0.0-rc.1-2-g619c897-dirty",
+/// git describe) as its tag and "dev"; anything else as it is
 inline std::string version_text(std::string name) {
     if (const size_t at = name.find(" ("); at != std::string::npos) name.resize(at);
-    size_t i = 0;
-    if (name.size() > 1 && name[0] == 'v') {
-        int dots = 0;
-        for (i = 1; i < name.size() && ((name[i] >= '0' && name[i] <= '9') || name[i] == '.'); i++) dots += name[i] == '.';
-        if (dots == 2 && i < name.size() && name[i] == '-') return name.substr(0, i) + " dev";
+    const auto digits = [&](size_t i) { size_t j = i; while (j < name.size() && name[j] >= '0' && name[j] <= '9') j++; return j; };
+    if (name.rfind("nightly-", 0) == 0) {   // (nightly-<count>-<8 hex>[-dirty])
+        const size_t n = digits(8);
+        if (n > 8 && n + 9 <= name.size() && name[n] == '-') {
+            const std::string hash = name.substr(n + 1, 8);
+            bool hex = true;
+            for (char ch : hash) hex = hex && ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'));
+            const std::string rest = name.substr(n + 9);
+            if (hex && (rest.empty() || rest == "-dirty"))
+                return "Nightly " + name.substr(8, n - 8) + " \xc2\xb7 " + hash + (rest.empty() ? "" : " dev");
+        }
+        return name;
+    }
+    if (name.size() > 1 && name[0] == 'v') {   // (vX.Y.Z, then -rc.N, then git describe's -<commits>-g<hash>[-dirty])
+        size_t i = 1;
+        for (int part = 0; part < 3; part++) {
+            const size_t j = digits(i);
+            if (j == i || (part < 2 && (j >= name.size() || name[j] != '.'))) return name;
+            i = part < 2 ? j + 1 : j;
+        }
+        if (name.compare(i, 4, "-rc.") == 0 && digits(i + 4) > i + 4) i = digits(i + 4);
+        if (i == name.size()) return name;
+        if (name[i] == '-') return name.substr(0, i) + " dev";
     }
     return name;
 }

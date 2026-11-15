@@ -171,6 +171,7 @@ typedef struct {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     int done, priority;
+    int pinned;   /* (SetThreadAffinityMask set its affinity: thread_entry leaves it; under mu) */
     DWORD code;
     volatile int refs;
     LPTHREAD_START_ROUTINE fn;
@@ -198,7 +199,8 @@ static HThread *thread_new(void) {
    (host/hos_thread.c; Ryzen 9 9950X3D, 2026-11-09). Taken once, before main, when no thread is pinned yet.
    Also applied when a thread first registers here (CreateThread's thread_entry, or a std::thread in thread_self on its
    first GetCurrentThread call in SetThreadDescription / SetThreadPriority), so a thread made inside a pinned replay
-   (ReplayPin in gpu/vk/vk_replay.cpp) starts with the process's affinity as on Windows rather than inheriting the pin. */
+   (ReplayPin in gpu/vk/vk_replay.cpp) starts with the process's affinity as on Windows rather than inheriting the pin.
+   (A thread that never registers here, a std::thread that calls none of these or a library's, keeps what it inherited) */
 static DWORD_PTR process_affinity;
 __attribute__((constructor)) static void init_process_affinity(void) {
     cpu_set_t s;
@@ -244,7 +246,11 @@ static void *thread_entry(void *p) {
     HThread *t = (HThread *)p;
     self_thread = t;
     t->tid = (pid_t)syscall(SYS_gettid);
-    apply_process_affinity(t->th);
+    /* (hookshot: unless its maker has pinned it by its handle already, hos_thread_start's hos_thread_pin right after
+       CreateThread: the reset coming second would have put a game thread back on the reserved core) */
+    pthread_mutex_lock(&t->mu);
+    if (!t->pinned) apply_process_affinity(t->th);
+    pthread_mutex_unlock(&t->mu);
     thread_finish(t->fn(t->arg));
     return NULL;
 }
@@ -314,7 +320,11 @@ DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
     pthread_getaffinity_np(t->th, sizeof old, &old);
     CPU_ZERO(&want);
     for (int i = 0; i < 64; i++) if (mask >> i & 1) CPU_SET(i, &want);
-    if (pthread_setaffinity_np(t->th, sizeof want, &want)) { last_error = ERROR_INVALID_PARAMETER; return 0; }
+    pthread_mutex_lock(&t->mu);   /* (with thread_entry's reset to the process's affinity: whichever comes first, this one stays) */
+    const int failed = pthread_setaffinity_np(t->th, sizeof want, &want);
+    if (!failed) t->pinned = 1;
+    pthread_mutex_unlock(&t->mu);
+    if (failed) { last_error = ERROR_INVALID_PARAMETER; return 0; }
     DWORD_PTR r = 0;
     for (int i = 0; i < 64; i++) if (CPU_ISSET(i, &old)) r |= (DWORD_PTR)1 << i;
     return r ? r : 1;
@@ -1151,6 +1161,10 @@ static void on_signal(int sig, siginfo_t *si, void *uctx) {
             context_to(uc, &ctx);
             return;
         }
+    /* Keep POSIX metadata in the unused tail, without changing NumberParameters
+       (the legacy CRASH log's read/write interpretation stays unchanged). */
+    rec.ExceptionInformation[13] = (ULONG_PTR)sig;
+    rec.ExceptionInformation[14] = (ULONG_PTR)(intptr_t)si->si_code;
     if (unhandled && unhandled(&ep) == EXCEPTION_CONTINUE_EXECUTION) {
         context_to(uc, &ctx);
         return;
@@ -1166,12 +1180,13 @@ static void on_signal(int sig, siginfo_t *si, void *uctx) {
         return;
     }
     signal(sig, SIG_DFL);
+    if (si->si_code <= 0) raise(sig);   /* sent signals cannot re-fault; real faults keep their original core siginfo */
 }
 static void install_signals(void) {
     static int done;
     if (done) return;
     done = 1;
-    const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE};
+    const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
     for (size_t i = 0; i < sizeof sigs / sizeof sigs[0]; i++) {
         struct sigaction sa;
         memset(&sa, 0, sizeof sa);

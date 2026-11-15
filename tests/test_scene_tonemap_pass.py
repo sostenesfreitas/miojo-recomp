@@ -1,6 +1,6 @@
 """The scene tone map pass (gpu/vk/eden/shader_recompiler/ir_opt/scene_tonemap_pass.h) on synthetic IR: the game's scene
 mapping shape takes PsychoV35 with each channel where its luminance weight says, the exposure and the peak its own constant
-buffer words; the shapes it must not take are left as they are (tests/scene_tonemap_ir.cpp). And the wiring: the program's
+buffer words, including a shared exp2 adaptation multiplier; the shapes it must not take are left as they are (tests/scene_tonemap_ir.cpp). And the wiring: the program's
 key and translation agree on it, the picks are dropped when the row changes, the row shows with Native HDR only.
 
 python -I -B tests/test_scene_tonemap_pass.py [--cxx clang++]

@@ -84,14 +84,20 @@ def patch_life(source):
     end = source.find("\n}", start)
     if end < 0 or source[start:end].count(LIFE_CAS) != 2:
         return None
-    # x19 is the actor. Confirm its type and life pointer before protecting this write.
-    guard = ("    if ((uint32_t)c->x[12] < (uint32_t)c->x[11] && hos_oot_hearts_enabled() &&\n"
+    if "hos_oot_damage(" in source[start:end]:
+        return source
+    # x19 is the actor. Confirm its type and life pointer before scaling this write.
+    guard = ("    if ((uint32_t)c->x[12] < (uint32_t)c->x[11] &&\n"
              "        hos_oot_is_player(c, c->x[19]) &&\n"
              "        c->x[13] == recomp_load64(c,c->x[19] + 7184) + 8)\n"
-             "        c->x[12] = c->x[11];\n")
-    body = source[start:end].replace(LIFE_CAS, guard + LIFE_CAS)
+             "        c->x[12] = hos_oot_damage((uint32_t)c->x[11], (uint32_t)c->x[12], {hit});\n")
+    # The first CAS is damage: x9 still holds the full hit, before life was clamped.
+    # The second is healing: x9 has another meaning there; keep its guarded delta.
+    sites = source[start:end].split(LIFE_CAS)
+    body = (sites[0] + guard.replace("{hit}", "(uint32_t)c->x[9]") + LIFE_CAS + sites[1] +
+            guard.replace("{hit}", "(uint32_t)c->x[11] - (uint32_t)c->x[12]") + LIFE_CAS + sites[2])
     return (source[:start] + body + source[end:]).replace(
-        '#include "a64.h"\n', '#include "a64.h"\nextern int hos_oot_hearts_enabled(void);\n'
+        '#include "a64.h"\n', '#include "a64.h"\nextern uint32_t hos_oot_damage(uint32_t old, uint32_t next, uint32_t hit);\n'
         'extern int hos_oot_is_player(Ctx *c, uint64_t actor);\n', 1)
 
 
@@ -452,6 +458,15 @@ def patch_movie_frames(s):
 # - f_803edf70, the time of day: each frame it adds (int)(2 * step) game seconds (+60) to the seconds of the day (+40, a day of
 #   86400, then the day count +44). Cut, it added 1 a frame below 120 fps (the day slower: 83% at 100) and 0 above 120, where
 #   the clock stood still and the sun swung back and forth over the frozen hour.
+# - f_832b32b0, Scarecrow's Song playback: elapsed frames (+0x265fc) advance the saved note delays. Cut to 0, the song
+#   waits on the same note until a slow frame lets the counter move (issue 2668).
+# - f_832b6840, the eight-note recording (mode 10): the same elapsed counter is reset between notes and gaps, then saved
+#   as their lengths. Cut to 0, their timing is lost even though the eight pitches are recorded. The mode-13 cut is separate.
+# - f_832b2690, recording completion: after the eighth note starts, it times that note and writes its final delay into
+#   the same recording. Its unsigned cut must carry too, or the saved eighth note has zero length and is not played.
+# - f_80652cb0, the floor web (the Great Deku Tree's): it runs (int)step simulation steps a frame, clamped to 0..3.
+#   Cut to 0, the web stayed rigid when Link landed on it above 60 fps, though it still held him
+#   (https://github.com/NotRexed/Hookshot/issues/2667). Its remainder is kept per web (+2296), before the clamp.
 # hos_frame_whole carries the fractions per counter while the frames' own time is the step, so each moves at the game's rate;
 # otherwise it cuts as the game does. A site is added here once it is seen to misbehave in game. (A site's function, its code to
 # replace, and the counter's address for its remainder.)
@@ -471,6 +486,17 @@ WHOLE_SITES = (
      "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@"
      "    recomp_store32(c,c->x[19] + 60,c->x[8]);@",
      "c->x[19] + 60"),
+    ("void f_832b32b0(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,0,3,c->fpcr,&c->fpsr);@",
+     "c->x[19] + 0x265fc"),
+    # (the unsigned cut with the x10 addition: the other recording mode uses the same cut followed by an x12 addition)
+    ("void f_832b6840(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,0,3,c->fpcr,&c->fpsr);@"
+     "    { uint64_t _a=c->x[10],_b=((uint64_t)(uint32_t)(((uint32_t)(c->x[8])) << 0)),_r=_a+_b; _r&=0xFFFFFFFFULL; c->x[8]=_r; }@",
+     "c->x[9]"),
+    ("void f_832b2690(Ctx *__restrict A64_NOESC c) {@",
+     "    c->x[8]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,0,3,c->fpcr,&c->fpsr);@",
+     "c->x[19] + 0x265fc"),
     # (the floor web's simulation steps: keep each object's fraction before the existing 0..3 clamp, issues 2667/2271)
     ("void f_80652cb0(Ctx *__restrict A64_NOESC c) {@",
      "    c->x[22]=recomp_fp_to_int(c->vreg[0][0]&UINT64_C(0xffffffff),32,32,1,3,c->fpcr,&c->fpsr);@",
@@ -1000,7 +1026,7 @@ def report(paths, counts, protect_hearts=False):
               "keeps the game's own step)" % (step_sites, len(STEP_SITES)))
     elif whole_sites != len(WHOLE_SITES):   # (the frames' own time without them: the pick-up indicator stays above 60 fps)
         print("oot_patches: WARNING: %d of %d frame counters found for the step's whole frames (above 60 fps a counter can stop: "
-              "the pick-up indicator, the water ripples, the time of day)" % (whole_sites, len(WHOLE_SITES)))
+              "the pick-up indicator, the water ripples, the time of day, Scarecrow's Song, the floor web)" % (whole_sites, len(WHOLE_SITES)))
 
 
 def apply(gen, *, protect_hearts=False, required=False):

@@ -19,7 +19,7 @@ def main():
     ap.add_argument("--source", type=Path, default=ROOT / "builder/setup/setup.c")
     args = ap.parse_args()
     text = args.source.read_text(encoding="utf-8")
-    helper = text[text.index("static int builder_ready("):text.index("static const char *manifest_url(")]
+    helper = text[text.index("static int builder_ready("):text.index("#define LAUNCHER_DOWNLOAD")]
     required = re.findall(r'L"([^"]+)"', helper)
     assert required and len(set(required)) == len(required)
     prelude = '#define WIN32_LEAN_AND_MEAN\n#define _CRT_SECURE_NO_WARNINGS\n#include <windows.h>\n#include <shellapi.h>\n#include <wchar.h>\n#include <stdio.h>\n'

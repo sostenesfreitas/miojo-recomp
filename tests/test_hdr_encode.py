@@ -235,7 +235,7 @@ def check_dlss():
             sys.exit("FAIL: vk_temporal.cpp's HDR pipelines (linear light in, linear out) are not as this check expects: " + want)
     upscale = function(chain, "bool temporal_upscale(")
     for want in ("const bool hdr = engine.e->hdr && engine.e->hdr();", "prep_pipe = hdr ? s.prep_hdr : s.prep",
-                 "out_pipe = hdr ? s.out_hdr : s.out", "vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prep_pipe);",
+                 "out_pipe = rgba ? s.out_rgba : hdr ? s.out_hdr : s.out", "vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, prep_pipe);",
                  "vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, out_pipe);"):
         if want not in upscale:
             sys.exit("FAIL: temporal_upscale does not give an engine made for HDR colour the HDR pair: " + want)

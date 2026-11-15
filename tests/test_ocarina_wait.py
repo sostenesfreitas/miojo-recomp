@@ -10,6 +10,7 @@ python -I -B tests/test_ocarina_wait.py [--cc gcc]
 import argparse
 import contextlib
 import io
+import re
 import shutil
 import subprocess
 import sys
@@ -59,6 +60,10 @@ def main():
         check(out.count(line) == 1, name + " not injected exactly once")
     check(out.count("hos_oc_beat++") == 2, "the entry and the tick do not stamp the beat once each")
     check(out.count("HOS_OC_BUTTONS(") == 3, "the player's kinds are not one macro at both arming sites")
+    kinds = {int(k) for k in re.findall(r"\(k\) == (\d+)", oot_patches.OC_DECL)}
+    check(kinds == {1, 2, 3, 10, 11}, "the kinds that arm the note buttons are not the ocarina's performances: "
+          + " ".join(str(k) for k in sorted(kinds)))
+    check(13 not in kinds and 11 in kinds, "the scarecrow's recall (11) and a dialogue's wait (13) are not split")
     check(out.count(oot_patches.OC_DECL) == 1, "the host's words are not declared once")
     check(out.index(oot_patches.OC_DECL) < out.index("void f_828a9190"), "the lifted file does not declare them at its head")
     gate = out.index("HOS_OC_BUTTONS(hos_oc_last_kind)")

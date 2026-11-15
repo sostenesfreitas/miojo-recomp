@@ -77,16 +77,15 @@ void set_row(Row& r, int v, int dir) {
     if (r.value == &dlss) v = ur::step_engine(upscaler(), dir, available);
     if (r.value == &resolution) {
         int up = upscaler(), res = resolution;
-        ur::step_render(upscaler(), resolution, dir, &up, &res);
+        ur::step_render(upscaler(), ur::snap_render(upscaler(), resolution), dir, &up, &res);
         if (up != upscaler()) dlss = up;
-        v = res;
+        v = ur::full_scale(up) ? *r.value : res;
     }
     if (r.value == &output) {
         v = step_output_choice(output, dir);
         if (v == output) return;
     }
     *r.value = v > r.hi ? r.lo : v < r.lo ? r.hi : v;
-    if (r.value == &dlss) resolution = ur::snap_render(upscaler(), resolution);
 }
 bool set(Row& r, int want) {   // (menu_setting_set's call)
     // (a size of another shape: menu_setting_set moves the Aspect ratio to its shape first, which takes the output to one of
@@ -100,10 +99,8 @@ bool set(Row& r, int want) {   // (menu_setting_set's call)
         output = to;
     }
     const auto native = [&] { return r.value == &resolution && ur::full_scale(upscaler()); };
-    const int render = resolution, was = dlss;
     const bool ok = walk_to([&] { return std::pair(native() ? -1 : *r.value, dlss); }, [&] { return *r.value == want && !native(); },
                             [&](int dir) { set_row(r, *r.value + dir, dir); }, 64);
-    if (r.value == &dlss) resolution = dlss == was ? render : ur::snap_render(upscaler(), render);
     return ok;
 }
 
@@ -169,11 +166,10 @@ int main() {
         for (const int from : engines) {
             if (!(here & ur::bit(from))) continue;
             for (const int want : engines) {
-                // (and the Render resolution as one step from there to want would leave it, not as the engines passed on
-                // the way left it: FSR 3.1 to DLSS through Off and the game's own took 58 % to 50 %)
+                // (walking past other engines must not overwrite the saved render scale)
                 for (int render = 0; render < ur::kValues; render++) {
                     dlss = from, resolution = render;
-                    const int kept = here & ur::bit(want) && want != from ? ur::snap_render(want, render) : render;
+                    const int kept = render;
                     const bool ok = set(r, want);
                     if (here & ur::bit(want)) CHECK(ok && dlss == want, "available %#x: %d to %d gave %d", here, from, want, dlss);
                     else CHECK(!ok && dlss == from, "available %#x: %d to the missing %d gave %d", here, from, want, dlss);

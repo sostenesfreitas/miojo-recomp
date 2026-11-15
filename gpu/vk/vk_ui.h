@@ -51,6 +51,7 @@ struct Ctx {
     float safe;   // (the margin kept clear at each edge, pixels)
     bool pad;     // (a controller was the last input: its buttons in the prompts)
     int confirm_dot = 3, back_dot = 1;   // (the face buttons that confirm and go back: vk_menu_keys.h dot, 3 the bottom, 1 the right)
+    int paste_dot = 0;   // (hookshot: the one that pastes into a text field, vk_menu_keys.h paste)
 };
 
 inline ImVec2 size_of(ImFont* font, float px, const char* t, float wrap = 0) {
@@ -173,7 +174,7 @@ inline void glow(Ctx& c, ImVec2 a0, ImVec2 b0) {
 inline void gold(Ctx& c, ImVec2 a0, ImVec2 b0) { c.d->AddRectFilledMultiColor(a0, b0, kGoldHi, kGoldHi, kGold, kGold); }
 
 // ---- the button prompts: the keys, or a controller's buttons by position (any layout: the dot lit) ----
-enum Glyph { kUpDown, kLeftRight, kTabs, kConfirm, kBack, kKey, kCompact };
+enum Glyph { kUpDown, kLeftRight, kTabs, kConfirm, kBack, kKey, kCompact, kPaste, kAddChar, kRemoveChar };
 struct Prompt {
     Glyph g;
     const char* what;
@@ -221,14 +222,18 @@ inline float glyph(Ctx& c, float px, ImVec2 p, const Prompt& pr, bool draw) {
             return w + 3 * s + key(p.x + w + 3 * s, "E");
         }
         case kConfirm: return key(p.x, "Enter");
+        case kPaste: return key(p.x, "Ctrl+V");
+        case kAddChar: return key(p.x, "Ins");
+        case kRemoveChar: return key(p.x, "Del");
         default: return key(p.x, "Esc");
         }
     }
     const float r = hh * 0.5f;
     const ImVec2 m(p.x + r, my);
-    if (pr.g == kTabs) {   // (the shoulder buttons)
+    if (pr.g == kTabs || pr.g == kAddChar || pr.g == kRemoveChar) {   // (the shoulder buttons)
         float x = p.x;
         for (const char* l : {"L", "R"}) {
+            if ((pr.g == kAddChar && *l == 'L') || (pr.g == kRemoveChar && *l == 'R')) continue;
             const float w = hh * 1.25f;
             if (draw) {
                 c.d->AddRectFilled(ImVec2(x, p.y + 2 * s), ImVec2(x + w, p.y + hh - 2 * s), cap, (hh - 4 * s) * 0.5f);
@@ -247,7 +252,7 @@ inline float glyph(Ctx& c, float px, ImVec2 p, const Prompt& pr, bool draw) {
         c.d->AddRectFilled(m - ImVec2(len, arm), m + ImVec2(len, arm), v ? dim : ink, arm * 0.5f);
         c.d->AddRectFilled(m - ImVec2(arm, arm), m + ImVec2(arm, arm), ink);
     } else {   // (the face buttons, four dots: the bottom one confirms, the right one goes back)
-        const int lit = pr.g == kConfirm ? c.confirm_dot : c.back_dot;   // (0 top, 1 right, 2 left, 3 bottom)
+        const int lit = pr.g == kConfirm ? c.confirm_dot : pr.g == kPaste ? c.paste_dot : c.back_dot;   // (0 top, 1 right, 2 left, 3 bottom)
         const ImVec2 at[4] = {m + ImVec2(0, -r * 0.5f), m + ImVec2(r * 0.5f, 0), m + ImVec2(-r * 0.5f, 0), m + ImVec2(0, r * 0.5f)};
         for (int i = 0; i < 4; i++) {
             if (i == lit) c.d->AddCircleFilled(at[i], r * 0.27f, ink);

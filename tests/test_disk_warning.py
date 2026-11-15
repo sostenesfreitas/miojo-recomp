@@ -183,25 +183,7 @@ class WarningTests(unittest.TestCase):
         self.assertIn("SSD", err.getvalue())
 
 
-class BuilderTests(unittest.TestCase):
-    """The three builders ask before a build on a hard drive, and their "Build" goes on when the player says so"""
-
-    def test_the_windows_builder_asks(self):
-        source = (ROOT / "builder" / "HookshotBuilder" / "MainWindow.xaml.cs").read_text(encoding="utf-8")
-        self.assertIn("HardDriveWarning()", source)
-        self.assertIn("Disk.Spinning", source)
-        self.assertIn("MessageBoxButton.OKCancel", source)
-
-    def test_the_python_builder_asks(self):
-        source = (ROOT / "builder" / "py" / "hookshot_builder" / "window.py").read_text(encoding="utf-8")
-        self.assertIn("hard_drive_warning()", source)
-        self.assertIn("core.spinning", source)
-
-    def test_the_linux_builder_asks(self):
-        source = (ROOT / "builder" / "linux" / "hookshot_builder.py").read_text(encoding="utf-8")
-        self.assertIn("slow_disk_warning(out)", source)
-        self.assertIn("askokcancel", source)
-
+class MakeGameTests(unittest.TestCase):
     def test_make_game_warns_before_it_builds(self):
         source = (ROOT / "nx2" / "make_game.py").read_text(encoding="utf-8")
         self.assertIn("warn_slow_disk(out, work)", source)

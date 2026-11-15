@@ -25,6 +25,9 @@
 //    network's output.
 // Anything unexpected (no camera this frame, other sizes, the engine not there or failing) leaves the network to run, the
 // reason in the log when it changes.
+// RX_VK_PSYCHOV35_DLSS=1 also takes Native PsychoV35's RGBA16F input/output with DLSS/DLAA and AMD FSR 4 / its native AA
+// (upscaler_rows.h takes_psychov35: the engines given linear light in an HDR context). The network's perceptual
+// encoding is unchanged: the HDR prep still squares it to linear, and a typed RGBA16F output pass writes it back as is.
 //
 // The Insert menu's Upscaler row (opts.dlss, upscaler_rows.h) chooses the engine; RX_VK_DLSS=1 / 2 (DLSS, DLAA) or
 // RX_VK_FSR4=1 / 2 (FSR 4, its native anti-aliasing) over it, and =0 takes that engine out for the run. AMD FSR 3.1
@@ -48,6 +51,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "dlss_actor.h"
@@ -67,6 +71,7 @@
 #include "shaders/dlss_actor_frag_spv.h"
 #include "shaders/dlss_actor_vert_spv.h"
 #include "shaders/dlss_out_comp_spv.h"
+#include "shaders/dlss_out_rgba_comp_spv.h"
 #include "shaders/dlss_prep_comp_spv.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 
@@ -136,6 +141,7 @@ struct Camera {
     uint64_t depth_at = 0;    // (the depth texture's address and creation number, for texture_alive)
     uint32_t depth_id = 0;
     uint64_t frame = 0;       // (texture_frame_no when taken)
+    VkFormat scene_format = VK_FORMAT_UNDEFINED;
     bool valid = false;
 };
 
@@ -162,7 +168,12 @@ struct State {
     VkDescriptorSetLayout prep_hdr_set = VK_NULL_HANDLE, out_hdr_set = VK_NULL_HANDLE;
     VkPipelineLayout prep_hdr_layout = VK_NULL_HANDLE, out_hdr_layout = VK_NULL_HANDLE;
     VkPipeline prep_hdr = VK_NULL_HANDLE, out_hdr = VK_NULL_HANDLE;
+    VkDescriptorSetLayout out_rgba_set = VK_NULL_HANDLE;
+    VkPipelineLayout out_rgba_layout = VK_NULL_HANDLE;
+    VkPipeline out_rgba = VK_NULL_HANDLE;
     VkSampler point = VK_NULL_HANDLE, linear = VK_NULL_HANDLE;
+    bool psycho_last = false; // A tone mapper or input encoding change discards temporal history.
+    VkFormat history_input = VK_FORMAT_UNDEFINED;
     Camera cam;               // (this frame's, since the last upscale)
     // (the gameplay upscale's output, as last seen: the scene sizes the upscaler can take follow from it,
     // temporal_scene_size. Read on the game's draws without the lock)
@@ -184,11 +195,17 @@ struct State {
         SkinnedDraw k;
         uint64_t key = 0;
         uint32_t nbones = 0;
-        // (its pose as the draw saw it, read at the draw with ub_read: the origin (12 bytes, then 4 of padding), then the
-        // nbones bones. Empty: not read, and the pose is copied from the game's memory at the upscale as before)
-        std::vector<uint8_t> pose;
+        // (its pose as the draw saw it, read at the draw with ub_read: at this byte of pose_bytes, the origin (12 bytes, then
+        // 4 of padding), then the nbones bones. kNoPose: not read, and the pose is copied from the game's memory at the upscale
+        // as before)
+        static constexpr uint32_t kNoPose = UINT32_MAX;
+        uint32_t pose = kNoPose;
     };
     std::vector<Skin> skins;
+    // (the poses of skins read at their draws, one after another: one buffer kept from frame to frame, its room reused, in
+    // place of an allocation of up to 13 KB a draw. Emptied when the first of a frame's skins is noted)
+    std::vector<uint8_t> pose_bytes;
+    std::chrono::steady_clock::time_point poses_time{};   // (when poses (the frame before's, for the next) were taken)
     struct Pose {
         uint32_t at = 0, nbones = 0;   // (bytes into its buffer: the origin, then the bones from at + 16)
         uint64_t frame = 0;
@@ -350,11 +367,12 @@ bool make_pipeline(const uint32_t* code, size_t size, const VkDescriptorType* ty
     VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     mi.codeSize = size, mi.pCode = code;
     VkShaderModule m{};
-    if (vkCreateShaderModule(dev.device, &mi, nullptr, &m) != VK_SUCCESS) return undo();
+    IntelDriverGate gate;
+    if (extern_guarded_shader_module(&mi, &m) != VK_SUCCESS) return undo();
     VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", spec};
     ci.layout = layout;
-    const bool ok = vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &ci, nullptr, &pipe) == VK_SUCCESS;
+    const bool ok = extern_guarded_compute(VK_NULL_HANDLE, &ci, &pipe) == VK_SUCCESS;
     vkDestroyShaderModule(dev.device, m, nullptr);
     return ok || undo();
 }
@@ -396,6 +414,18 @@ bool make_pipelines() {
     si.magFilter = si.minFilter = VK_FILTER_LINEAR;
     if (!s.linear && vkCreateSampler(dev.device, &si, nullptr, &s.linear) != VK_SUCCESS) return s.linear = VK_NULL_HANDLE, false;
     return true;
+}
+
+// Made only when the opt-in RGBA16F route actually draws; no extra pipeline on the default path.
+bool make_rgba_output() {
+    State& s = st();
+    if (s.out_rgba) return true;
+    const VkDescriptorType types[2] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
+    static const VkBool32 square = VK_FALSE; // HDR prep already decoded the network colour to linear.
+    static const VkSpecializationMapEntry entry{0, 0, sizeof square};
+    static const VkSpecializationInfo spec{1, &entry, sizeof square, &square};
+    return make_pipeline(DLSS_OUT_RGBA_COMP_SPV, sizeof DLSS_OUT_RGBA_COMP_SPV, types, 2, 8,
+                         s.out_rgba_set, s.out_rgba_layout, s.out_rgba, &spec);
 }
 
 /// A view of a depth texture's depth alone, for sampling (made once per image)
@@ -448,13 +478,14 @@ bool make_actor_pipeline() {
     VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pi.setLayoutCount = 1, pi.pSetLayouts = &set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
     if (vkCreatePipelineLayout(dev.device, &pi, nullptr, &s.actor_layout) != VK_SUCCESS) return false;
+    IntelDriverGate gate;
     VkShaderModule m[2]{};
     const uint32_t* code[2] = {DLSS_ACTOR_VERT_SPV, DLSS_ACTOR_FRAG_SPV};
     const size_t size[2] = {sizeof DLSS_ACTOR_VERT_SPV, sizeof DLSS_ACTOR_FRAG_SPV};
     for (int i = 0; i < 2; i++) {
         VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         mi.codeSize = size[i], mi.pCode = code[i];
-        if (vkCreateShaderModule(dev.device, &mi, nullptr, &m[i]) != VK_SUCCESS) return false;
+        if (extern_guarded_shader_module(&mi, &m[i]) != VK_SUCCESS) return false;
     }
     VkPipelineShaderStageCreateInfo stages[2]{};
     for (int i = 0; i < 2; i++) {
@@ -486,7 +517,7 @@ bool make_actor_pipeline() {
     gi.stageCount = 2, gi.pStages = stages;
     gi.pVertexInputState = &vi, gi.pInputAssemblyState = &ia, gi.pViewportState = &vp, gi.pRasterizationState = &rs;
     gi.pMultisampleState = &ms, gi.pColorBlendState = &cb, gi.pDynamicState = &ds, gi.layout = s.actor_layout;
-    const bool ok = vkCreateGraphicsPipelines(dev.device, VK_NULL_HANDLE, 1, &gi, nullptr, &s.actor) == VK_SUCCESS;
+    const bool ok = extern_guarded_graphics(VK_NULL_HANDLE, &gi, &s.actor) == VK_SUCCESS;
     for (VkShaderModule x : m) vkDestroyShaderModule(dev.device, x, nullptr);
     if (!ok) s.actor = VK_NULL_HANDLE, logf("vk: upscaler: the actor motion's pipeline was not made: camera motion alone");
     return ok;
@@ -539,28 +570,44 @@ int actor_motion(VkCommandBuffer cmd, const Camera& cam, const float* before, ui
     // GPU's order as the copies from the game's memory had it, and no write into a buffer a frame in flight still reads)
     State::Upload& stage = s.pose_stages[s.pose_stage_at];
     s.pose_stage_at = (s.pose_stage_at + 1) % (int)(sizeof s.pose_stages / sizeof s.pose_stages[0]);
-    const bool any_read = std::any_of(skins.begin(), skins.end(), [](const State::Skin& k) { return !k.pose.empty(); });
+    const bool any_read =
+        std::any_of(skins.begin(), skins.end(), [](const State::Skin& k) { return k.pose != State::Skin::kNoPose; });
     if (any_read && !stage.buffer &&
         !create_buffer_cached(kPoseBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, stage.buffer, stage.memory, &stage.map))
         stage = {};
     std::vector<VkBufferCopy> staged;
     // (which of the frame before's draws each of this frame's is. A draw with its pose read at the draw pairs by place (its
     // origin plus its bones' mean translation: dlss_actor::place_of): all copies of its model at once, the nearest pairs
-    // first, never across more than RX_VK_DLSS_ACTOR_REACH world units between two engine frames (default 1: a running Link
-    // moves about 0.1 a frame, the Gossip Stones stand 2.3 apart; after a long frame a fast actor can go further and keeps the
-    // camera's motion for that frame): dlss_actor::pair_by_place. Else the same n-th draw of the model as before)
-    static const float reach = [] {
+    // first, or by draw order where that is as good, never further apart than the reach: dlss_actor::pair_by_place. Else
+    // the same n-th draw of the model as before.
+    // The reach is a speed, RX_VK_DLSS_ACTOR_REACH world units a second (default 60), times the time between the two poses,
+    // that time taken as 1/60 s at the least and 1/30 s at the most. It holds for a model drawn once (Link, Epona, a boss) too,
+    // since a lone copy can be another one (a Gossip Stone drawn by the other model the frame before: this model's only
+    // copy then is the next stone, 2.3 away), so it must not refuse an actor that really moved: as a distance a frame, a
+    // hitch or a low base frame rate (frame generation from 30 fps) took actors past it and they lost their motion for that
+    // frame, ghosting the ones that move most. 60 a second is 1 a frame at 60 fps, and some ten times a running Link (about
+    // 6 a second). The 1/30 s keeps the reach (2 at the default) under the stones' 2.3 after any gap: past it, draw order,
+    // which wins whenever it pairs more copies, pairs a whole row with its neighbours (each stone's frame before the next
+    // one's, once a stone changes model), and a lone stone takes its neighbour. The cost: across a gap longer than 1/30 s (a
+    // hitch, a base under 30 fps) an actor that moved more than 2 units keeps only the camera's motion for that frame)
+    static const float speed = [] {
         const char* e = getenv("RX_VK_DLSS_ACTOR_REACH");
-        if (!e || !*e) return 1.0f;
+        if (!e || !*e) return 60.0f;
         char* end = nullptr;
         const float v = strtof(e, &end);
         const bool ok = end != e && !*end && std::isfinite(v) && v >= 0.0f;
-        logf("vk: actor motion: copies of a model pair within %g world units a frame (RX_VK_DLSS_ACTOR_REACH=%s%s)",
-             ok ? (double)v : 1.0, e, ok ? "" : ": not a number of 0 or more, so the default");
-        return ok ? v : 1.0f;
+        logf("vk: actor motion: copies of a model pair within %g world units a second (RX_VK_DLSS_ACTOR_REACH=%s%s)",
+             ok ? (double)v : 60.0, e, ok ? "" : ": not a number of 0 or more, so the default");
+        return ok ? v : 60.0f;
     }();
+    const std::chrono::steady_clock::time_point taken = std::chrono::steady_clock::now();
+    const double between = s.poses_time == std::chrono::steady_clock::time_point{}
+                               ? 1.0 / 60.0
+                               : std::chrono::duration<double>(taken - s.poses_time).count();
+    s.poses_time = taken;
+    const float reach = speed * (float)std::clamp(between, 1.0 / 60.0, 1.0 / 30.0);
     const auto read_at_draw = [&](const State::Skin& k) {
-        return !k.pose.empty() && stage.map && k.pose.size() == 16 + (size_t)k.nbones * 48;
+        return k.pose != State::Skin::kNoPose && stage.map && (size_t)k.pose + 16 + (size_t)k.nbones * 48 <= s.pose_bytes.size();
     };
     struct Copies {
         std::vector<dlss_actor::Placed> now, then;
@@ -579,18 +626,20 @@ int actor_motion(VkCommandBuffer cmd, const Camera& cam, const float* before, ui
         const State::Skin& k = skins[i];
         if (k.k.depth != cam.depth || !read_at_draw(k)) continue;
         float* place = &places[i * 3];
-        dlss_actor::place_of(k.pose.data(), k.nbones, place);
+        dlss_actor::place_of(s.pose_bytes.data() + k.pose, k.nbones, place);
         Copies& c = models[k.key >> 8];
         c.now.push_back({{place[0], place[1], place[2]}, (int)(k.key & 0xff)});
         c.skin.push_back(i);
     }
     std::vector<uint64_t> pair_key(skins.size(), 0);
     std::vector<char> paired(skins.size(), 0);
+    std::unordered_set<uint64_t> taken_by_place;   // (the frame before's draws paired by place: not a fallback's by n-th too)
     for (const auto& [model, c] : models) {
         if (c.now.empty() || c.then.empty()) continue;
         const std::vector<int> pairs = dlss_actor::pair_by_place(c.now, c.then, reach);
         for (size_t a = 0; a < pairs.size(); a++)
-            if (pairs[a] >= 0) pair_key[c.skin[a]] = c.key[pairs[a]], paired[c.skin[a]] = 1;
+            if (pairs[a] >= 0)
+                pair_key[c.skin[a]] = c.key[pairs[a]], paired[c.skin[a]] = 1, taken_by_place.insert(c.key[pairs[a]]);
     }
     uint32_t at = 0;
     for (size_t i = 0; i < skins.size(); i++) {
@@ -601,7 +650,7 @@ int actor_motion(VkCommandBuffer cmd, const Camera& cam, const float* before, ui
         const bool placed = read_at_draw(k);
         const float* place = &places[i * 3];
         if (placed) {
-            std::memcpy((uint8_t*)stage.map + at, k.pose.data(), bytes);
+            std::memcpy((uint8_t*)stage.map + at, s.pose_bytes.data() + k.pose, bytes);
             staged.push_back({at, at, bytes});
             s.poses_read++;
         } else {
@@ -622,11 +671,14 @@ int actor_motion(VkCommandBuffer cmd, const Camera& cam, const float* before, ui
         const uint32_t mine = at;
         at += (bytes + 15) & ~15u;
         // (the frame before's draw it pairs with: by place (above) when that frame's copies of its model were read at their
-        // draws too, else its n-th, as before)
+        // draws too, else its n-th, as before, unless that one is already another draw's by place)
         auto it = old.end();
         const auto m = placed ? models.find(k.key >> 8) : models.end();
-        if (m == models.end() || m->second.then.empty()) it = old.find(k.key);
-        else if (paired[i]) it = old.find(pair_key[i]);
+        if (m == models.end() || m->second.then.empty()) {
+            if (!taken_by_place.count(k.key)) it = old.find(k.key);
+        } else if (paired[i]) {
+            it = old.find(pair_key[i]);
+        }
         if (!history || it == old.end() || it->second.frame != s.last_frame || it->second.nbones != k.nbones) {
             s.actor_skipped++;
             continue;
@@ -746,6 +798,7 @@ void drop_all() {
                 u = {};
             }
     s.poses.clear(), s.skins.clear(), s.model_bones.clear();
+    s.pose_bytes = {}, s.poses_time = {};
     if (!s.depth_views.empty()) {
         auto old = std::move(s.depth_views);
         s.depth_views.clear();
@@ -759,6 +812,18 @@ void drop_all() {
 
 void temporal_later(std::function<void()> f) { later(std::move(f)); }
 
+bool temporal_scene_format(VkFormat format) {
+    if (format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) return true;
+    static const bool enabled = env_switch("RX_VK_PSYCHOV35_DLSS") == 1;
+    return enabled && format == VK_FORMAT_R16G16B16A16_SFLOAT && scene_tonemap_on() && ur::takes_psychov35(temporal_mode());
+}
+
+bool temporal_colour_pair(VkFormat input, VkFormat output) {
+    if (input == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && output == VK_FORMAT_B10G11R11_UFLOAT_PACK32) return true;
+    return input == VK_FORMAT_R16G16B16A16_SFLOAT && output == VK_FORMAT_R16G16B16A16_SFLOAT &&
+           temporal_scene_format(input);
+}
+
 void temporal_note_scene_draw(const Texture* color0, uint32_t width, uint32_t height, Texture* depth, uint64_t camera,
                               uint64_t camera_size) {
     // (only a size the gameplay upscale's output can come from: 1 to 3 times smaller. A smaller target with a camera (the
@@ -766,7 +831,7 @@ void temporal_note_scene_draw(const Texture* color0, uint32_t width, uint32_t he
     // below: the format, the camera's own size and perspective, the largest in the frame, and the upscale's input)
     if (!color0 || !depth || !camera || camera_size < 0x230 || !temporal_scene_size(width, height)) return;
     // (with the Upscaler Off too: its stretch takes the fixed shares' networks only with the frame's scene as their input)
-    if (color0->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || (!temporal_wanted() && !temporal_off())) return;
+    if (!temporal_scene_format(color0->format) || (!temporal_wanted() && !temporal_off())) return;
     State& s = st();
     std::lock_guard lk(s.mu);
     const uint64_t now = texture_frame_no();
@@ -793,6 +858,7 @@ void temporal_note_scene_draw(const Texture* color0, uint32_t width, uint32_t he
     k.proj[0] = c[0x70 / 4], k.proj[1] = p11, k.proj[2] = p22, k.proj[3] = p23;
     k.width = width, k.height = height, k.depth = depth, k.depth_gen = texture_destroy_generation(), k.frame = now;
     k.depth_at = depth ? depth->gpu : 0, k.depth_id = depth ? depth->id : 0;
+    k.scene_format = color0->format;
     k.valid = true;
 }
 
@@ -891,37 +957,63 @@ void temporal_note_skinned_draw(const SkinnedDraw& k) {
     static const bool off = env_switch("RX_VK_DLSS_ACTORS") == 0;
     if (off || !temporal_wanted() || !k.depth || !k.bones || k.bones_size < 48 || !k.object || k.object_size < 0x4c) return;
     State& s = st();
-    std::lock_guard lk(s.mu);
-    if (s.skins.size() >= 512) s.skins.clear();   // (no upscale for a while: what was kept is stale)
-    struct Timed {
-        State& s;
-        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-        ~Timed() { s.actor_ns += (std::chrono::steady_clock::now() - t0).count(); }
-    } timed{s};
-    State::Skin d;
-    d.k = k;
+    const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    // (the time this draw's actor motion costs, less the time it waited for the lock: another thread's work there is counted
+    // by that thread, and the wait would count it twice. Added under the lock)
+    int64_t waited = 0;
+    const auto take = [&] {
+        const std::chrono::steady_clock::time_point w = std::chrono::steady_clock::now();
+        s.mu.lock();
+        waited += (std::chrono::steady_clock::now() - w).count();
+    };
+    const auto spent = [&] { s.actor_ns += (std::chrono::steady_clock::now() - t0).count() - waited; };
     const uint64_t model = dlss_actor::key(k.vbuf, k.ibuf, k.count, k.base_vertex, k.program, 0);
-    // (only the bones its vertices use are taken: a palette holds up to 280, a model uses a few dozen)
-    auto mb = s.model_bones.find(model);
-    if (mb == s.model_bones.end()) {
-        if (s.model_bones.size() > 4096) s.model_bones.clear();
-        mb = s.model_bones.emplace(model, bones_used(k)).first;
+    uint32_t nbones = 0;
+    {
+        take();
+        std::lock_guard lk(s.mu, std::adopt_lock);
+        // (only the bones its vertices use are taken: a palette holds up to 280, a model uses a few dozen)
+        auto mb = s.model_bones.find(model);
+        if (mb == s.model_bones.end()) {
+            if (s.model_bones.size() > 4096) s.model_bones.clear();
+            mb = s.model_bones.emplace(model, bones_used(k)).first;
+        }
+        nbones = (uint32_t)std::min<uint64_t>(mb->second, std::min<uint64_t>(k.bones_size / 48, 280));
+        if (!nbones) return spent();
     }
-    d.nbones = (uint32_t)std::min<uint64_t>(mb->second, std::min<uint64_t>(k.bones_size / 48, 280));
-    if (!d.nbones) return;
     // (its pose as this draw sees it: the origin and bones at the stream's place (ub_read: the submission's memory with the
     // uniform updates before here over it). Copied from the game's memory at the upscale instead, a draw's pose could be another
-    // frame's or another draw's (the place pair_by_place needs, too). RX_VK_DLSS_ACTOR_LIVE=1: as before, for an A/B)
+    // frame's or another draw's (the place pair_by_place needs, too). RX_VK_DLSS_ACTOR_LIVE=1: as before, for an A/B.
+    // Read without the lock, into this thread's own buffer (its room kept from draw to draw); the lock is taken only to add it
+    // to the frame's poses. ub_read is this recording thread's view of the stream, as the draw's own reads of its uniforms.
+    // A limit: this reads what the CPU wrote, the submission's memory and the stream's inline uniform updates, so it holds for
+    // bone palettes and object blocks the game writes on the CPU. Nothing here checks that no palette is written on the GPU
+    // (a buffer copy or a compute pass earlier in the stream): one that is would read stale and still count as read at the
+    // draw, where the copy at the upscale, from the GPU's buffer, has it right. RX_VK_DLSS_ACTOR_LIVE=1 takes that copy for
+    // every draw)
     static const bool live = env_switch("RX_VK_DLSS_ACTOR_LIVE") == 1;
+    thread_local std::vector<uint8_t> pose;
+    bool read = false;
     if (!live) {
-        d.pose.resize(16 + (size_t)d.nbones * 48);
-        if (!ub_read(k.object + 0x40, d.pose.data(), 12) || !ub_read(k.bones, d.pose.data() + 16, (uint64_t)d.nbones * 48))
-            d.pose.clear();
+        pose.resize(16 + (size_t)nbones * 48);
+        read = ub_read(k.object + 0x40, pose.data(), 12) && ub_read(k.bones, pose.data() + 16, (uint64_t)nbones * 48);
+    }
+    take();
+    std::lock_guard lk(s.mu, std::adopt_lock);
+    if (s.skins.size() >= 512) s.skins.clear();   // (no upscale for a while: what was kept is stale)
+    if (s.skins.empty()) s.pose_bytes.clear();    // (a frame's first: the poses read before are gone with their skins)
+    State::Skin d;
+    d.k = k;
+    d.nbones = nbones;
+    if (read) {
+        d.pose = (uint32_t)s.pose_bytes.size();
+        s.pose_bytes.insert(s.pose_bytes.end(), pose.begin(), pose.end());
     }
     int nth = 0;   // (the same model drawn twice in a frame: the n-th draw of it is the n-th the frame before)
     for (const auto& o : s.skins) nth += dlss_actor::same_model(o.key, model);
     d.key = dlss_actor::key(k.vbuf, k.ibuf, k.count, k.base_vertex, k.program, nth);
     s.skins.push_back(std::move(d));
+    spent();
 }
 
 namespace {
@@ -989,7 +1081,7 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
         const Camera& c = s.cam;
         // (the gameplay networks' own formats: they sample the scene's B10G11R11 colour and write the B10G11R11 picture.
         // Other cooperative-matrix networks of the same shape (one RGBA8 into A2B10G10R10, RGB9E5 into B10G11R11) are not it)
-        if (!in || !out || in->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || out->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 ||
+        if (!in || !out || !temporal_colour_pair(in->format, out->format) ||
             (out->width >> out_level) <= in->width)
             return false;
         note_output(out, out_level);
@@ -1002,7 +1094,7 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
                                             out->height >> out_level);
     }
     free_dead(false);
-    if (known && out && out->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32) note_output(out, out_level);
+    if (known && in && out && temporal_colour_pair(in->format, out->format)) note_output(out, out_level);
     const Camera cam = s.cam;
     s.cam.valid = false;   // (each frame's own camera)
     struct SkinsDone {     // (the skinned draws, each frame's own too: actor_motion takes them, or they go here)
@@ -1015,6 +1107,10 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     s.asked = texture_frame_no(), s.holding = true;   // (not after a failure: what it holds is let go, temporal_idle)
     if (!in || !in_view || !out || !out_view) return fail("no input or output view");
     if (!cam.valid || texture_frame_no() - cam.frame > 1) return fail("no scene camera this frame");
+    if (!temporal_scene_format(cam.scene_format) || !temporal_scene_format(in->format))
+        return fail("unexpected scene colour format");
+    const bool psycho = scene_tonemap_on() && ur::takes_psychov35(mode) &&
+                        temporal_scene_format(VK_FORMAT_R16G16B16A16_SFLOAT);
     // (any texture destroyed since the camera was noted used to send the frame to the game's own upscale: the game lets
     // textures go every few frames while new ones stream in (a turn of the camera in Kakariko's potion shop), and each
     // was a frame without the temporal upscaler, and with Ray tracing a frame without its light shadows and bounce, then
@@ -1027,7 +1123,7 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     if (cam.depth->width != rw || cam.depth->height != rh || !(cam.depth->usage & VK_IMAGE_USAGE_SAMPLED_BIT) ||
         cam.depth->samples != VK_SAMPLE_COUNT_1_BIT || !(cam.depth->aspect & VK_IMAGE_ASPECT_DEPTH_BIT))
         return fail("unexpected scene depth");
-    if (out->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || !dlss_checks::scene_size_fits(rw, rh, ow, oh))
+    if (!temporal_colour_pair(in->format, out->format) || !dlss_checks::scene_size_fits(rw, rh, ow, oh))
         return fail("unexpected output");
     if (!engine.started) engine.started = true, engine.ok = engine.e->start();
     if (!engine.ok) {
@@ -1079,6 +1175,18 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
         return fail(why ? why : "it could not be made");
     }
     if (ready == 0) return fail(why ? why : "not this frame");
+    if (psycho && (!engine.e->hdr || !engine.e->hdr()))
+        return fail(ur::is_fsr4(mode) ? "PsychoV35 waits for the native HDR FSR 4 context"
+                                       : "PsychoV35 waits for the native HDR DLSS feature");
+    const bool rgba = psycho && in->format == VK_FORMAT_R16G16B16A16_SFLOAT && out->format == VK_FORMAT_R16G16B16A16_SFLOAT;
+    if (s.psycho_last != psycho || s.history_input != in->format) {
+        if (psycho || s.psycho_last || s.history_input == VK_FORMAT_R16G16B16A16_SFLOAT)
+            logf("vk: PsychoV35 %s: %s route; scene format %u, network input %u, output %u", ur::is_fsr4(mode) ? "FSR 4" : "DLSS",
+                 rgba ? "RGBA16F linear" : "packed", (unsigned)cam.scene_format, (unsigned)in->format, (unsigned)out->format);
+        s.psycho_last = psycho;
+        s.history_input = in->format;
+        s.last_frame = 0;
+    }
     if (ready == 2) s.engines_made++, s.last_frame = 0;   // (made just now: a new history)
     // (NVIDIA DLSS Frame Generation through NGX copies the depth and the motion each frame, vk_dlss.cpp dlss_fg_inputs: a
     // transfer's source too, always, so the Frame generation by row can turn it on at any time)
@@ -1150,8 +1258,12 @@ bool temporal_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in
     // (an engine made for HDR colour, as prepare made it this frame: the game's native HDR goes past 1, and the LDR pass's
     // clamp cut every highlight at the paper white, a flat picture. It is given linear light and gives it back: the HDR pair)
     const bool hdr = engine.e->hdr && engine.e->hdr();
-    const VkPipeline prep_pipe = hdr ? s.prep_hdr : s.prep, out_pipe = hdr ? s.out_hdr : s.out;
-    const VkPipelineLayout prep_layout = hdr ? s.prep_hdr_layout : s.prep_layout, out_layout = hdr ? s.out_hdr_layout : s.out_layout;
+    // The network receives perceptual colour after the scene pass: decode it even when its storage is RGBA16F.
+    if (rgba && !make_rgba_output()) return fail("the RGBA16F output shader was not made");
+    const VkPipeline prep_pipe = hdr ? s.prep_hdr : s.prep;
+    const VkPipeline out_pipe = rgba ? s.out_rgba : hdr ? s.out_hdr : s.out;
+    const VkPipelineLayout prep_layout = hdr ? s.prep_hdr_layout : s.prep_layout;
+    const VkPipelineLayout out_layout = rgba ? s.out_rgba_layout : hdr ? s.out_hdr_layout : s.out_layout;
 
     const auto prep = [&] {
         const VkDescriptorImageInfo info[5] = {{s.point, in_view, VK_IMAGE_LAYOUT_GENERAL},

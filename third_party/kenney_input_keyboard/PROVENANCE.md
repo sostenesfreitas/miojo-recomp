@@ -5,3 +5,5 @@ The keyboard and mouse font of Kenney's Input Prompts 1.5 (https://kenney.nl/ass
 nx2/prompt_draw.py draws the keyboard face's keys from it (nx2/prompt_keys.py).
 
 - kenney_input_keyboard_&_mouse.otf (Keyboard & Mouse/Fonts)
+
+tree-sha256: 80907e74e96831e24ecf307b547eb666d6b1378434ad4dad7c4527cdcde3642e

@@ -87,6 +87,8 @@ const char *hos_romfs_dir, *hos_user_dir;
 #define R_PATH_EXISTS 0x402             /* fs::ResultPathAlreadyExists */
 #define R_NOT_MOUNTED 0xCA02            /* fs::ResultInvalidMountName-ish: no such mount */
 #define R_TARGET_NOT_FOUND 0x7D402      /* fs::ResultTargetNotFound (save data) */
+/* (0xCA01: the out-of-memory code hos_mem.c and hos_svc.c return; by Horizon's numbering it is svc::ResultInvalidSize) */
+#define R_OUT_OF_MEMORY 0xCA01          /* svc::ResultOutOfMemory: the guest buffer could not be committed (Windows) */
 
 #define FS_PATH_MAX 0x302                /* (nn::fs paths: 0x300 bytes and the NUL; DirectoryEntry's name is 0x301) */
 
@@ -380,7 +382,9 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
         const char *ov = __atomic_load_n(&overlay, __ATOMIC_RELAXED);
         if (ov && !*ov) {
             ov = getenv("HOS_FS_OVERLAY");
-            if (ov && !*ov) ov = NULL;   /* (set but empty: no overlay, as before) */
+            /* (set but empty: no overlay. This changed: before, an empty one (only Linux can set it; Windows'
+               _putenv("HOS_FS_OVERLAY=") unsets it) made alt "/<path>", each file looked up at the filesystem root) */
+            if (ov && !*ov) ov = NULL;
             __atomic_store_n(&overlay, ov, __ATOMIC_RELAXED);
         }
         const char *rel = !want_write && ov ? strstr(g, ":/") : NULL;
@@ -410,7 +414,8 @@ HLE(_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci) {
     RET(0);
 }
 
-static uint64_t read_at(Ctx *c, uint64_t id, int64_t off, uint64_t buf, uint64_t size) {
+/* (oom: set to 1 when the buffer could not be committed, and nothing is read) */
+static uint64_t read_at(Ctx *c, uint64_t id, int64_t off, uint64_t buf, uint64_t size, int *oom) {
     Handle *fh = get_handle(c, id);
     uint64_t done = 0;
     if (!hos_guest_range(buf, size)) return 0;   /* (hookshot: the file's bytes go into guest memory only) */
@@ -426,6 +431,14 @@ static uint64_t read_at(Ctx *c, uint64_t id, int64_t off, uint64_t buf, uint64_t
         hos_sleep_ns(delay_ns);
     }
     const int away = hos_vcore_away();   /* (as OpenFile: no core held through the read) */
+    /* (the kernel's ReadFile does not fault pages in: a heap page nothing touched yet (hos_mem.c, committed on touch) is
+       committed for it first, or the read fails with ERROR_NOACCESS. Refused (the commit limit, logged with the out-of-memory
+       notice): nothing is read, and the caller reports an error rather than a short read) */
+    if (size && !hos_commit(buf, size)) {
+        if (away) hos_vcore_back();
+        *oom = 1;
+        return 0;
+    }
     while (done < size) {
         OVERLAPPED ov = {0};
         int64_t o = off + (int64_t)done;
@@ -450,17 +463,20 @@ static uint64_t read_at(Ctx *c, uint64_t id, int64_t off, uint64_t buf, uint64_t
 
 /* ReadFile(FileHandle, long offset, void* buf, unsigned long size) -> Result (must read it all) */
 HLE(_ZN2nn2fs8ReadFileENS0_10FileHandleElPvm) {
-    uint64_t n = read_at(c, ARG(0), (int64_t)ARG(1), ARG(2), ARG(3));
-    RET(n == ARG(3) ? 0 : 0x2EE202);   /* fs::ResultOutOfRange */
+    int oom = 0;
+    uint64_t n = read_at(c, ARG(0), (int64_t)ARG(1), ARG(2), ARG(3), &oom);
+    RET(oom ? R_OUT_OF_MEMORY : n == ARG(3) ? 0 : 0x2EE202);   /* fs::ResultOutOfRange */
 }
 /* ReadFile(unsigned long* read, FileHandle, long offset, void* buf, unsigned long size[, ReadOption const&]) */
 HLE(_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm) {
-    G64(ARG(0)) = read_at(c, ARG(1), (int64_t)ARG(2), ARG(3), ARG(4));
-    RET(0);
+    int oom = 0;
+    G64(ARG(0)) = read_at(c, ARG(1), (int64_t)ARG(2), ARG(3), ARG(4), &oom);
+    RET(oom ? R_OUT_OF_MEMORY : 0);
 }
 HLE(_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE) {
-    G64(ARG(0)) = read_at(c, ARG(1), (int64_t)ARG(2), ARG(3), ARG(4));
-    RET(0);
+    int oom = 0;
+    G64(ARG(0)) = read_at(c, ARG(1), (int64_t)ARG(2), ARG(3), ARG(4), &oom);
+    RET(oom ? R_OUT_OF_MEMORY : 0);
 }
 /* GetFileSize(long*, FileHandle) */
 HLE(_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE) {
@@ -477,7 +493,13 @@ HLE(_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE) {
     ov.OffsetHigh = (DWORD)(ARG(1) >> 32);
     DWORD put = 0;
     /* (hookshot) from guest memory only, and the whole size: a DWORD cut wrote less than asked and said so */
-    if (ARG(3) <= 0xFFFFFFFFu && hos_guest_range(ARG(2), ARG(3))) WriteFile(fh->h, GP(ARG(2)), (DWORD)ARG(3), &put, &ov);
+    if (ARG(3) <= 0xFFFFFFFFu && hos_guest_range(ARG(2), ARG(3))) {
+        if (ARG(3) && !hos_commit(ARG(2), ARG(3))) {   /* (as the read: refused, an error, not a short write) */
+            RET(R_OUT_OF_MEMORY);
+            return;
+        }
+        WriteFile(fh->h, GP(ARG(2)), (DWORD)ARG(3), &put, &ov);
+    }
     RET(put == ARG(3) ? 0 : 0x2EE202);
 }
 HLE(_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl) {

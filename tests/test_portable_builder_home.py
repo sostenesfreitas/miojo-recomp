@@ -1,4 +1,4 @@
-"""Compile the actual Windows Builder home/storage paths over authored roots; no install, game or process launch."""
+"""Compile the actual Windows Builder home paths over authored roots; no install, game or process launch."""
 import argparse
 from pathlib import Path
 import shutil
@@ -18,7 +18,7 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="portable-builder-home-") as folder:
         root = Path(folder)
-        for name in ("BuilderHome.cs", "Storage.cs"):
+        for name in ("BuilderHome.cs",):
             shutil.copyfile(args.source / "builder/HookshotBuilder" / name, root / name)
         shutil.copyfile(ROOT / "tests/portable_builder_home_test.cs", root / "Program.cs")
         (root / "NuGet.Config").write_text("<configuration><packageSources><clear/></packageSources></configuration>", encoding="utf-8")
@@ -29,7 +29,7 @@ def main():
         data = root / "authored filesystem"
         data.mkdir()
         native = root / "native roots é, fixture"
-        for part in ("volume old/HookshotBuilder/versions/v-authored/HookshotBuilder", "volume old/Game", "unrelated cwd", "standard", "broken"):
+        for part in ("volume old/HookshotBuilder-data/versions/v-authored/HookshotBuilder", "volume old/Game", "unrelated cwd", "standard", "broken"):
             (native / part).mkdir(parents=True, exist_ok=True)
         exe = root / "native-home.exe"
         subprocess.run([args.cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-municode",
@@ -37,7 +37,7 @@ def main():
                         "-o", str(exe)], check=True)
         subprocess.run([str(exe), str(native)], check=True, timeout=30)
         subprocess.run([args.dotnet, "run", "--project", str(root / "Fixture.csproj"), "--configuration", "Release",
-                        "--disable-build-servers", "--", str(data), str(native / "volume moved/HookshotBuilder")], cwd=root, check=True)
+                        "--disable-build-servers", "--", str(data), str(native / "volume moved/HookshotBuilder-data")], cwd=root, check=True)
         subprocess.run([str(exe), "--read", str(data / "csharp shared")], check=True, timeout=30)
 
 

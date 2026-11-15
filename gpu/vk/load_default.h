@@ -28,9 +28,24 @@ inline Choice choose(const char* env, bool native_mesh, bool marker, bool compre
 
 /// The safety net: the replay thread's time running or waiting for loads at first uses, in one session. Measured where loads
 /// at create work: 10-25 ms in all over a tour, the longest 2-7 ms (RTX 3090, RTX 4070 SUPER); where they do not: 2.5-4.7 s in
-/// all, the longest 0.7-1.3 s (RX 580, 16 GB)
-constexpr double kWorstMs = 100.0, kTotalMs = 500.0;
-inline bool too_slow(double worst_ms, double total_ms) { return worst_ms > kWorstMs || total_ms > kTotalMs; }
+/// all, the longest 0.7-1.3 s (RX 580, 16 GB).
+/// The marker costs the install 4-5 GB of memory at every later start, for good, so one bad moment must not leave it: on the
+/// RTX 3090, with other work taking its memory, one first use waited 261 ms (322 ms in the session) and the rule before this
+/// one (a single wait over 100 ms) took a healthy install to start. Now:
+/// - only waits longer than kLongMs count, so the few milliseconds each of a healthy session never add up, however long it is;
+/// - over kNowMs of them in one session: the marker at once. The PC where loads at create do not work had tours of 2.5-4.7 s
+///   of waits, and also one session of 62.6 ms: it is taken back at its first session over kNowMs (the second of two there,
+///   at 2,559 ms), not always at its first;
+/// - over kStrikeMs: the marker only if the session before this one was over it too (a strike file says so, taken away at
+///   each start: two sessions running, not two ever)
+constexpr double kLongMs = 20.0, kStrikeMs = 500.0, kNowMs = 2000.0;
+inline bool counts(double wait_ms) { return wait_ms > kLongMs; }
+enum class Waits { kFine, kStrike, kStart };
+inline Waits waits_verdict(double long_waits_ms, bool struck_last_session) {
+    if (long_waits_ms > kNowMs) return Waits::kStart;
+    if (long_waits_ms > kStrikeMs) return struck_last_session ? Waits::kStart : Waits::kStrike;
+    return Waits::kFine;
+}
 
 /// The other thing loads at create calls must not do: find that the caches lack what a list names. A load asks the caches for
 /// its program's noted pipelines and its compute pipelines without compiling; one that is in no cache is compiled when it is
@@ -54,9 +69,24 @@ inline bool marker_write(const std::string& path, double worst_ms, double total_
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return false;
     const bool ok = std::fprintf(f, "First uses of shader programs waited for their loads for %.0f ms in one session (the longest "
-                                    "%.0f ms), so programs are loaded before the title again. Delete this file, or prepare the "
+                                    "%.0f ms), or in two sessions running, so programs are loaded before the title again. Delete this file, or prepare the "
                                     "shaders again, to have them loaded when the game makes them.\n", total_ms, worst_ms) > 0;
     return std::fclose(f) == 0 && ok;
+}
+/// The strike: a session whose long waits were over kStrikeMs leaves it; the next start takes it away and remembers it was there
+inline std::string strike_path(const std::string& marker_path) { return marker_path + ".waited"; }
+inline bool strike_write(const std::string& marker_path, double long_waits_ms) {
+    FILE* f = std::fopen(strike_path(marker_path).c_str(), "wb");
+    if (!f) return false;
+    const bool ok = std::fprintf(f, "First uses of shader programs waited %.0f ms for their loads in the last session. Once is "
+                                    "let pass; if the next session does the same, programs are loaded before the title from "
+                                    "then on.\n", long_waits_ms) > 0;
+    return std::fclose(f) == 0 && ok;
+}
+inline bool strike_take(const std::string& marker_path) {
+    const bool there = marker_there(strike_path(marker_path));
+    if (there) std::remove(strike_path(marker_path).c_str());
+    return there;
 }
 inline bool marker_write_lacked(const std::string& path, long long listed_not_in_a_cache) {
     FILE* f = std::fopen(path.c_str(), "wb");

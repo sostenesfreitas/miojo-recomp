@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "vk_internal.h"
+#include "vk_draw.h"   // (extern_guarded_shader_module, extern_guarded_compute)
 #include "shader_recompiler/backend/spirv/mma_layout.h"
 #include <sirit/sirit.h>
 #ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
@@ -155,16 +156,19 @@ bool run_shader(const std::vector<uint32_t>& code, std::vector<uint32_t>& data) 
     VkShaderModuleCreateInfo smi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     smi.codeSize = code.size() * 4, smi.pCode = code.data();
     VkShaderModule module{};
-    vkCreateShaderModule(dev.device, &smi, nullptr, &module);
     VkComputePipelineCreateInfo cpi{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    cpi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, module, "main", nullptr};
     VkPipelineShaderStageRequiredSubgroupSizeCreateInfo lanes{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO};
     lanes.requiredSubgroupSize = 32;   // (as the programs it stands for will run: vk_main.cpp)
-    if (dev.sg32_stages & VK_SHADER_STAGE_COMPUTE_BIT) cpi.stage.pNext = &lanes;
-    cpi.layout = layout;
     VkPipeline pipeline{};
-    const VkResult pr = module ? vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &cpi, nullptr, &pipeline)
-                               : VK_ERROR_INITIALIZATION_FAILED;
+    VkResult pr;
+    {
+        IntelDriverGate gate;
+        if (extern_guarded_shader_module(&smi, &module) != VK_SUCCESS) module = VK_NULL_HANDLE;
+        cpi.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, module, "main", nullptr};
+        if (dev.sg32_stages & VK_SHADER_STAGE_COMPUTE_BIT) cpi.stage.pNext = &lanes;
+        cpi.layout = layout;
+        pr = module ? extern_guarded_compute(VK_NULL_HANDLE, &cpi, &pipeline) : VK_ERROR_INITIALIZATION_FAILED;
+    }
     bool ok = false;
     if (pr == VK_SUCCESS) {
         VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};

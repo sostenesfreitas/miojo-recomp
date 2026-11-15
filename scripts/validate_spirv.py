@@ -5,7 +5,7 @@ invocations and its workgroup memory (the mesh fallback keeps a mesh program's o
 shared memory). A stage that fails is written to --out as <key>_<n>_<stage>.spv, its disassembly (.spvasm, spirv-dis) and
 the reasons (.txt); the summary groups the validator's errors by message.
 
-python -I scripts/validate_spirv.py "D:\\Games\\Hookshot\\hookshot_programs.bin"          (the mesh-as-compute programs)
+python -I scripts/validate_spirv.py "D:\\Games\\Hookshot\\cache\\hookshot_programs.bin"    (the mesh-as-compute programs)
 python -I scripts/validate_spirv.py <file> --all                                        (every program)
 python -I scripts/validate_spirv.py <file> --key a5da9f84b72d1471                       (the programs whose key starts so)
 

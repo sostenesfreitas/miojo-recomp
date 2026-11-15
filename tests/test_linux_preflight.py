@@ -69,6 +69,7 @@ class LinuxPreflightTests(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(self.make, "CROSS", False))
         self.stack.enter_context(mock.patch.object(self.build, "LINUX", True))
         self.stack.enter_context(mock.patch.object(self.build, "NGX_SDK", ""))
+        self.stack.enter_context(mock.patch.object(self.build, "FSR", False))
         self.stack.enter_context(mock.patch.object(self.build.kit, "ROOT", str(self.checkout)))
         self.stack.enter_context(mock.patch.object(self.build.kit, "WORK", str(self.root / "wrong-work")))
         self.cc = self.root / "tools/clang"
@@ -258,6 +259,24 @@ class LinuxPreflightTests(unittest.TestCase):
         self.assertEqual(self.invoke(), 1)
         self.assertIn("SPIR-V", self.output.getvalue())
         self.assertNotIn("ignored.so", self.output.getvalue())
+        self.assertEqual(self.events, [])
+
+    def test_fsr_overrides_prebuilt_renderer(self):
+        # (AMD FSR 4: the AppImage's prebuilt back end has none, so the build compiles its own and needs its headers)
+        os.environ["HOOKSHOT_VK_PREBUILT"] = str(self.root / "ignored.so")
+        self.build.FSR = True
+        self.assertEqual(self.invoke(), 1)
+        self.assertIn("SPIR-V", self.output.getvalue())
+        self.assertNotIn("ignored.so", self.output.getvalue())
+        self.assertEqual(self.events, [])
+
+    def test_fsr_without_its_headers_says_so_first(self):
+        # (AMD FSR 4 where AMD's FSR API headers are missing: said before the game is read, not at the compile)
+        self.headers()
+        self.build.FSR = True
+        with mock.patch.object(self.build, "FSR_HEADERS", str(self.root / "no-fidelityfx")):
+            self.assertEqual(self.invoke(), 1)
+        self.assertIn("AMD's FSR API headers", self.output.getvalue())
         self.assertEqual(self.events, [])
 
     def test_missing_optional_prompt_packages_are_never_required(self):

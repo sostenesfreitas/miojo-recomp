@@ -1,12 +1,12 @@
 // (hookshot) What the pipeline cache's files were made for (vk_draw.cpp's pcache_init), apart from Vulkan so that
 // tests/test_pcache_stamp.py can run it.
 //
-// mkw_vk_pipelines.bin is checked against the GPU, the driver and the cache UUID only. A new translator (or a switch that changes
+// hookshot_vk_pipelines.bin is checked against the GPU, the driver and the cache UUID only. A new translator (or a switch that changes
 // what it makes) gives every program new SPIR-V: the program cache and the prepare record start over (program_cache_stamp), but
 // the pipeline cache kept every older translator's pipelines, none of which can be hit again. It only grew: 2.4 GB after a
 // few dozen test builds in one folder, read whole at every start and held by the driver, a working set of 18.7 GB in a field
 // walk against 14.2 GB with a fresh file (the same build, the same walk). Now the stamp the files were made with is kept beside
-// them in mkw_vk_pipelines.stamp, and files of another stamp are dropped before they are read.
+// them in hookshot_vk_pipelines.stamp, and files of another stamp are dropped before they are read.
 #pragma once
 
 #include <cstdint>
@@ -17,9 +17,9 @@
 
 namespace pcache_stamp {
 
-inline const char* kStampFile = "mkw_vk_pipelines.stamp";
-inline const char* kMainFile = "mkw_vk_pipelines.bin";
-inline const char* kPlayPrefix = "mkw_vk_pipelines_play_";
+inline const char* kStampFile = "hookshot_vk_pipelines.stamp";
+inline const char* kMainFile = "hookshot_vk_pipelines.bin";
+inline const char* kPlayPrefix = "hookshot_vk_pipelines_play_";
 
 /// The stamp kept in dir's stamp file; false: none (no file, or not 8 bytes)
 inline bool read(const std::string& dir, uint64_t* stamp) {
@@ -44,7 +44,7 @@ inline bool write(const std::string& dir, uint64_t stamp) {
     return ok && !ec;
 }
 
-/// Whether name is one of the pipeline cache's files: the main one, or a play file (mkw_vk_pipelines_play_<n>.bin, also .tmp)
+/// Whether name is one of the pipeline cache's files: the main one, or a play file (hookshot_vk_pipelines_play_<n>.bin, also .tmp)
 inline bool is_cache_file(const std::string& name) {
     if (name == kMainFile || name == std::string(kMainFile) + ".tmp") return true;
     const std::string pre = kPlayPrefix;

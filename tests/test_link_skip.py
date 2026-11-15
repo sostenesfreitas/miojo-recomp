@@ -109,7 +109,10 @@ class LinkSkipTests(unittest.TestCase):
         main = src[src.index("\ndef main("):]
         self.assertLess(main.index("write_compdb(out, jobs)"), main.index("plan_jobs(jobs)"))
         one = src[src.index("\ndef compile_one("):src.index("\ndef ", src.index("\ndef compile_one(") + 1)]
-        self.assertIn('[cc] + fl + ["-c", src, "-o", obj]', one)   # (the command the database says, as compile_one runs it)
+        # (the command the database says, as compile_one runs it: the source itself, or with HOOKSHOT_SPLIT_GIANTS the copy
+        # with its giants cut, which the database leaves out so that tools see the real file)
+        self.assertIn('[cc] + fl + ["-c", c_src, "-o", obj]', one)
+        self.assertIn("    c_src = src\n", one)
 
     def test_the_build_links_through_it(self):
         src = (ROOT / "nx2" / "build.py").read_text(encoding="utf-8")

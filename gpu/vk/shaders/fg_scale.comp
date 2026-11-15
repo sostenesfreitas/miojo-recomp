@@ -1,5 +1,6 @@
 #version 450
-// the frame to the window's size (the Insert menu's Upscaling, Sharpness): Catmull-Rom or Lanczos 2, or the linear filter, then
+// the frame to the window's size (the Insert menu's Upscaling, Sharpness): Catmull-Rom or Lanczos 2, or the linear filter (each
+// stretched over the picture's pixels one window pixel covers when the picture is the larger), then
 // a contrast-adaptive sharpen in the manner of AMD FidelityFX RCAS that cannot go past the light around the pixel, so it adds no halos,
 // no clipping and no flashes
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -69,21 +70,32 @@ float catmull(float x) {
     if (x < 2.0) return -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0;
     return 0.0;
 }
+float tent(float x) { return max(1.0 - abs(x), 0.0); }
+// The filter's weight at d picture pixels, and how far it reaches (in picture pixels at stretch 1)
+float kernel(float d) { return pc.mode == 2 ? lanczos2(d) : pc.mode == 1 ? catmull(d) : tent(d); }
+float reach() { return pc.mode == 0 ? 1.0 : 2.0; }
+// Shrinking, the filter is stretched by the picture's pixels per window pixel: at the picture's own spacing its taps skip
+// most of the picture (4 x 4 of the 6 x 6 one window pixel's Lanczos needs at 3840 x 2160 to 2560 x 1440), and fine detail
+// came out as shimmer and moire, worse than the plain linear copy. shortcut: up to 4 (16 x 16 taps); a smaller window aliases
+// again past that, a mip chain first if anyone plays a 5K picture in a quarter-size window
+const float kMaxStretch = 4.0;
 vec3 filtered(vec2 uv) {
-    if (pc.mode == 0) return bilinear(uv);
     const vec2 size = vec2(textureSize(src, 0));
+    const vec2 s = clamp(size / vec2(imageSize(dst)), vec2(1.0), vec2(kMaxStretch));
+    if (pc.mode == 0 && s == vec2(1.0)) return bilinear(uv);
     const vec2 p = uv * size - 0.5;
-    const ivec2 b = ivec2(floor(p));
-    const vec2 f = p - vec2(b);
+    // (at stretch 1: the 4 x 4 around p for Catmull-Rom and Lanczos, as before)
+    const ivec2 lo = ivec2(floor(p - reach() * s)) + 1, hi = ivec2(floor(p + reach() * s));
     vec3 sum = vec3(0.0);
     float weight = 0.0;
-    for (int y = -1; y <= 2; y++)
-        for (int x = -1; x <= 2; x++) {
-            const vec2 d = vec2(x, y) - f;
-            const float w = pc.mode == 2 ? lanczos2(d.x) * lanczos2(d.y) : catmull(d.x) * catmull(d.y);
-            sum += w * pixel(b + ivec2(x, y), ivec2(size));
+    for (int y = lo.y; y <= hi.y; y++) {
+        const float wy = kernel((float(y) - p.y) / s.y);
+        for (int x = lo.x; x <= hi.x; x++) {
+            const float w = kernel((float(x) - p.x) / s.x) * wy;
+            sum += w * pixel(ivec2(x, y), ivec2(size));   // (darkened under the loading cover, as bilinear())
             weight += w;
         }
+    }
     return sum / weight;
 }
 // The Sharpness slider (pc.sharp 0 to 1) is RCAS's strength: 0 the picture as filtered, 1 its strongest lobe.

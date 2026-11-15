@@ -36,6 +36,16 @@ int main() {
     CHECK(version_text("v2.0.5") == "v2.0.5");
     CHECK(version_text("v2.0.5-2-g619c897-dirty (source 2c44105b)") == "v2.0.5 dev");
     CHECK(version_text("movie-sync (source 1a2b3c4d)") == "movie-sync");
+    // (Hookshot's names: a release candidate as its tag, a nightly as the launcher names it, a build between tags as "dev")
+    CHECK(version_text("v3.0.0-rc.1 (source 1a2b3c4d)") == "v3.0.0-rc.1");
+    CHECK(version_text("v3.0.0-rc.12") == "v3.0.0-rc.12");
+    CHECK(version_text("v3.0.0-rc.1-5-gabc1234-dirty (source 1a2b3c4d)") == "v3.0.0-rc.1 dev");
+    CHECK(version_text("v3.0.0-5-gabc1234") == "v3.0.0 dev");
+    CHECK(version_text("v3.10.2") == "v3.10.2");
+    CHECK(version_text("nightly-46-434712bb (source 6c70b6d8)") == "Nightly 46 \xc2\xb7 434712bb");
+    CHECK(version_text("nightly-46-434712bb-dirty") == "Nightly 46 \xc2\xb7 434712bb dev");
+    CHECK(version_text("nightly-46-xyz") == "nightly-46-xyz");
+    CHECK(version_text("v3.0") == "v3.0");
     CHECK(version_text("unknown") == "unknown");
     CHECK(percent_text(0, 0).empty());
     CHECK(percent_text(12345, 38809) == "31%");

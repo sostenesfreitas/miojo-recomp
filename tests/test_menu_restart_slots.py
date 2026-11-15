@@ -26,7 +26,7 @@ def main():
         raise SystemExit("FAIL: %d rows take a restart (%s), menu_restart.h kMax is %d" % (len(restart), ", ".join(restart), kmax))
     if re.search(r"restart_state\.start\[restart_slot_of\(", menu):
         raise SystemExit("FAIL: vk_menu.cpp indexes restart_state.start with a slot that can be -1: use restart_changed")
-    if "slot >= 0 && *r.value != restart_state.start[slot]" not in menu:
+    if "slot >= 0 && row_restart_value(r) != restart_state.start[slot]" not in menu:
         raise SystemExit("FAIL: restart_changed does not skip a row with no slot")
     print("PASS: %d rows take a restart, %d slots" % (len(restart), kmax))
 

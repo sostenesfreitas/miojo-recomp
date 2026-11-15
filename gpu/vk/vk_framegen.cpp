@@ -40,6 +40,7 @@
 #ifndef HOOKSHOT_ENV_H   // (env_on: the switches' one rule)
 #include "hookshot_env.h"
 #endif
+#include "vk_draw.h"   // (extern_guarded_shader_module, extern_guarded_compute)
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION   // (older Windows SDKs lack it: Windows 10 1803 and later take it)
@@ -208,15 +209,19 @@ bool make_pipe(Pipe& p, const uint32_t* code, size_t bytes, std::initializer_lis
     mi.codeSize = bytes;
     mi.pCode = code;
     VkShaderModule m = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(dev.device, &mi, nullptr, &m) != VK_SUCCESS) return undo();
-    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    ci.stage.module = m;
-    ci.stage.pName = "main";
-    ci.stage.pSpecializationInfo = spec;
-    ci.layout = made.layout;
-    const VkResult r = vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &ci, nullptr, &made.pipe);
+    VkResult r;
+    {
+        IntelDriverGate gate;
+        if (extern_guarded_shader_module(&mi, &m) != VK_SUCCESS) return undo();
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        ci.stage.module = m;
+        ci.stage.pName = "main";
+        ci.stage.pSpecializationInfo = spec;
+        ci.layout = made.layout;
+        r = extern_guarded_compute(VK_NULL_HANDLE, &ci, &made.pipe);
+    }
     vkDestroyShaderModule(dev.device, m, nullptr);
     if (r != VK_SUCCESS) return undo();
     p = made;
@@ -635,10 +640,13 @@ VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint
                        bool pq) {
     WideSides wide = wide_now.load(std::memory_order_relaxed);   // (wide_sides_tick, each present)
     if (wide_cover_in_frame) wide.cover = 0;
-    if (!opts.upscale && !opts.sharpness && !wide.side && !wide.cover) return VK_NULL_HANDLE;
     if (!src || !image || !sw || !sh || !dw || !dh) return VK_NULL_HANDLE;
     const PresentSourceRect source = present_source_rect(sw, sh, crop);
     if (!source.w || !source.h) return VK_NULL_HANDLE;
+    // (a picture larger than the window takes the pass even with the filter Off: the blit's linear filter reads 2 x 2 of the
+    // picture whatever the shrink, and fine detail shimmered)
+    const bool shrink = source.w > dw || source.h > dh;
+    if (!opts.upscale && !opts.sharpness && !wide.side && !wide.cover && !shrink) return VK_NULL_HANDLE;
     if (!init_scale()) return VK_NULL_HANDLE;
     // (pq: the game's own HDR10 picture (Native HDR), PQ codes in RGB10A2. Scaled into RGB10A2 images by fg_scale_pq: through
     // the RGBA8 ones its codes lost two bits, banding in the dark. Without that pass it is shown unscaled. The images made for

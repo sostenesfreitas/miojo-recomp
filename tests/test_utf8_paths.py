@@ -52,6 +52,8 @@ def check_manifest():
     root = ET.fromstring(entries[1][3])
     page = root.findall(".//{http://schemas.microsoft.com/SMI/2019/WindowsSettings}activeCodePage")
     assert len(page) == 1 and page[0].text == "UTF-8", "activeCodePage UTF-8"
+    heap = root.findall(".//{http://schemas.microsoft.com/SMI/2020/WindowsSettings}heapType")
+    assert len(heap) == 1 and heap[0].text == "SegmentHeap", "heapType SegmentHeap (gpu/vk/prepare_workers.h)"
     level = root.find(".//{urn:schemas-microsoft-com:asm.v3}requestedExecutionLevel")
     assert level is not None and level.get("level") == "asInvoker", "no elevation asked for"
 

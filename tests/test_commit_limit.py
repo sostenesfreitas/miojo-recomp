@@ -7,6 +7,8 @@ Checked here:
   Windows only) the shortfall comes off the budget and the rule's budget, as the driver's limit's excess does;
 - hos_commit and the first-touch handler wait at the commit limit (1455) and commit again before they give up, and they log a
   failure the same way (commit_refused: the out-of-memory notice).
+- the first-touch handler tries a page another thread committed again on Windows only (#ifdef _WIN32): on Linux every fault in
+  the guest window would be retried forever instead of reaching the crash report.
 python -I -B tests/test_commit_limit.py
 """
 import re
@@ -54,12 +56,23 @@ def main():
     wait = block(glue, "static int commit_wait(void *p, SIZE_T size)")
     if "Sleep(50)" not in wait or "ERROR_COMMITMENT_LIMIT" not in wait or "i < 100" not in wait:
         raise SystemExit("FAIL: commit_wait does not retry for up to 5 s while the limit refuses")
-    commit = block(glue, "void hos_commit(uint64_t addr, uint64_t size)")
+    commit = block(glue, "int hos_commit(uint64_t addr, uint64_t size)")
     if "err == ERROR_COMMITMENT_LIMIT && commit_wait(" not in commit or "commit_refused(" not in commit:
         raise SystemExit("FAIL: hos_commit does not wait at the commit limit before it reports the failure")
     touch = block(glue, "static LONG CALLBACK commit_on_touch(EXCEPTION_POINTERS *info)")
     if "err == ERROR_COMMITMENT_LIMIT && commit_wait(" not in touch or "commit_refused(" not in touch:
         raise SystemExit("FAIL: the first-touch handler does not wait at the commit limit")
+    # (the retry of a page another thread committed is Windows' only: on Linux the VirtualQuery stand-in calls every guest page
+    # committed and read-write and the signal handler never sets 8, so every fault in the window would be tried again forever)
+    retry = "if (mbi.State == MEM_COMMIT && mbi.Protect == PAGE_READWRITE && rec->ExceptionInformation[0] != 8)"
+    if touch.count(retry) != 1:
+        raise SystemExit("FAIL: the first-touch handler does not retry a page another thread committed (not an execute fault)")
+    head, tail = touch[:touch.index(retry)], touch[touch.index(retry):]
+    opened = head.rfind("#ifdef _WIN32")
+    if opened < 0 or any(d in head[opened:] for d in ("#endif", "#else", "#elif")) or "#endif" not in tail \
+            or not 0 <= tail.find("return EXCEPTION_CONTINUE_EXECUTION;") < tail.index("#endif") \
+            or any(d in tail[:tail.index("#endif")] for d in ("#else", "#elif")):
+        raise SystemExit("FAIL: the first-touch handler's retry of a committed page is not under #ifdef _WIN32")
     if "hos_commit(" in touch:
         raise SystemExit("FAIL: the first-touch handler calls hos_commit, which would wait a second time")
     refused = block(glue, "static void commit_refused(uint64_t lo, uint64_t size, DWORD err)")

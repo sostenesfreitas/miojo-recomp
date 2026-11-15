@@ -8,7 +8,7 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
-#include "../host/control.h"
+#include "control.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -189,6 +189,19 @@ static int fake_state(int *event, int *loading, int *child) {
     *event = 0, *loading = 1, *child = __atomic_load_n(&fake_child, __ATOMIC_RELAXED) ^ (stale_age != 0);
     return 1;
 }
+static uint64_t fake_sample_ask(void) { return 1; }
+static void fake_sample_cancel(uint64_t ticket) { (void)ticket; }
+static int fake_sample(uint64_t ticket, char *out, size_t cap) {
+    (void)ticket;   /* this fixture's snapshot is immediately available; the stepped sampler tests demand/cadence */
+    char map[80];
+    if (!fake_map(map, sizeof map)) return 0;
+    const int child = __atomic_load_n(&fake_child, __ATOMIC_RELAXED) ^ (stale_age != 0);
+    const int n = snprintf(out, cap,
+        "{\"t\":5.0,\"frame\":%lld,\"map\":\"%s\",\"pos\":[-20.1,0,6.8],\"facing\":108.6,\"camera\":45.0,"
+        "\"event\":false,\"loading\":true,\"age\":\"%s\",\"life\":12,\"max_life\":16,\"rupees\":7,"
+        "\"prompt\":\"Open\",\"music\":\"TestMusic\"}", (long long)fake_frame(), map, child ? "child" : "adult");
+    return n >= 0 && (size_t)n < cap;
+}
 static int fake_teleport(int i) {
     if (i < 0 || i >= 3) return 0;
     log_lock();
@@ -226,7 +239,8 @@ static HosControlGame game = {
     .mem_write = fake_mem_write, .save_root = fake_save_root, .log = fake_log, .quit = fake_quit,
     .renderer = fake_renderer, .version = "test", .map = fake_map, .destination = fake_destination,
     .teleport = fake_teleport, .teleport_result = fake_teleport_result, .teleport_cancel = fake_teleport_cancel,
-    .age = fake_age, .oot_state = fake_state};
+    .age = fake_age, .oot_state = fake_state, .oot_sample_ask = fake_sample_ask,
+    .oot_sample_cancel = fake_sample_cancel, .oot_sample = fake_sample};
 
 static void *game_thread(void *unused) {
     (void)unused;
@@ -991,7 +1005,10 @@ int main(int argc, char **argv) {
         wait_frames(5);
         ask(c, "{\"id\":78,\"cmd\":\"status\"}\n", "78", line, sizeof line, 2000);
         CHECK(strstr(line, "\"map\":\"KokiriForest_Child\"") &&
-              strstr(line, "\"game\":{\"event\":false,\"loading\":true,\"age\":\"child\"}"));
+              strstr(line, "\"game\":{\"t\":5.0,\"frame\":") &&
+              strstr(line, "\"pos\":[-20.1,0,6.8],\"facing\":108.6,\"camera\":45.0") &&
+              strstr(line, "\"event\":false,\"loading\":true,\"age\":\"child\"") &&
+              strstr(line, "\"life\":12,\"max_life\":16,\"rupees\":7,\"prompt\":\"Open\",\"music\":\"TestMusic\"}"));
         /* the age switch: none is the other age, and the reply has it and the map it reloads; to the age Link has already:
            said, nothing done; anything but child or adult: a bad request */
         ask(c, "{\"id\":79,\"cmd\":\"age\",\"to\":\"teen\"}\n", "79", line, sizeof line, 2000);

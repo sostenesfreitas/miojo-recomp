@@ -52,6 +52,7 @@ STARTED = time.time()   # (the build's total time, kept in build_times.json and 
 sys.path[:0] = [HERE, os.path.join(ROOT, "third_party", "a64-kit", "tools")]   # (python -I leaves the script folder off)
 import toolchain as _toolchain
 import disk as _disk
+import object_store as _object_store
 # (hookshot) RX_TARGET=windows on Linux: the Windows game, with llvm-mingw's Linux release (HOOKSHOT_MINGW, or llvm-mingw
 # beside the builder), to run under Proton or copy to a Windows PC
 LINUX, CROSS = not _toolchain.windows(), _toolchain.windows() and os.name != "nt"
@@ -83,7 +84,7 @@ def no_throttle(handle=None):
 
 
 PREPARE = False   # (--prepare) say() prints RecompLauncher's "progress <0..1> <text>" lines instead of the builder app's @@ lines
-STAGE_SPAN = {"read": (0.0, 0.05), "lift": (0.05, 0.25), "compile": (0.25, 0.95), "finish": (0.95, 1.0)}   # (a share of the whole each stage takes)
+STAGE_SPAN = {"read": (0.0, 0.15), "lift": (0.15, 0.26), "compile": (0.26, 0.87), "finish": (0.87, 1.0)}   # (a share of the whole each stage takes: docs/development.md, Build times)
 _stage = {"span": (0.0, 1.0), "text": ""}
 
 
@@ -587,11 +588,12 @@ def check_cache_paths(out, paths):
                  "Choose a different output folder." % path)
 
 
-def check_cpu():
+def check_cpu(fsr=False):
     """(linux) The AppImage's Vulkan back end (HOOKSHOT_VK_PREBUILT) is built for x86-64-v3 elsewhere
     (scripts/linux/appimage.sh), while the game follows this PC (nx2/host_cpu.py): on a CPU without AVX2 it would stop at
-    its start. Said now, before the game is read, not 40 minutes in (issue 363)"""
-    if not os.environ.get("HOOKSHOT_VK_PREBUILT") or os.environ.get("RX_MARCH"):
+    its start. Said now, before the game is read, not 40 minutes in (issue 363). fsr: this build has AMD FSR 4, which compiles its
+    own back end (nx2/build.py prebuilt_renderer), for this PC"""
+    if not os.environ.get("HOOKSHOT_VK_PREBUILT") or os.environ.get("RX_MARCH") or fsr:
         return
     sys.path.insert(0, HERE)
     from host_cpu import host_march
@@ -736,6 +738,9 @@ def check_linux_prerequisites(work=None):
                 missing.append("%s header %s (CPM package %s: RX_CPM, clone/cpm, work/eg/.cache/cpm, then sibling "
                                "mkw-recomp/Eglantine caches; then %s, package root or include/; then /usr/local, /usr)"
                                % (name, probe, package, env))
+        if build.FSR and not os.path.isfile(os.path.join(build.FSR_HEADERS, "api", "include", "ffx_api.h")):
+            missing.append("AMD's FSR API headers in %s (AMD FSR 4: third_party/fidelityfx; or build without --fsr)"
+                           % os.path.normpath(build.FSR_HEADERS))
     build.ffmpeg_linux(missing)
     cc = build.toolchain.find("clang")
     # A source checkout also builds a64emit with clang++, even with a prebuilt renderer.
@@ -1133,6 +1138,17 @@ def _drop_stale_linux(work):
         f.write(stamp + chr(10))
 
 
+def object_stamps(obj_dir):
+    """The object keys the objects in obj_dir are stamped with (<obj>.sha1, nx2/build.py compile_one)"""
+    keys = []
+    with contextlib.suppress(OSError):
+        for f in os.listdir(obj_dir):
+            if f.endswith(".sha1"):
+                with contextlib.suppress(OSError), open(os.path.join(obj_dir, f)) as h:
+                    keys.append(h.read().strip())
+    return keys
+
+
 def prune_object_cache(work):
     """(issue 1287) The object cache down to the objects this build used: each object in sa/build/obj names its key in <obj>.sha1
     (nx2/build.py compile_one); cached objects no stamp names (earlier releases', other settings') go. Returns the bytes kept.
@@ -1253,14 +1269,23 @@ def drop_stale_objects(work):
 
 def seed_pipelines(out):
     """The pipelines recorded on the development PC (hookshot_pipelines_seed.bin in the tools: program keys and draw states, no game
-    code), as the game folder's list, so its first start builds them before the title, as TotK Recomp's shipped shader list does,
-    instead of compiling each when it is first drawn (the stutter of a first visit). Each release ships the list its own build
-    made: the file's first 8 bytes are that build's stamp, and a list the folder has from the same build is kept (it grows as
-    the player plays)"""
+    code), as the game folder's list (cache/hookshot_pipelines.bin, where the game keeps its notes: gpu/vk/vk_draw.cpp
+    pipe_notes_path), so its first start builds them before the title, as TotK Recomp's shipped shader list does, instead of
+    compiling each when it is first drawn (the stutter of a first visit). Each release ships the list its own build made: the
+    file's first 8 bytes are that build's stamp, and a list the folder has from the same build is kept (it grows as the player
+    plays). One loose beside the game goes into cache/ first, as the game's own start moves it (host/game_layout.c)"""
     seed = os.path.join(ROOT, "hookshot_pipelines_seed.bin")
-    dst = os.path.join(out, "hookshot_pipelines.bin")
+    cache = os.path.join(out, "cache")
+    dst = os.path.join(cache, "hookshot_pipelines.bin")
     if not os.path.isfile(seed):
         return
+    os.makedirs(cache, exist_ok=True)
+    loose = os.path.join(out, "hookshot_pipelines.bin")
+    if os.path.isfile(loose) and not os.path.exists(dst):
+        try:
+            os.replace(loose, dst)
+        except OSError:
+            pass
     with open(seed, "rb") as f:
         stamp = f.read(8)
     try:
@@ -1331,6 +1356,52 @@ FIRST_START = "the game prepares them at its first start"   # (the builders' win
 
 def not_prepared(why, then=FIRST_START):
     print("%s (%s): %s" % (NOT_PREPARED, why, then), flush=True)
+
+
+# (Compile shaders, the builders' and the launcher's choice: compile_shaders= in the game folder's hookshot_options.ini, the
+# number the game reads (gpu/vk/vk_draw.cpp compile_all). Most, the default: every shader program and the pipelines the lists
+# name, before the title. All: the predicted pipelines too, about 40 % more time for pipelines play almost never draws)
+COMPILE_LEVELS = {"most": 0, "all": 1}
+COMPILE_KEY = "compile_shaders"
+
+
+def options_path(out):
+    return os.path.join(out, "hookshot_options.ini")
+
+
+def folder_compile_level(out):
+    """The Compile shaders choice the folder's hookshot_options.ini holds ("most" or "all"), or None when it holds none"""
+    try:
+        with open(options_path(out), encoding="utf-8", errors="replace") as f:
+            for line in f:
+                key, eq, value = line.strip().partition("=")
+                if eq and key == COMPILE_KEY:
+                    n = int(value) if value.strip().lstrip("-").isdigit() else 0
+                    return next((name for name, v in COMPILE_LEVELS.items() if v == n), "most")
+    except OSError:
+        pass
+    return None
+
+
+def write_compile_level(out, level):
+    """compile_shaders=<n> into the folder's hookshot_options.ini, the file's other lines as they are (the game's menu keeps the
+    line too). A file with only this line still makes the game's first start a first start (gpu/vk/vk_menu.cpp menu_init)"""
+    path = options_path(out)
+    lines = []
+    try:
+        with open(path, encoding="utf-8", errors="replace", newline="") as f:
+            lines = [l for l in f.read().splitlines() if l.partition("=")[0].strip() != COMPILE_KEY]
+    except OSError:
+        pass
+    lines.append("%s=%d" % (COMPILE_KEY, COMPILE_LEVELS[level]))
+    with open(path + ".new", "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(path + ".new", path)
+
+
+def compile_level(a, out):
+    """This build's Compile shaders: --compile-shaders, else the folder's own choice, else Most"""
+    return getattr(a, "compile_shaders", None) or (folder_compile_level(out) if out else None) or "most"
 
 
 def prepare_skipped(a, environ=None):
@@ -1801,6 +1872,10 @@ def forget_failed_build(work, linked, failed=()):
         print("the build failed before the link: the next one translates the game again, and compiles only the files not "
               "compiled yet", flush=True)
         return
+    # (HOOKSHOT_OBJ_STORE: the objects this link was made from go from the store as well, or the next try takes them from there)
+    store = _object_store.folder(work)
+    if store:
+        _object_store.forget(store, object_stamps(os.path.join(work, "sa", "build", "obj")))
     for sub in (os.path.join(work, "objcache"), os.path.join(work, "sa", "build", "obj")):
         shutil.rmtree(sub, ignore_errors=True)
     print("the build failed: the next one translates and compiles the game again (nothing of this one is reused)", flush=True)
@@ -1823,13 +1898,19 @@ def ngx_platform():
     return "linux" if LINUX else "windows"
 
 
+def ngx_folder():
+    """Where --fetch-ngx-sdk keeps NVIDIA's DLSS SDK between builds: HOOKSHOT_NGX_SDK, else work/ngx-sdk here"""
+    return os.environ.get("HOOKSHOT_NGX_SDK") or os.path.join(ROOT, "work", "ngx-sdk")
+
+
 def fetch_ngx_sdk(a):
     """--fetch-ngx-sdk (the Hookshot Builder's NVIDIA DLSS tick): NVIDIA's DLSS SDK into HOOKSHOT_NGX_SDK before the build, once
     NVIDIA's license was accepted (--accept-nvidia-license: the builder asked first). Only what is missing or not the file
     expected is downloaded"""
-    sdk = os.environ.get("HOOKSHOT_NGX_SDK", "")
-    if not sdk:
-        fail("--fetch-ngx-sdk needs HOOKSHOT_NGX_SDK, the folder NVIDIA's DLSS SDK goes into.")
+    # (the Builder drops a HOOKSHOT_NGX_SDK set on the PC, so a launcher asking through --cli has none: the folder is ours then,
+    # and the rest of the build, which reads the variable, finds the SDK there)
+    sdk = ngx_folder()
+    os.environ["HOOKSHOT_NGX_SDK"] = sdk
     if not a.accept_nvidia_license:
         fail("NVIDIA DLSS needs NVIDIA's license accepted first (--accept-nvidia-license).")
     ngx = ngx_script()
@@ -1998,6 +2079,10 @@ def parse_args():
     p.add_argument("--update", help="a game folder built before: built again from the game files it keeps (the game's update offer)")
     p.add_argument("--no-prepare-shaders", action="store_true",
                    help="leave the shaders' preparation to the game's first start (the builder's \"Prepare shaders now\" unticked)")
+    p.add_argument("--compile-shaders", choices=tuple(COMPILE_LEVELS),
+                   help="what the shaders' preparation builds: most (the default) every shader and the pipelines the lists name; "
+                        "all the predicted pipelines too (about 40%% longer). Kept in the folder's hookshot_options.ini "
+                        "(compile_shaders=), which the game's own preparations follow; not given: the folder's")
     p.add_argument("--log", metavar="FILE", help="also save build output to a UTF-8 file (replaces the file if it exists)")
     # (NVIDIA DLSS, off unless asked: NVIDIA's SDK into HOOKSHOT_NGX_SDK first, under NVIDIA's license. scripts/ngx_sdk.py)
     p.add_argument("--fetch-ngx-sdk", action="store_true", help="download NVIDIA's DLSS SDK into HOOKSHOT_NGX_SDK before the build")
@@ -2136,26 +2221,32 @@ def main(a=None):
     a.language = build_language(a, out)   # (now: the folder's own language.txt is still the one the player left)
     warn_slow_disk(out, work)   # (a warning, not a stop: a hard drive still builds, only much slower)
     check_writable(out)
-    check_cpu()   # (no game read yet: the AppImage on a CPU without AVX2 stops here)
+    # (AMD FSR 4: the build's switch for nx2/build.py, set or cleared here, before the checks: on Linux it compiles its own
+    # Vulkan back end, as with DLSS, so the AppImage's prebuilt one is neither checked nor used. One set in the shell is not
+    # taken for this build's: --fsr, or the folder's mark, decides)
+    fsr = fsr_wanted(a, out)
+    if fsr:
+        os.environ["HOOKSHOT_FSR"] = "1"
+    else:
+        os.environ.pop("HOOKSHOT_FSR", None)
+    check_cpu(fsr)   # (no game read yet: the AppImage on a CPU without AVX2 stops here)
     if getattr(a, "fetch_ngx_sdk", False):
         fetch_ngx_sdk(a)   # (the SDK selects a source renderer instead of HOOKSHOT_VK_PREBUILT)
     check_windows_sdk(work)
     stop_stray_compilers(work, a.default_work)
     drop_stale_objects(work)
-    # (AMD FSR 4: the build's switch for nx2/build.py, and the folder's mark for the next --update)
-    if fsr_wanted(a, out):
-        os.environ["HOOKSHOT_FSR"] = "1"
+    # (AMD FSR 4: the folder's mark for the next --update)
+    if fsr:
         if getattr(a, "fetch_fsr_runtime", False) and not LINUX:
             fetch_fsr_runtime(a)
         elif getattr(a, "fetch_fsr_runtime", False):
             print("--fetch-fsr-runtime: AMD publishes this runtime for Windows only; on Linux see the readme "
                   "(amd_fidelityfx_upscaler_vk.so)", flush=True)
         open(os.path.join(out, FSR_MARK), "w").close()
-        if os.environ.get("HOOKSHOT_VK_PREBUILT"):   # (the AppImage's back end, built without FSR 4)
-            print("--fsr: this build uses the prebuilt Vulkan back end (HOOKSHOT_VK_PREBUILT), which has no AMD FSR 4: the "
-                  "Upscaler row will not offer it", flush=True)
+        if os.environ.get("HOOKSHOT_VK_PREBUILT"):   # (the AppImage's back end, built without FSR 4: nx2/build.py prebuilt_renderer)
+            print("--fsr: the Vulkan back end is compiled here with AMD FSR 4, not the prebuilt one (HOOKSHOT_VK_PREBUILT)",
+                  flush=True)
     else:
-        os.environ.pop("HOOKSHOT_FSR", None)
         if os.path.isfile(os.path.join(out, FSR_MARK)):
             os.remove(os.path.join(out, FSR_MARK))
     exefs = os.path.join(work, "exefs")
@@ -2403,7 +2494,7 @@ def main(a=None):
     # (the new files are copied in beside the old ones as <name>.new and swapped in only once all are complete: a build stopped while
     # copying, or a full disk, left a half-written 460 MB hookshot.exe and no game to play. The old game stays playable until the swap)
     # (Windows) hookshot.exe in the folder is the game's launcher: the builder's small setup, which opens the installed builder as a
-    # launcher for this folder (Play, and Update left of it when a newer release is out: builder/setup/setup.c launch mode), or starts
+    # launcher for this folder (Play, and Update left of it when its builder is newer than the game: builder/setup/setup.c launch mode), or starts
     # the game when no builder is installed. The game and its DLLs are in bin\; its files (image.bin, romfs, saves, settings, caches)
     # stay in the folder (host/hos_paths.h). Without the setup (a development build) the game stays hookshot.exe in the folder
     staged = []
@@ -2523,6 +2614,10 @@ def main(a=None):
                   "what changed (HOOKSHOT_KEEP_BUILD_FILES=1 keeps all)" % (
                       work, kept >> 20, "" if lift_kept is None else " and the translation's other files (%d MB)" % (lift_kept >> 20)),
                   flush=True)
+    # (HOOKSHOT_OBJ_STORE: the store's own clean-up, after the folder's; nx2/object_store.py prune)
+    removed, freed = _object_store.prune()
+    if removed:
+        print("object store: %d objects no work folder used lately let go (%d MB)" % (removed, freed >> 20), flush=True)
     total_seconds = time.time() - STARTED
     PHASES.enter(None)
     previous = record_times(work, run_files, compile_seconds, total_seconds, modules=plan[1],
@@ -2532,11 +2627,14 @@ def main(a=None):
                                                     "" if previous is None else " (the last one %s)" % clock(previous)), flush=True)
     say("times", "%.0f" % total_seconds, "%.0f" % compile_seconds, "-1" if previous is None else "%.0f" % previous)
     # (after the times: they stay comparable from build to build, without a GPU's minutes that can be switched off)
+    if getattr(a, "compile_shaders", None):   # (the choice kept in the folder: the game's own preparations at a start follow it)
+        write_compile_level(out, a.compile_shaders)
+    level = compile_level(a, out)
     skipped = prepare_skipped(a)
     if skipped:
         not_prepared(skipped)
     else:
-        prepare_shaders([os.path.join(game_dir, BESIDE[0]), "--prepare-shaders"], out)
+        prepare_shaders([os.path.join(game_dir, BESIDE[0]), "--prepare-shaders", "--compile-shaders", level], out)
     say("done", out)
 
 

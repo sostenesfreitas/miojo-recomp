@@ -23,11 +23,13 @@ def main():
     for line, why in (
             ("const bool lib_cached = (part == 1 || part == 2) && gpl_libs_cached();", "only the two shader libraries are kept"),
             # (driver_ask_cache: none, except predicted_check's empty scratch cache under driver_cache_only)
-            ("const VkPipelineCache cache = lib_cached || (part < 0 && !driver_cache_only) ? pcache : driver_ask_cache;",
-             "the libraries are not built into the pipeline cache"),
+            ("const VkPipelineCache cache = quick_build ? VK_NULL_HANDLE\n"
+             "                                  : lib_cached || (part < 0 && !driver_cache_only) ? pcache : driver_ask_cache;",
+             "the libraries are not built into the pipeline cache, or a quick pipeline is (quick_pipeline)"),
             # (graphics_with: pcache through the play caches, tests/test_pipeline_play_cache.py)
             ("VkResult r = graphics_with(cache, &ci, &pl);", "pipeline creation bypasses the chosen cache"),
-            ("pcache_built_since_save += lib_cached && !cold;", "a compiled library does not count towards a save")):
+            ("pcache_built_since_save += lib_cached && !cold;", "a compiled library does not count towards a save"),
+            ("pcache_built_since_save += !driver_cache_only && !quick_build;", "a quick pipeline counts towards a save")):
         if line not in build:
             raise SystemExit(why)
     if "thread_local VkPipelineCache driver_ask_cache = VK_NULL_HANDLE;" not in draw:

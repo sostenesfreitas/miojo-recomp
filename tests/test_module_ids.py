@@ -38,7 +38,7 @@ def check_source():
     if ask < 0 or not ask < work.index("program_cache_complete_unshared(", ask):
         raise SystemExit("load_work does not try a compute pipeline by its module identifier before it reads the code")
     cache = (ROOT / "gpu/vk/vk_progcache.cpp").read_text(encoding="utf-8")
-    if "module_id_learned(" not in block(cache, "bool complete_from(Program& p, FILE* in, std::mutex* mu) {"):
+    if "module_id_learned(" not in block(cache, "bool complete_from(Program& p, FILE* in, std::mutex* mu"):
         raise SystemExit("a compute module made from its code is not learned by its identifier")
 
 

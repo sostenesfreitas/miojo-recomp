@@ -36,12 +36,14 @@ def between(text, first, last):
 
 
 PRELUDE = r"""
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include "vk_api.h"
+#include "hold_toggle.h"
 typedef long LONG;
 typedef unsigned long DWORD;
 #define VK_LBUTTON 0x01
@@ -52,6 +54,7 @@ typedef unsigned long DWORD;
 #define VK_SHIFT 0x10
 #define VK_CONTROL 0x11
 #define VK_MENU 0x12
+#define VK_CAPITAL 0x14
 #define VK_SPACE 0x20
 #define VK_LEFT 0x25
 #define VK_UP 0x26
@@ -156,7 +159,7 @@ class OcarinaNoteBindingsTests(unittest.TestCase):
                 "key_move_up=90,0\npad_a=5\nkey_note_y=78,0\n", encoding="utf-8")
             (tmp / "t.c").write_text(PRELUDE + code + MAIN, encoding="utf-8")
             binary = tmp / ("t.exe" if sys.platform == "win32" else "t")
-            build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wno-unused-function", "-I", str(ROOT / "gpu" / "vk"),
+            build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wno-unused-function", "-I", str(ROOT / "gpu" / "vk"), "-I", str(ROOT / "host"),
                                     "-I", str(ROOT / "gpu"), str(tmp / "t.c"), "-o", str(binary)], text=True, capture_output=True)
             self.assertEqual(build.returncode, 0, build.stderr)
             run = subprocess.run([str(binary), str(tmp)], text=True, capture_output=True, timeout=30)

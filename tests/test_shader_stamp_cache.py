@@ -5,6 +5,7 @@ An alternate --build-script permits the same regression to exercise an older pro
 import argparse
 import ast
 import hashlib
+import importlib.util
 import os
 from pathlib import Path
 import sys
@@ -91,6 +92,13 @@ class ShaderStampCacheTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(text.encode())
         self.code = production_code(BUILD_SCRIPT)
+        # (the stamp's own module beside the build script, nx2/translator_files.py: the branch calls it for HOOKSHOT_SHADER_STAMP)
+        stamp_module = BUILD_SCRIPT.parent / "translator_files.py"
+        self.translator_files = None
+        if stamp_module.exists():
+            spec = importlib.util.spec_from_file_location("translator_files_under_test", stamp_module)
+            self.translator_files = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(self.translator_files)
 
     def jobs(self, linux, version="fixture", release=False, ngx="", mingw="llvm-mingw", fsr=False):
         namespace = {
@@ -113,6 +121,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "NGX_SDK": ngx,   # ("": no NVIDIA NGX SDK, vk_dlss.cpp built without DLSS, as by default)
             "NGX_MSVC_RT": "vk_ngx_msvc_rt.cpp",
             "FSR": fsr,   # (HOOKSHOT_FSR=1: vk_fsr4.cpp built with AMD FSR 4)
+            "translator_files": self.translator_files,
         }
         with mock.patch.dict(os.environ, {"RX_RELEASE": "1"} if release else {}, clear=True), warnings.catch_warnings():
             # The production key/header helpers use short-lived open(...).read() expressions.

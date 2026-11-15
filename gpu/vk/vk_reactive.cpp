@@ -15,6 +15,7 @@
 
 #include "vk_draw.h"   // (descriptors_disturbed)
 #include "vk_texture.h"
+#include "vk_temporal.h"
 
 #include "shaders/reactive_mask_comp_spv.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
@@ -147,12 +148,16 @@ bool make_pipeline() {
     VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     mi.codeSize = sizeof REACTIVE_MASK_COMP_SPV, mi.pCode = REACTIVE_MASK_COMP_SPV;
     VkShaderModule m = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(dev.device, &mi, nullptr, &m) != VK_SUCCESS) return false;
-    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main",
-                nullptr};
-    ci.layout = s.layout;
-    const VkResult r = vkCreateComputePipelines(dev.device, VK_NULL_HANDLE, 1, &ci, nullptr, &s.pipe);
+    VkResult r;
+    {
+        IntelDriverGate gate;
+        if (extern_guarded_shader_module(&mi, &m) != VK_SUCCESS) return false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main",
+                    nullptr};
+        ci.layout = s.layout;
+        r = extern_guarded_compute(VK_NULL_HANDLE, &ci, &s.pipe);
+    }
     vkDestroyShaderModule(dev.device, m, nullptr);
     if (r != VK_SUCCESS) {
         logf("vk: reactive mask: its pipeline was not made (%d)", (int)r);
@@ -212,10 +217,10 @@ bool copy_scene(VkCommandBuffer cmd, Texture* color, uint32_t level, uint32_t la
     State& s = st();
     std::lock_guard lk(s.mu);
     if (!color || !color->image || !width || !height) return false;
-    if (color->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || color->type != VK_IMAGE_TYPE_2D ||
+    if (!temporal_scene_format(color->format) || color->type != VK_IMAGE_TYPE_2D ||
         color->samples != VK_SAMPLE_COUNT_1_BIT || level >= color->levels || layer >= color->layers ||
         std::max(1u, color->width >> level) != width || std::max(1u, color->height >> level) != height)
-        return fail("the scene's target is not a plain B10G11R11 one");
+        return fail("the scene's target is not a supported plain scene image");
     if (!(color->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) || !(color->usage & VK_IMAGE_USAGE_SAMPLED_BIT))
         return fail("the scene's target cannot be copied and sampled");
     free_dead();

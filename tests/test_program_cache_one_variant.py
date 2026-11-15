@@ -11,6 +11,8 @@ made, as before) and the default.
   made, once; a record that cannot be read that way (a head longer than the first read, two stages) is read whole;
 - a key that is not a compute program's and a borrowed one are read whole, as before;
 - code that no longer reads when the variant is taken fails the program, with no module;
+- the dispatch's ask while a worker holds Intel's compiler gate (Windows) makes nothing and fails nothing: the program is
+  left as it was, its code still to read;
 - vk_draw.cpp's dispatch completes a program before the two places that use its module.
 Synthetic data only. python -I -B tests/test_program_cache_one_variant.py [--cxx <compiler>]
 """
@@ -58,14 +60,26 @@ def main():
     d = draw[draw.index("void dispatch(VkCommandBuffer cmd, NvnState& s, uint32_t x, uint32_t y, uint32_t z, uint64_t indirect) {"):]
     d = d[:d.index("\n}\n")]
     first = "const bool fresh = p.compute_state.compare_exchange_strong(none, 1) &&\n" \
-            "                           (program_cache_complete(p) || (p.compute_state.store(2, std::memory_order_release), false));"
+            "                           (program_cache_complete_ask(p, &on_worker) || on_worker ||\n" \
+            "                            (p.compute_state.store(2, std::memory_order_release), false));"
+    # (on Windows Intel, with the gate held by a worker, the module is made on the worker, before the worker reads it:
+    # IntelDriverGate. Its code is looked at only once the CAS is won)
+    if "p.code_words" in d:
+        raise SystemExit("dispatch() reads a program's code_words outside the cache's lock, before its CAS is won")
+    if "const VkPipeline cached = on_worker ? VK_NULL_HANDLE : compute_pipeline_cached(p, true);" not in d:
+        raise SystemExit("dispatch() asks for a program's pipeline before its module is made on the worker")
+    worker = d[d.index("if (on_worker) {"):]
+    if not (worker.index("program_cache_complete(q)") < worker.index("compute_pipeline_cached(q, true)")
+            < worker.index("compute_pipeline_info(q, true)")):
+        raise SystemExit("the worker uses a compute program's module before program_cache_complete made it")
     # (the module is read where the pipeline's create info is made: compute_pipeline_info, and compute_pipeline_cached through it)
     uses = sorted(i for m in ("compute_pipeline_cached(p, true)", "compute_pipeline_info(p, true)")
                   for i in range(len(d)) if d.startswith(m, i))
     info = draw[draw.index("VkComputePipelineCreateInfo compute_pipeline_info(const Program& q, bool noopt) {"):]
     if "ci.stage.module = q.stages[0].module;" not in info[:info.index("\n}\n")] or "stages[0].module" in d:
         raise SystemExit("a compute pipeline's module is not read in compute_pipeline_info alone")
-    done = [i for i in range(len(d)) if d.startswith("program_cache_complete(p)", i)]
+    done = sorted(i for m in ("program_cache_complete_ask(p, &on_worker)", "program_cache_complete(p)")
+                  for i in range(len(d)) if d.startswith(m, i))
     if first not in d or len(uses) != 2 or len(done) != 2 or not (done[0] < uses[0] < done[1] < uses[1]):
         raise SystemExit("dispatch() uses a compute program's module before program_cache_complete made it")
     with tempfile.TemporaryDirectory(prefix="hookshot-one-variant-") as tmp:

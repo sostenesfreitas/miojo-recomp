@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "vk_jobs.h"
+#include "hookshot_env.h"
 #include "vk_internal.h"
 #include "vk_draw.h"   // (ub_thread_off)
 
@@ -129,12 +130,18 @@ void jobs_notify() {
     std::lock_guard lk(mu);
     done_cv.notify_all();
 }
-void jobs_wait(const std::atomic<bool>& flag) {
+bool jobs_wait(const std::atomic<bool>& flag) {
     std::unique_lock lk(mu);
     // (still queued: run here, now. A draw that must wait for its pipeline waited for every job queued before it, and a new
     // area queues a hundred pipelines: with ten workers at 0.3-2 s a build, frames stopped for 6-12 s, the draw's own build
-    // still in the queue. RX_VK_JOB_STEAL=0: waited for in turn, as before)
-    static const bool steal = !getenv("RX_VK_JOB_STEAL") || atoi(getenv("RX_VK_JOB_STEAL")) != 0;
+    // still in the queue; Mako's RX 6600 log, one draw 118 s behind 26 queued jobs. Taken out of the queue under the lock a
+    // worker takes jobs under, so it runs once, here or on a worker, and nothing is left queued for it. RX_VK_JOB_STEAL=0
+    // (or off, false, no: hookshot_env.h's rule): waited for in turn, as before)
+    static const bool steal = [] {
+        const char* v = getenv("RX_VK_JOB_STEAL");
+        return !v || !env_value_off(v);
+    }();
+    bool ran = false;
     if (steal && !flag.load(std::memory_order_acquire))
         for (auto it = queue.begin(); it != queue.end(); ++it)
             if (it->flag == &flag) {
@@ -145,9 +152,25 @@ void jobs_wait(const std::atomic<bool>& flag) {
                 pending--;
                 jobs_notify();
                 lk.lock();
+                ran = true;
                 break;
             }
     done_cv.wait(lk, [&] { return flag.load(std::memory_order_acquire); });
+    return ran;
+}
+bool jobs_hurry(const std::atomic<bool>& flag) {
+    std::lock_guard lk(mu);
+    if (flag.load(std::memory_order_acquire)) return false;
+    for (auto it = queue.begin(); it != queue.end(); ++it)
+        if (it->flag == &flag) {
+            if (it != queue.begin()) {
+                Entry e = std::move(*it);
+                queue.erase(it);
+                queue.push_front(std::move(e));
+            }
+            return true;
+        }
+    return false;
 }
 bool jobs_wait_for(const std::atomic<bool>& flag, double ms) {
     if (flag.load(std::memory_order_acquire)) return true;

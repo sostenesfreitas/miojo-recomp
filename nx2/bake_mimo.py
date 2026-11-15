@@ -5,7 +5,7 @@
     python3 -I nx2/bake_mimo.py translate --out work/bake [--limit N]            # seed -> SPIR-V (builds the tool)
     python3 -I nx2/bake_mimo.py bank --out work/bake                             # seed + results -> bank/
 
-Three stages, each usable alone (the stop-lines are in BAKE.md §3):
+Three stages, each usable alone (the stop-lines are in docs/BAKE.md §3):
 
   enumerate  nx2/shader_census.py's parsers over the dump's romfs (Shader/, Layout2Shader/, Lib/, Movie/,
              Effect/; BNSH, BAHS, NDSR, NDVE and the SARC around them), deduped to stages the way the back end
@@ -284,17 +284,11 @@ def work_dir(out=None):
 
 
 def translator_stamp():
-    """nx2/build.py:691-699 HOOKSHOT_SHADER_STAMP, byte for byte: what makes hookshot_programs.bin valid."""
-    vk = os.path.join(ROOT, "gpu", "vk")
-    stamp = hashlib.sha1(usedforsecurity=False)
-    translator = [os.path.join(d, f) for top in ("eden", "sirit", "compat")
-                  for d, _, fs in os.walk(os.path.join(vk, top)) for f in fs]
-    for f in sorted(translator) + [os.path.join(vk, n) for n in
-                                   ("vk_shader.cpp", "vk_bank.cpp", "vk_state.h", "vk_api.h")]:
-        with open(f, "rb") as src:
-            stamp.update(os.path.relpath(f, vk).replace("\\", "/").encode()
-                         + src.read().replace(bytes((13, 10)), bytes((10,))))
-    return stamp.hexdigest()[:16]
+    """nx2/build.py's HOOKSHOT_SHADER_STAMP (nx2/translator_files.py): what makes hookshot_programs.bin valid."""
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import translator_files
+    return translator_files.stamp(os.path.join(ROOT, "gpu", "vk"))
 
 
 def build_tool(out_dir, jobs=0):
@@ -456,7 +450,7 @@ def make_bank(out_dir, manifest_path=None):
         "format": "HKBANK01",
         "created": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         "generator": "nx2/bake_mimo.py",
-        "translator_stamp": stamp,   # (== HOOKSHOT_SHADER_STAMP of nx2/build.py:691-699 when this tree is that tree)
+        "translator_stamp": stamp,   # (== HOOKSHOT_SHADER_STAMP of nx2/build.py when this tree is that tree)
         "seed": manifest["seed"] if manifest else "hookshot_shaders.bin",
         "enumerate": manifest["counters"] if manifest else None,
         "translate": {"translated": translated, "rows": len(programs_rows),

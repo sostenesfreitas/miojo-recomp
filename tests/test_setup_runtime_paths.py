@@ -1,6 +1,6 @@
-"""Runtime recovery executes setup's actual reuse, publication and fast-launch boundaries.
+"""Runtime recovery executes setup's actual reuse and publication boundaries.
 
-Only process start and publication writes are intercepted. File readiness uses real Win32 APIs.
+Only publication writes are intercepted. File readiness uses real Win32 APIs.
 """
 import argparse
 from pathlib import Path
@@ -24,7 +24,7 @@ def function(source, marker):
 
 
 def fixture(source):
-    condition = re.search(r'if \((repair \|\| GetFileAttributesW\(marker\).*?)\) \{', source).group(1)
+    condition = re.search(r'if \((GetFileAttributesW\(marker\).*?)\) \{', source).group(1)
     start = source.index("        wchar_t staged_exe[MAX_PATH];")
     end = source.index("        write_parts(install, parts, nparts);", start) + len("        write_parts(install, parts, nparts);")
     stage = source[start:end]
@@ -40,15 +40,10 @@ def fixture(source):
 #include <setjmp.h>
 #include <stdarg.h>
 static struct { wchar_t root[MAX_PATH]; int portable; } g_home;
-static int g_home_ok=1;
 static wchar_t last_error[2048];
-static int moves, markers, receipts, starts;
+static int moves, markers, receipts;
 static jmp_buf failed;
 struct Part { int unused; };
-static BOOL fixture_start(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
-                         LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION pi) {
-    starts++; pi->hThread=NULL; pi->hProcess=NULL; return TRUE;
-}
 static BOOL fixture_move(LPCWSTR, LPCWSTR) { moves++; return TRUE; }
 static int publish_install(const wchar_t *from, const wchar_t *to, int) { return fixture_move(from,to); }
 static void fail(const wchar_t *format, ...) {
@@ -56,15 +51,11 @@ static void fail(const wchar_t *format, ...) {
 }
 static void write_small(const wchar_t *, const char *) { markers++; }
 static void write_parts(const wchar_t *, const Part *, int) { receipts++; }
-#define CreateProcessW fixture_start
 #define MoveFileW fixture_move
 '''
     code += function(source, "static int builder_ready(") + '\n'
     code += function(source, "static int home_path(") + '\n'
-    code += function(source, "static int list_name_ok(") + '\n'
-    code += function(source, "static void read_small(") + '\n'
-    code += function(source, "static int launch_installed(") + '\n'
-    code += '\nstatic int admission(const wchar_t *exe, const wchar_t *marker, int repair) { return (' + condition + '); }\n'
+    code += '\nstatic int admission(const wchar_t *exe, const wchar_t *marker) { return (' + condition + '); }\n'
     code += r'''
 static int stage(const wchar_t *folder) {
     wchar_t install[MAX_PATH], final_dir[MAX_PATH], marker[MAX_PATH];
@@ -80,11 +71,10 @@ int main(void) {
     int argc; wchar_t **argv=CommandLineToArgvW(GetCommandLineW(),&argc);
     if(!argv || argc!=5) return 2;
     swprintf(g_home.root,MAX_PATH,L"%ls\\HookshotBuilder",argv[1]);
-    int reuse=admission(argv[2],argv[3],0), repair=admission(argv[2],argv[3],1);
+    int reuse=admission(argv[2],argv[3]);
     int published=stage(argv[4]);
     if(published && (!wcsstr(last_error,L"antivirus") || !wcsstr(last_error,argv[4]))) return 5;
-    int launched=launch_installed(L"--launch authored-game");
-    printf("%d %d %d %d %d %d %d %d\n",reuse,repair,published,moves,markers,receipts,launched,starts);
+    printf("%d %d %d %d %d\n",reuse,published,moves,markers,receipts);
     LocalFree(argv); return 0;
 }
 '''
@@ -102,8 +92,7 @@ def main():
     if args.mutations:
         replacements = [
             ("reuse", "|| !builder_ready(exe))", "|| GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES)"),
-            ("publication", "if (!builder_ready(staged_exe))", "if (GetFileAttributesW(staged_exe) == INVALID_FILE_ATTRIBUTES)"),
-            ("fast-launch", "if (!builder_ready(exe)) return 0;", "if (GetFileAttributesW(exe) == INVALID_FILE_ATTRIBUTES) return 0;")]
+            ("publication", "if (!builder_ready(staged_exe))", "if (GetFileAttributesW(staged_exe) == INVALID_FILE_ATTRIBUTES)")]
         for name, old, new in replacements:
             assert source.count(old) == 1, name
             variants.append((name, source.replace(old,new)))
@@ -124,11 +113,11 @@ def main():
             def run():
                 p = subprocess.run([str(exe),str(root),str(folder/'HookshotBuilder.exe'),str(marker),str(folder.parent)],capture_output=True,text=True,check=True)
                 return tuple(map(int,p.stdout.split()))
-            assert run() == (0,1,0,1,1,1,1,1), (variant,'healthy',run())
+            assert run() == (0,0,1,1,1), (variant,'healthy',run())
             runtime = folder/'coreclr.dll'; runtime.unlink()
             got = run()
             runtime.write_bytes(b'restored authored runtime')
-            expected = (1,1,90,0,0,0,0,0)
+            expected = (1,90,0,0,0)
             if variant == 'production':
                 assert got == expected, (variant,got)
             else:

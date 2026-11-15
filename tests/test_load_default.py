@@ -46,12 +46,15 @@ def check_source():
     for other in ("pskip", "pwait", "left_out", "pending_skips"):
         if other in note:
             raise SystemExit("the safety net counts draws left out again, which a healthy session has in either mode: " + other)
-    if "load_default::choose(getenv(\"RX_VK_LOAD\")" not in progs or "load_default::too_slow(" not in progs:
+    if "load_default::choose(getenv(\"RX_VK_LOAD\")" not in progs or "load_default::waits_verdict(" not in progs or \
+            "load_default::counts(" not in progs or "load_default::strike_take(load_fallback_path())" not in progs:
         raise SystemExit("vk_programs.cpp does not use load_default.h's rule")
     draw = (ROOT / "gpu/vk/vk_draw.cpp").read_text(encoding="utf-8")
     built = draw.index("remove(precompile_built_path().c_str());   // (notes are added here")
     if '"hookshot_load_start.txt").c_str());' not in draw[built:built + 400]:
         raise SystemExit("a preparation does not remove hookshot_load_start.txt")
+    if '"hookshot_load_start.txt.waited").c_str());' not in draw[built:built + 700]:
+        raise SystemExit("a preparation does not remove the strike beside hookshot_load_start.txt")
 
 
 def main():

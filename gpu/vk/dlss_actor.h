@@ -30,12 +30,20 @@ struct Placed {
 
 /// (hookshot) Which of the frame before's copies of a model each of this frame's copies is, by place: for each of `now`, an
 /// index into `then`, or -1 (none: the camera's motion then, never another copy's). All copies are paired at once, the
-/// nearest pairs first, and never further apart than `reach` (in world units, moved in one frame). On a tie (the same
-/// geometry drawn twice for one object, both at one place) the same n-th draw pairs first.
+/// nearest pairs first, and never further apart than `reach` (in world units, moved between the two frames). On a tie (the
+/// same geometry drawn twice for one object, both at one place) the same n-th draw pairs first. The pairing by draw order
+/// (each copy with the frame before's same n-th) is kept when it is as good: every pair of it within the reach, and either
+/// more copies paired than nearest first, or as many with the distance moved over all of them no longer (a total over
+/// fewer pairs is not comparable: two copies 0.9 apart both moving 0.5 pair one by nearest first, at 0.4, and two by
+/// draw order, at 0.5 each, which is right). So the reach is all that keeps draw order from pairing a row of copies each
+/// with its neighbour (a stone's frame before the next one's, after a stone changes model): it must stay under the copies'
+/// spacing, as actor_motion keeps it (2 at the most, the Gossip Stones stand 2.3 apart).
 /// By draw order alone, the four Gossip Stones drawn in another order took each other's places as their own frame before,
 /// and DLSS Frame Generation drew a stone part way to the next one. Taking the nearest free copy in draw order also failed:
 /// in a row of evenly spaced stones, a stone whose own frame before is missing (not drawn, or drawn by the other model the
-/// game uses for them) took its neighbour's
+/// game uses for them) took its neighbour's. Nearest first alone fails the other way: two copies 0.6 apart that both move
+/// 0.35 have the first one's new place nearest the second's old one, and nearest first swaps them where draw order (0.35
+/// each, against 0.25 and 0.95) was right
 inline std::vector<int> pair_by_place(const std::vector<Placed>& now, const std::vector<Placed>& then, float reach) {
     struct Candidate {
         double d;     // (squared)
@@ -58,8 +66,33 @@ inline std::vector<int> pair_by_place(const std::vector<Placed>& now, const std:
     });
     std::vector<int> pairs(now.size(), -1);
     std::vector<char> taken(then.size(), 0);
+    const auto distance = [&](int i, int j) {
+        double d = 0.0;
+        for (int c = 0; c < 3; c++) {
+            const double e = (double)now[i].place[c] - (double)then[j].place[c];
+            d += e * e;
+        }
+        return std::sqrt(d);
+    };
+    int nearest_n = 0;
+    double nearest_total = 0.0;
     for (const Candidate& c : candidates)
-        if (pairs[c.i] < 0 && !taken[c.j]) pairs[c.i] = c.j, taken[c.j] = 1;
+        if (pairs[c.i] < 0 && !taken[c.j])
+            pairs[c.i] = c.j, taken[c.j] = 1, nearest_n++, nearest_total += distance(c.i, c.j);
+    // (by draw order: kept when it is no worse, as above. A copy without a same n-th then is left unpaired by it)
+    std::vector<int> by_order(now.size(), -1);
+    std::vector<char> used(then.size(), 0);
+    int order_n = 0;
+    double order_total = 0.0;
+    for (int i = 0; i < (int)now.size(); i++) {
+        int j = 0;
+        while (j < (int)then.size() && then[j].nth != now[i].nth) j++;
+        if (j == (int)then.size()) continue;
+        const double d = distance(i, j);
+        if (used[j] || !(d <= (double)reach)) return pairs;   // (not within the reach: nearest first; NaN fails here too)
+        by_order[i] = j, used[j] = 1, order_n++, order_total += d;
+    }
+    if (order_n > nearest_n || (order_n == nearest_n && order_total <= nearest_total + 1e-6)) return by_order;
     return pairs;
 }
 

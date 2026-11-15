@@ -8,12 +8,18 @@
 
    The same interface as mf_av1.c: dav1d_av1_decode takes one temporal unit (or NULL at the end, which drains) and calls back
    once per picture with NV12, which nn_video.c keeps as it is (no RGBA unless the game reads one).
-   HOS_DAV1D_THREADS=<n>: its threads (default: dav1d's, one per logical core). HOS_NO_DAV1D=1: Media Foundation instead. */
+   HOS_DAV1D_THREADS=<n>: its threads (default: dav1d's, one per logical core; 2 on a PC with 4 or fewer, dav1d_av1_threads).
+   HOS_NO_DAV1D=1: Media Foundation instead. */
 #include <dav1d/dav1d.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include "../gpu/vk/compat/hookshot_env.h"   /* (env_on, env_int: the switches' one rule) */
 
 void hos_log(const char *fmt, ...);
@@ -27,11 +33,32 @@ typedef struct {
     size_t nv12_size;
 } Dav1dAv1;
 
+static int logical_processors(void) {
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (int)si.dwNumberOfProcessors;
+#elif defined(_SC_NPROCESSORS_ONLN)
+    return (int)sysconf(_SC_NPROCESSORS_ONLN);
+#else
+    return 0;
+#endif
+}
+
+/* The decoder's threads on a PC with `logical` logical processors; 0: dav1d's own, one per logical processor. With 4 or fewer
+   a thread per processor competes with the game's 2 reserved cores while a movie plays (a 4-thread Intel UHD laptop: the
+   game's thread 14-24 ms a submit, 35 fps of 60) */
+int dav1d_av1_threads(int logical) {
+    return logical >= 1 && logical <= 4 ? (logical < 2 ? logical : 2) : 0;
+}
+
 void *dav1d_av1_open(int w, int h) {
     (void)w, (void)h;
     if (env_on("HOS_NO_DAV1D")) return NULL;
     Dav1dSettings s;
     dav1d_default_settings(&s);
+    const int logical = logical_processors();
+    s.n_threads = dav1d_av1_threads(logical);
     if (env_int("HOS_DAV1D_THREADS", 0) > 0) s.n_threads = env_int("HOS_DAV1D_THREADS", 0);
     s.logger.callback = NULL;   /* (its messages are not the game's log) */
     Dav1dAv1 *d = (Dav1dAv1 *)calloc(1, sizeof *d);
@@ -43,7 +70,7 @@ void *dav1d_av1_open(int w, int h) {
     }
     static int logged;
     if (!logged++) {
-        if (s.n_threads) hos_log("video: AV1 on dav1d %s (%d threads)", dav1d_version(), s.n_threads);
+        if (s.n_threads) hos_log("video: AV1 on dav1d %s (%d threads; %d logical processors)", dav1d_version(), s.n_threads, logical);
         else hos_log("video: AV1 on dav1d %s (a thread per logical core)", dav1d_version());
     }
     return d;

@@ -1,5 +1,5 @@
-"""Save my pipeline list: the zip a player attaches to the "Submit your pipelines" issue (#2034), made by the game's menu
-(gpu/vk/pipeline_share.h, vk_menu.cpp) and the builders (nx2/pipeline_share.py). Synthetic data only, no game:
+"""Save my pipeline list: the zip a player attaches to the "Submit your pipelines" issue (#14), made by the game's menu
+(gpu/vk/pipeline_share.h, vk_menu.cpp) and nx2/pipeline_share.py. Synthetic data only, no game:
 
   - the zip holds exactly hookshot_pipeline_states.bin (the bytes as the game wrote them) and hookshot_pipeline_report.txt, and
     nothing else from the game folder (saves, caches, the options file and the log stay out), from both the C++ and the Python;
@@ -10,8 +10,8 @@
   - the C++ and the Python agree: the same fields, the same checks; the Python's names for the options are the menu's;
   - the list holds only pipelines the game drew: state_record() is reached only from draw() (never the precompile, predicted
     pipelines or the shipped list);
-  - the menu's row (Debug tab, under Developer) saves on Enter (not the Controls page's catch-all), opens nothing in a run without a window, and the builders
-    (Linux: hookshot_builder.py; Windows: MainWindow.xaml.cs, through nx2/pipeline_share.py --json) offer the same.
+  - the menu's row (Debug tab, under Developer) saves on Enter (not the Controls page's catch-all) and opens nothing in a run
+    without a window; nx2/pipeline_share.py does the same from the command line.
 
 python -I -B tests/test_pipeline_share.py [--cxx g++]
 """
@@ -327,7 +327,6 @@ def check_sources():
     assert 'is_share_row(r)) choice_cell(c, va, vb, share_value.empty() ? "Save" : share_value' in cell, "the tuning bar shows the row as a page"
     assert menu.count('is_share_row(r) ? "Save" : "Open"') + menu.count('is_share_row(selr) ? "Save" : "Open"') >= 2, \
         "a prompt says Open for Save my pipeline list"
-    cs = (ROOT / "builder" / "HookshotBuilder" / "MainWindow.xaml.cs").read_text(encoding="utf-8")
     tick = menu[menu.find("void menu_tick() {"):]
     save, catch_all = tick.find("is_share_row(r)) share_pipeline_list()"), tick.find("!r.value && can_bind()) page = 1")
     assert 0 < save < catch_all, "Enter on the row would open the Controls page"
@@ -347,7 +346,7 @@ def check_sources():
         "a thread that cannot start leaves the row busy for good"
     dl = body_of(menu, "std::string share_downloads(")
     assert dl.count('"your home folder"') == 2, "the home folder is named on screen (the user's name)"
-    assert 'L"WINDIR"' in menu and 'GetFolderPath(Environment.SpecialFolder.Windows)' in cs, "explorer.exe is taken from the search path"
+    assert 'L"WINDIR"' in menu, "explorer.exe is taken from the search path"
     assert "kShareSaidLongest" in menu[menu.find("float measure_help("):][:900], "the help box has no room kept for the line after a save"
     assert "share_finish();" in menu[menu.find("void menu_tick() {"):][:400], "menu_tick never collects the worker's answer"
     spawn = menu[menu.find("bool share_spawn("):]
@@ -359,13 +358,6 @@ def check_sources():
     assert "WEXITSTATUS(status) == 0" in spawn, "a clipboard program that failed counts as copied (no fallback to xclip)"
     for word in ("WinHttp", "curl", "POST"):
         assert word not in body, "Save my pipeline list uploads something (%s)" % word
-    # the builders
-    linux = (ROOT / "builder" / "linux" / "hookshot_builder.py").read_text(encoding="utf-8")
-    assert "import pipeline_share" in linux and "Save my pipeline list" in linux
-    cs = (ROOT / "builder" / "HookshotBuilder" / "MainWindow.xaml.cs").read_text(encoding="utf-8")
-    xaml = (ROOT / "builder" / "HookshotBuilder" / "MainWindow.xaml").read_text(encoding="utf-8")
-    assert '"pipeline_share.py"' in cs and '"--json"' in cs and "Save my pipeline list" in xaml
-    assert share.ISSUE_URL in cs
 
 
 def body_of(source, signature):
@@ -387,7 +379,7 @@ def check_drawn_only():
     calls = [m.start() for m in re.finditer(r"(?<![\w:])state_record\(", draw)]
     defs = [m.start() for m in re.finditer(r"\nvoid state_record\(", draw)]
     callers = [c for c in calls if not any(d < c < d + 20 for d in defs)]
-    note = body_of(draw, "void pipeline_note(")
+    note = body_of(draw, "bool pipeline_note(")
     assert len(callers) == 1 and note.count("if (color_types) state_record(") == 1, \
         "state_record() is called from somewhere other than pipeline_note(), with the draw's colour types"
     # pipeline_note with colour types (a 6th argument): only graphics_pipeline()
@@ -424,30 +416,21 @@ def check_drawn_only():
     assert all("state_record_compute(" not in text for text in others.values()), "another file writes compute records"
 
 
-def check_linux_builder(tmp):
-    """The Linux builder's action, without a display: the zip, then the clipboard, the folder and the issue through what it is
-    given; a refusal opens nothing"""
-    spec = importlib.util.spec_from_file_location("hookshot_builder_share", ROOT / "builder" / "linux" / "hookshot_builder.py")
-    try:
-        builder = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(builder)
-    except ImportError as e:   # (no tkinter: the module cannot load; the source checks above still ran)
-        print("the Linux builder's action not run: %s" % e)
-        return
+def check_game_layout(tmp):
+    """A game folder in host/game_layout.c's layout: the list in cache/, the log in logs/ (the options stay beside the game):
+    both found, and the zip and the template as from a loose folder"""
     t = Path(tmp)
-    g = game_folder(t, v2_list(2))
-    calls = []
-    said = builder.share_pipeline_list(str(g), out_dir=str(t / "dl"), copy=lambda s: calls.append(("copy", s)),
-                                       open_path=lambda p: calls.append(("open", p)))
-    zips = list((t / "dl").glob("*.zip"))
-    assert len(zips) == 1 and zipfile.ZipFile(zips[0]).namelist() == [share.LIST, share.REPORT]
-    assert [c[0] for c in calls] == ["copy", "open", "open"] and calls[0][1].startswith("- Hookshot version:"), calls
-    assert calls[1][1] == str(t / "dl") and calls[2][1] == share.ISSUE_URL, calls
-    assert zips[0].name in said and "attach" in said, said
-    (g / share.LIST).unlink()
-    calls.clear()
-    said = builder.share_pipeline_list(str(g), out_dir=str(t / "dl2"), copy=lambda s: calls.append(s), open_path=calls.append)
-    assert not calls and "No pipeline list yet" in said and not (t / "dl2").exists(), (calls, said)
+    data = v2_list(2)
+    g = game_folder(t, data)
+    (g / "cache").mkdir()
+    (g / share.LIST).rename(g / "cache" / share.LIST)
+    (g / "logs").mkdir()
+    (g / "hookshot_log.txt").rename(g / "logs" / "hookshot_log.txt")
+    assert share.list_path(str(g)) == str(g / "cache" / share.LIST)
+    path, text, n = share.make_zip(str(g), str(t / "out"), day=share.datetime.date(2026, 11, 14))
+    assert n == 2 and "Output resolution: 2560x1440" in text and "v2.2.0-rc.1-5-gabcdef1" in text, text
+    with zipfile.ZipFile(path) as z:
+        assert z.read(share.LIST) == data
 
 
 def main():
@@ -459,9 +442,9 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         check_python(tmp)
     with tempfile.TemporaryDirectory() as tmp:
-        check_cxx(a.cxx, tmp)
+        check_game_layout(tmp)
     with tempfile.TemporaryDirectory() as tmp:
-        check_linux_builder(tmp)
+        check_cxx(a.cxx, tmp)
     print("pipeline share: ok")
     return 0
 

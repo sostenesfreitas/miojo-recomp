@@ -1,7 +1,7 @@
 """A masked clear whose layout, shader module or pipeline the driver did not make is not kept, and is tried again (#1787).
 
 clear_pipeline (gpu/vk/vk_draw.cpp) makes the full-screen-triangle pipeline of a masked clear on its first use. It ignored
-what vkCreatePipelineLayout and vkCreateShaderModule returned, so a failed layout or module went on into the next calls,
+what vkCreatePipelineLayout and the shader-module create returned, so a failed layout or module went on into the next calls,
 and it stored whatever cached_graphics gave back: a pipeline the driver refused was cached as VK_NULL_HANDLE, and that clear
 was left out for the rest of the run, even when the failure was transient. Now each step's result is checked, a failure
 keeps nothing (the vertex module is freed when the fragment module fails), and the key is tried again on its next clears,
@@ -33,7 +33,7 @@ def main():
     need(every and int(every.group(1)) > 1, "a key that backed off is never tried again, or is tried every clear")
     gate = "if (failed.tries >= kClearTries && ++failed.waited < kClearRetryEvery) return VK_NULL_HANDLE;"
     need(gate in body, "a key that failed kClearTries times is not backed off (or never tried again)")
-    need(body.index(gate) < body.index("failed.waited = 0;") < body.index("vkCreateShaderModule"),
+    need(body.index(gate) < body.index("failed.waited = 0;") < body.index("guarded_shader_module"),
          "the back-off is checked after the work it should save, or its wait is not restarted on a try")
     need("++failed.tries == kClearTries" in body, "the failure is logged every try, or never")
     # (the gate itself, run: 3 failures, then one try in kClearRetryEvery clears)
@@ -49,8 +49,8 @@ def main():
     need(made == [0, 1, 2, 2 + n, 2 + 2 * n, 2 + 3 * n], "the back-off does not try once every kClearRetryEvery clears")
     # (every creation's result is looked at, and a failure goes out through fail, which counts it)
     for call, check in (("vkCreatePipelineLayout(", "if (lr != VK_SUCCESS || !made) return fail("),
-                        ("vkCreateShaderModule(dev.device, &mi, nullptr, &vm)", "if (vr != VK_SUCCESS || !vm) return fail("),
-                        ("vkCreateShaderModule(dev.device, &mi, nullptr, &fm)", "if (fr != VK_SUCCESS || !fm) {"),
+                        ("guarded_shader_module(&mi, &vm)", "if (vr != VK_SUCCESS || !vm) return fail("),
+                        ("guarded_shader_module(&mi, &fm)", "if (fr != VK_SUCCESS || !fm) {"),
                         ("cached_graphics(&ci, &pl)", "if (pr != VK_SUCCESS || !pl) {")):
         need(call in body, "lost the call " + call)
         need(check in body, "the result of %s is not checked" % call)

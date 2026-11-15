@@ -249,8 +249,8 @@ class BakeTranslateTests(unittest.TestCase):
 
 
 class BakeStampTrapTests(unittest.TestCase):
-    """BAKE.md s6 trap 1: build.py hashes sorted(translator) + the four
-    named files APPENDED, not merged. My translator_stamp must follow the
+    """docs/BAKE.md s6 trap 1: build.py hashes sorted(translator) + the three
+    named files APPENDED, not merged (nx2/translator_files.py). My translator_stamp must follow the
     appended order; this fails if someone 'simplifies' it into one sort."""
 
     def test_stamp_uses_appended_order(self):
@@ -259,14 +259,19 @@ class BakeStampTrapTests(unittest.TestCase):
         translator = [os.path.join(d, f) for top in ("eden", "sirit", "compat")
                       for d, _, fs in os.walk(os.path.join(vk, top)) for f in fs]
         named = [os.path.join(vk, n) for n in
-                 ("vk_shader.cpp", "vk_bank.cpp", "vk_state.h", "vk_api.h")]
-        h = hashlib.sha1()
-        for f in sorted(translator + named):  # the WRONG order (trap)
-            with open(f, "rb") as src:
-                h.update(os.path.relpath(f, vk).replace("\\", "/").encode()
-                         + src.read().replace(bytes((13, 10)), bytes((10,))))
-        self.assertNotEqual(bake.translator_stamp(), h.hexdigest()[:16],
+                 ("vk_shader.cpp", "vk_bank.cpp", "vk_state.h")]   # (nx2/translator_files.py FILES)
+
+        def stamp(order):
+            h = hashlib.sha1()
+            for f in order:
+                with open(f, "rb") as src:
+                    h.update(os.path.relpath(f, vk).replace("\\", "/").encode()
+                             + src.read().replace(bytes((13, 10)), bytes((10,))))
+            return h.hexdigest()[:16]
+        self.assertNotEqual(bake.translator_stamp(), stamp(sorted(translator + named)),   # the WRONG order (trap)
                             "stamp matches the fully-sorted order: s6.4 trap")
+        self.assertEqual(bake.translator_stamp(), stamp(sorted(translator) + named),
+                         "stamp is not the folders' files sorted, then the named files appended")
         self.assertRegex(bake.translator_stamp(), r"^[0-9a-f]{16}$")
 
 

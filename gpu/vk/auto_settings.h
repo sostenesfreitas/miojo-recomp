@@ -32,23 +32,15 @@ struct Hardware {
 };
 
 // What the profile sets. Indices are the menu's own: the Upscaler (upscaler_rows.h, ur::GAME...) and the Render resolution
-// (ur::kPercent's index). The Output resolution is a size, which the menu finds among its choices (vk_menu.cpp apply_auto: the
-// screen's resolutions and the common ones, #2566); 0 x 0, the game's 2048 x 1152
+// (ur::kPercent's index). Not the Output resolution: it stays a new install's (hos_output_default) or the player's own. host/hos_main.c reads it
+// at boot, before the card is known, so a size chosen here only applied at the next start, and a new install's first close of
+// the menu asked to restart for it
 struct Choice {
     int tier = 0;               // (the preset whose memory budgets and scaling hold: 1 Minimum ... 5 Ultra)
     int upscaler = 0;
     int resolution = 0;         // (0: the tier's own, as the preset sets it)
-    int output_w = 0, output_h = 0;
     char why[480] = {};
 };
-
-constexpr int kGameW = 2048, kGameH = 1152;   // (the game's own output)
-// The least tier an output of this size is chosen at: the memory a larger frame's targets take. Up to the game's own size any
-// tier; up to 2560 x 1600 (1440p, 16:10) Balanced; up to 3840 x 2160's pixels (4K, 3440x1440, 5120x1440) High; past them Ultra
-inline int output_tier(int w, int h) {
-    const long long px = (long long)w * h;
-    return px <= (long long)kGameW * kGameH ? 1 : px <= 2560LL * 1600 ? 3 : px <= 3840LL * 2160 ? 4 : 5;
-}
 
 // (upscaler_rows.h's, kept here so the rules compile on their own; the test checks they agree)
 enum { GAME = 0, DLSS = 1, FSR4 = 4 };
@@ -104,22 +96,6 @@ inline Choice choose(const Hardware& h) {
     } else {
         add(c, h.rtx && !h.dlss_built ? "the game's own upscaler (this build has no DLSS)"
                : h.rdna4 && !h.fsr4_built ? "the game's own upscaler (this build has no FSR 4)" : "the game's own upscaler");
-    }
-    // The output: the screen's own size where the tier has the memory for its frame (the menu checks it offers it); else the
-    // game's. Each side rounded down to 8, as the menu offers the screen's sizes (display_modes.h offered): a 1366x768 screen's
-    // is 1360x768 there, and the size as the screen gives it would not be found
-    const int sw = h.screen_w > 0 ? h.screen_w & ~7 : 0, sh = h.screen_h > 0 ? h.screen_h & ~7 : 0;
-    if (sw > 0 && sh > 0 && !(sw == kGameW && sh == kGameH)) {
-        const int need = output_tier(sw, sh);
-        if (c.tier >= need) {
-            c.output_w = sw, c.output_h = sh;
-            std::snprintf(b, sizeof b, "output %dx%d (the screen's)", sw, sh);
-        } else {
-            std::snprintf(b, sizeof b, "output 2048x1152 (the screen's %dx%d needs tier %d)", sw, sh, need);
-        }
-        add(c, b);
-    } else {
-        add(c, "output 2048x1152");
     }
     return c;
 }

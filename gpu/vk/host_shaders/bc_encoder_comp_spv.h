@@ -4,7 +4,7 @@
 // NOT a Nintendo file, and nothing in it comes from the game. This is SPIR-V compiled from bc_encoder.comp, beside this
 // file: the compute shader src/video_core/host_shaders/bc_encoder.comp of Eglantine, the Switch 2 fork of the emulator
 // Eden (https://github.com/Eglantine-Community/Eglantine, branch nx2), written for Eglantine by Takoroka (0d5534a288,
-// 2026-10-29). It carries that file's copyright and license notices above; see readme.md, "License".
+// 2026-10-29). It carries that file's copyright and license notices above; see README.md, "License".
 // The BC1/BC3 encoder. The Vulkan back end runs it to re-encode big decoded ASTC textures as BC3, a quarter of RGBA8's
 // VRAM (vk_texture.cpp).
 // Made by scripts/host_shaders.py (glslang 16.6.0, --target-env vulkan1.1, gives these bytes exactly): edit the .comp

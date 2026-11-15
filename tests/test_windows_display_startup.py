@@ -45,7 +45,7 @@ def main():
         if Path(args.cc).name.lower() in ("cl", "cl.exe"):
             flags = ["/nologo", "/TC", "/W4", "/WX", f"/Fe:{executable}"]
         else:
-            flags = ["-std=c11", "-include", ENV_ON_H, "-O0", "-Wall", "-Wextra", "-Werror", "-Wno-unknown-warning-option", "-Wno-unused-but-set-global",
+            flags = ["-std=c11", "-D_CRT_SECURE_NO_WARNINGS=", "-include", ENV_ON_H, "-O0", "-Wall", "-Wextra", "-Werror", "-Wno-unknown-warning-option", "-Wno-unused-but-set-global",
                      "-o", str(executable)]   # (newer clang: a fixture global set and never read)
         subprocess.run([args.cc, *flags, str(c_file)], cwd=temp, check=True)
         subprocess.run([str(executable)], check=True)

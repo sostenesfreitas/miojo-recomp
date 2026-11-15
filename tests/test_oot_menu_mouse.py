@@ -17,7 +17,9 @@ list of the title's 60 x 60 marks a row is hit across the line and in the gaps b
 focus down a row with the setter, without the pad. On the R button's item choice (a carousel) the wheel presses the
 D-pad's right (down) and left (up), a notch each, one after another, and the mouse is not freed (it stays the
 camera's). With the cursor hidden (R held counts as the pad in use) the wheel still moves a list, and moving the mouse
-points at nothing. Once frames go on with no menu holding the mouse, the window is told at once.
+points at nothing. A left press on a panel page is a click at its release, and none when the button was let go
+while the pointer was away (another window in front). Once frames go on with no menu holding the mouse, the window is
+told at once.
 python -I -B tests/test_oot_menu_mouse.py   (Windows: the feature's; elsewhere it is skipped)
 """
 import shutil
@@ -49,6 +51,14 @@ VK_API_H = r"""
 enum { HOS_MOUSE_LEFT = 1, HOS_MOUSE_RIGHT = 2, HOS_MOUSE_MIDDLE = 4 };
 """
 
+# (included first in both files: the key state the menu reads is the fixture's)
+KEYS_H = r"""
+#pragma once
+#include <windows.h>
+SHORT fake_key_state(int vk);
+#define GetAsyncKeyState fake_key_state
+"""
+
 FIXTURE = r"""
 #include "hos.h"
 #include "../gpu/vk/vk_api.h"
@@ -69,6 +79,10 @@ void hos_oot_menu_tick(Ctx *c, uint64_t screen);
 static int ptr_x = 1920, ptr_y = 1080, wheel_next;
 static uint32_t pressed_next;
 static int pointer_hidden;   /* (the cursor hidden while the pad is in use: the wheel only) */
+static int pointer_away;   /* (outside the window, or another window in front: no pointer) */
+/* the left button held, as GetAsyncKeyState reads it (KEYS_H puts this in its place: not the desk's own mouse) */
+static int left_held;
+SHORT fake_key_state(int vk) { return vk == VK_LBUTTON && left_held ? (SHORT)0x8000 : 0; }
 static int menu_frees, menu_gone;   /* (the game's menus' mouse: freed for a menu's frame; their close told) */
 void hos_mouse_game_menu(void) { menu_frees++; }
 void hos_mouse_game_menu_gone(void) { menu_gone++; }
@@ -76,7 +90,8 @@ int hos_mouse_wheel_take(void) { const int w = wheel_next; wheel_next = 0; retur
 int hos_mouse_game_pointer(int *x, int *y, int *w, int *h, uint32_t *pressed, int *wheel) {
     *x = ptr_x, *y = ptr_y, *w = 3840, *h = 2160, *pressed = pressed_next, *wheel = wheel_next;
     pressed_next = 0, wheel_next = 0;
-    return pointer_hidden ? 2 : 1;
+    if (pointer_away) *pressed = 0, *wheel = 0;
+    return pointer_away ? 0 : pointer_hidden ? 2 : 1;
 }
 static char taps[1024];
 void hos_hid_tap(const char *press) { strncat(taps, press, sizeof taps - strlen(taps) - 2), strcat(taps, ";"); }
@@ -283,6 +298,27 @@ int main(void) {
     frame(choice, -300, 0);
     CHECK(!strcmp(taps, "0.000:RIGHT/60;"));
 
+    /* A panel page's click is at the release. Key Items: the left button pressed on the R sign and let go there is R */
+    const uint64_t key_items = screen_new(0x84c07798ULL);
+    reset();
+    pressed_next = HOS_MOUSE_LEFT, left_held = 1;
+    frame(key_items, 950, 1000);
+    left_held = 0;
+    frame(key_items, 950, 1000);
+    CHECK(!strcmp(taps, "0:R/75;"));
+    /* pressed there, then another window in front (Alt-Tab) and the button let go there: back on the page, no click */
+    reset();
+    pressed_next = HOS_MOUSE_LEFT, left_held = 1;
+    frame(key_items, 950, 1000);
+    pointer_away = 1;
+    frame(key_items, 950, 1000);
+    left_held = 0;
+    frame(key_items, 950, 1000);
+    pointer_away = 0;
+    frame(key_items, 950, 1000);
+    frame(key_items, 950, 1000);
+    CHECK(taps[0] == 0);
+
     /* Back in play (R let go): only the HUD's screen runs, no menu's. The window is told the menus have closed once
        50 ms of frames have had none: the camera gets its mouse back then, not 300 ms on */
     clock_ns += 300000000LL;
@@ -317,9 +353,11 @@ class OotMenuMouseTests(unittest.TestCase):
             (tmp / "gpu" / "vk" / "compat").mkdir()
             shutil.copy(ROOT / "gpu" / "vk" / "compat" / "hookshot_env.h", tmp / "gpu" / "vk" / "compat" / "hookshot_env.h")
             shutil.copy(ROOT / "host" / "oot_menu.c", tmp / "host" / "oot_menu.c")
+            (tmp / "host" / "keys.h").write_text(KEYS_H, encoding="utf-8")
             (tmp / "host" / "t.c").write_text(FIXTURE, encoding="utf-8")
             binary = tmp / "t.exe"
             build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-O1", "-g", "-D_WIN32_WINNT=0x0601",
+                                    "-include", str(tmp / "host" / "keys.h"),
                                     str(tmp / "host" / "t.c"), str(tmp / "host" / "oot_menu.c"), "-o", str(binary)],
                                    text=True, capture_output=True)
             self.assertEqual(build.returncode, 0, build.stderr)

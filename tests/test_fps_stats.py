@@ -43,15 +43,18 @@ def main():
     # (the key the row saves under is its name's: fps_counter, as before the levels, so an old file's 1 is FPS)
     need("show_fps" not in body(menu, "const char* ini_key("), "the FPS counter's key was renamed: old options files would not load")
     hints = body(menu, "MENU_HINTS(hn_fps,")
-    need(hints.count('"') // 2 >= 4, "the FPS counter's hints do not cover every level")
+    need(hints.count('"') // 2 >= 5, "the FPS counter's hints do not cover every level")
+    texts = body(menu, "void fps_texts(")
+    for use in ("fs::kDev", "draw_stats(", "draw_stats2(", "texture_stats(", "vram_usage(", "texture_count()", "fps_dev_text"):
+        need(use in texts, "fps_texts does not write the Dev level's %s" % use)
     need(re.search(r'\{TAB_GAMEPLAY, "FPS counter position", &opts\.fps_corner, 0, 3, 1, tx_fps_corner,', menu),
          "the Gameplay tab has no FPS counter position row")
     tick = menu[menu.index("void menu_tick()"):menu.index("void menu_record(")]
     need("fps_level_now.store(" in tick and "fps_texts(" in tick, "menu_tick does not tell vk_fps.cpp the level or write the lines")
     need("fps_level_now.store(" in body(menu, "void menu_init()"), "menu_init does not tell vk_fps.cpp the saved level")
     target = body(menu, "double fps_target_ms()")
-    need("fps_stats::cap_rate(fps_cap_started" in target and "HOS_FPS_MAX" in target and "menu_vsync() == 1" in target,
-         "the target is not the cap the game started with (HOS_FPS_MAX over it), or the display's with V-Sync On")
+    need("fps_stats::cap_rate(opts.fps_cap" in target and "HOS_FPS_MAX" in target and "menu_vsync() == 1" in target,
+         "the target is not the Game frame rate cap row's (HOS_FPS_MAX over it), or the display's with V-Sync On")
     draw = body(menu, "void draw_fps(")
     for use in ("fps_graph(", "fps_target_ms()", "fs::graph_top(", "fs::rate_grade(", "fps_part_text", "fps_ms_text"):
         need(use in draw, "draw_fps does not use %s" % use)

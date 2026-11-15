@@ -1,7 +1,7 @@
-"""Save my pipeline list: the zip a player attaches to the "Submit your pipelines" issue (#2034), so that the pipelines their play
+"""Save my pipeline list: the zip a player attaches to the "Submit your pipelines" issue (#14), so that the pipelines their play
 built go into the list the next release builds before the game (nx2/pipeline_states.py, assets/pipeline_states/README.md).
 
-The zip holds two files and nothing else: the game folder's hookshot_pipeline_states.bin (checked first as
+The zip holds two files and nothing else: the game folder's hookshot_pipeline_states.bin (in its cache/; checked first as
 nx2/pipeline_states.py --check checks a list: whole, of a format this build reads, holding pipelines) and
 hookshot_pipeline_report.txt, the issue's template filled in from the game folder: the version, the OS, the GPU and its driver
 (from the game's last log), the output and render resolution, the upscaler, frame generation and HDR (from
@@ -29,8 +29,8 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline_states  # noqa: E402  (the list's checks: parse, strict)
 
-ISSUE = 2034
-ISSUE_URL = "https://github.com/NotRexed/Hookshot/issues/%d" % ISSUE
+ISSUE = 14
+ISSUE_URL = "https://git.notrexed.dev/Hookshot/Hookshot/issues/%d" % ISSUE
 LIST = "hookshot_pipeline_states.bin"
 REPORT = "hookshot_pipeline_report.txt"
 # (the issue's template, its lines in its order; gpu/vk/pipeline_share.h writes the same: tests/test_pipeline_share.py)
@@ -186,7 +186,7 @@ def mods_text(names):
 
 
 def _log_lines(folder):
-    for d in (folder, os.path.join(folder, "bin")):
+    for d in (os.path.join(folder, "logs"), folder, os.path.join(folder, "bin")):   # (logs/: host/game_layout.c; the others before it)
         try:
             with open(os.path.join(d, "hookshot_log.txt"), encoding="utf-8", errors="replace") as f:
                 return f.read(4 << 20).splitlines()
@@ -311,10 +311,17 @@ def downloads_dir():
     return d if os.path.isdir(d) else home
 
 
+def list_path(folder):
+    """The game folder's pipeline list: in its cache/ (host/game_layout.c, gpu/vk/vk_draw.cpp state_list_path), or loose in the
+    folder from a build before cache/"""
+    cached = os.path.join(folder, "cache", LIST)
+    return cached if os.path.isfile(cached) else os.path.join(folder, LIST)
+
+
 def make_zip(folder, out_dir=None, day=None):
     """The zip for the issue, from the game folder: (its path, the filled template, the number of pipelines). ShareError when the
     list is missing or not one to share (nothing written then)"""
-    path = os.path.join(folder, LIST)
+    path = list_path(folder)
     data, recs = read_list(path)   # (read once: the bytes checked are the bytes zipped)
     text = template(details(folder, recs))
     out_dir = out_dir or downloads_dir()

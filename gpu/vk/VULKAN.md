@@ -136,7 +136,7 @@ Designed after totk-pc-recomp's runtime/vk_*.c (MIT) and Eden's renderer_vulkan,
 - **Pipelines**: whatever Vulkan 1.3 and `VK_EXT_extended_dynamic_state3` take as dynamic is dynamic; graphics
   programs are translated and pipelines built on worker threads (`vk_jobs.cpp`). A draw whose program or pipeline
   is not ready is left out when its targets hold an earlier frame's picture and waits otherwise (TOTK's
-  `TOTK_PIPE_SKIP` rule; `RX_VK_PIPE_WAIT=1` always waits). The pipeline cache persists (`mkw_vk_pipelines.bin`).
+  `TOTK_PIPE_SKIP` rule; `RX_VK_PIPE_WAIT=1` always waits). The pipeline cache persists (`cache/hookshot_vk_pipelines.bin` in the game folder).
 - **Uniform updates** (`UPDATE_UB`) go to guest memory at the end of their recording; draws after one bind a copy
   of the range with it applied (`ub_overlay`).
 - **The VRAM mirror** (`vk_memory.cpp`, TOTK's): pools bound as buffers get a device-local copy at the next

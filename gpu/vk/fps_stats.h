@@ -12,12 +12,41 @@
 namespace mkwvk::fps_stats {
 
 /// The FPS counter row (opts.show_fps, saved as fps_counter=): an options file from before the levels has 0 Off or 1 On,
-/// and 1 is the counter as it was, the number alone
-enum Level { kOff, kFps, kFrameTime, kGraph, kBreakdown, kLevels };
+/// and 1 is the counter as it was, the number alone. Dev: the Breakdown and the renderer's own numbers under it (dev_line)
+enum Level { kOff, kFps, kFrameTime, kGraph, kBreakdown, kDev, kLevels };
 inline int level_of(int saved) { return std::clamp(saved, (int)kOff, (int)kLevels - 1); }
 inline const char* level_name(int v) {
-    static const char* const t[] = {"Off", "FPS", "Frame time", "Graph", "Breakdown"};
+    static const char* const t[] = {"Off", "FPS", "Frame time", "Graph", "Breakdown", "Dev"};
     return t[level_of(v)];
+}
+
+/// The Dev level's lines, under the Breakdown's: their names, and their values from the renderer's counters (vk_menu.cpp
+/// fps_texts, every half second: the counts a frame over that half second, the uploads a second)
+enum DevLine { kVram, kTextures, kDraws, kDispatches, kPasses, kSkipped, kUploads, kPipelines, kDevLines };
+inline const char* dev_name(int i) {
+    static const char* const t[] = {"VRAM", "Textures", "Draws / frame", "Dispatches / frame", "Render passes / frame",
+                                    "Draws skipped / frame", "Texture uploads", "Pipelines built"};
+    return i >= 0 && i < kDevLines ? t[i] : "";
+}
+inline double dev_gb(uint64_t bytes) { return bytes / (1024.0 * 1024.0 * 1024.0); }
+/// "5.2 of 7.8 GB": what the game uses of what the driver allows it (VK_EXT_memory_budget); without a budget, its own "5.2 GB"
+inline int vram_line(char* b, size_t n, uint64_t used, uint64_t allowed, bool known) {
+    if (known && allowed) return snprintf(b, n, "%.1f of %.1f GB", dev_gb(used), dev_gb(allowed));
+    return snprintf(b, n, "%.1f GB", dev_gb(used));
+}
+/// "1843, 2.1 GB": the textures the renderer holds and their memory
+inline int textures_line(char* b, size_t n, uint64_t count, uint64_t bytes) {
+    return snprintf(b, n, "%llu, %.1f GB", (unsigned long long)count, dev_gb(bytes));
+}
+/// A count a frame: what a counter moved over the window, by the frames in it ("2481"; "-" without a frame)
+inline int per_frame_line(char* b, size_t n, int64_t moved, int frames) {
+    if (frames <= 0) return snprintf(b, n, "-");
+    return snprintf(b, n, "%lld", (long long)((std::max<int64_t>(moved, 0) + frames / 2) / frames));
+}
+/// "12.3 MB/s": bytes over the window's seconds
+inline int rate_line(char* b, size_t n, int64_t bytes, double seconds) {
+    if (seconds <= 0) return snprintf(b, n, "-");
+    return snprintf(b, n, "%.1f MB/s", std::max<int64_t>(bytes, 0) / (1024.0 * 1024.0) / seconds);
 }
 
 /// The FPS counter position row (opts.fps_corner): bit 0 the left side, bit 1 the bottom

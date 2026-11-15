@@ -173,6 +173,16 @@ class ExtractionPaths(unittest.TestCase):
             self.extract(names)
         self.assertEqual(before, snapshot(self.root))
 
+    def file_link(self, target, link):
+        try:
+            os.symlink(target, link)
+        except OSError as error:
+            # (Windows makes a file symbolic link only with Developer Mode or the privilege, WinError 1314, and
+            # has no junction for a file: without them nobody can plant one, so there is nothing to check)
+            if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                self.skipTest("file symbolic links need Developer Mode on Windows")
+            raise
+
     def directory_link(self, link, target):
         try:
             os.symlink(target, link, target_is_directory=True)
@@ -339,18 +349,12 @@ class ExtractionPaths(unittest.TestCase):
     def test_destination_link_is_rejected_before_resume(self):
         (self.out / "romfs").mkdir()
         self.sentinel.write_bytes(b"authored fixture")
-        try:
-            os.symlink(self.sentinel, self.out / "romfs" / "file.bin")
-        except OSError as error:
-            self.fail("Cannot create the file-link fixture: %s" % error)
+        self.file_link(self.sentinel, self.out / "romfs" / "file.bin")
         self.reject(["file.bin"], "extraction path is a link or reparse point: ")
 
     def test_stale_temporary_link_cannot_truncate_an_outside_file(self):
         (self.out / "romfs").mkdir()
-        try:
-            os.symlink(self.sentinel, self.out / "romfs" / "file.bin.part")
-        except OSError as error:
-            self.fail("Cannot create the file-link fixture: %s" % error)
+        self.file_link(self.sentinel, self.out / "romfs" / "file.bin.part")
         self.extract(["file.bin"])
         self.assertEqual(self.sentinel.read_bytes(), b"keep outside data")
         self.assertFalse(os.path.lexists(self.out / "romfs" / "file.bin.part"))
@@ -398,7 +402,7 @@ class ExtractionPaths(unittest.TestCase):
 
     def test_heal_destination_link_cannot_truncate_an_outside_file(self):
         (self.out / "exefs").mkdir()
-        os.symlink(self.sentinel, self.out / "exefs" / "main")
+        self.file_link(self.sentinel, self.out / "exefs" / "main")
         before = snapshot(self.root)
         with self.assertRaisesRegex(SystemExit, "^extraction path is a link or reparse point: "):
             self.heal()
@@ -414,7 +418,7 @@ class ExtractionPaths(unittest.TestCase):
 
     def test_heal_temporary_link_cannot_truncate_an_outside_file(self):
         (self.out / "exefs").mkdir()
-        os.symlink(self.sentinel, self.out / "exefs" / "main.part")
+        self.file_link(self.sentinel, self.out / "exefs" / "main.part")
         before = snapshot(self.root)
         with self.assertRaisesRegex(SystemExit, "^extraction path is a link or reparse point: "):
             self.heal()
@@ -430,7 +434,7 @@ class ExtractionPaths(unittest.TestCase):
 
     def test_unpack_temporary_link_cannot_truncate_an_outside_file(self):
         (self.out / "exefs").mkdir()
-        os.symlink(self.sentinel, self.out / "exefs" / "main.plain")
+        self.file_link(self.sentinel, self.out / "exefs" / "main.plain")
         # unpack() creates only the authored module before entering nup.main's production path.
         with self.assertRaisesRegex(SystemExit, r"^extraction path is a link or reparse point: .*main\.plain$"):
             self.unpack()

@@ -6,7 +6,7 @@ host/posix's, from sched_getaffinity); half_cpus keeps the translation's half of
 
 Checked here: usable_cpus and half_cpus, extracted unmodified, against a stand-in mask and CPU count; and in the source, that the
 prepare's pools (prepare_run, state_list_prepare, warm_libraries, predict_run, precompile_run, the program cache readers) are sized
-by them and no longer by std::thread::hardware_concurrency alone.
+by them and no longer by std::thread::hardware_concurrency alone (prepare_run through prepare_cpus, which starts from them).
 
 No Vulkan, GPU or game. python -I -B tests/test_prepare_cpus.py [--cxx clang++]
 """
@@ -104,7 +104,11 @@ def main():
     if "fake_hw" not in code:
         raise SystemExit("FAIL: usable_cpus and half_cpus no longer read the PC's CPU count")
 
-    for fn, need in (("bool prepare_run(", "half_cpus()"), ("void state_list_prepare(", "half_cpus()"),
+    # (prepare_run through prepare_cpus: half_cpus, or with the segment heap up to usable_cpus, tests/test_prepare_workers.py)
+    sizing = body(shader, "unsigned prepare_cpus() {")
+    if "half_cpus()" not in sizing or "usable_cpus()" not in sizing:
+        raise SystemExit("FAIL: prepare_cpus is not sized by half_cpus and usable_cpus")
+    for fn, need in (("bool prepare_run(", "prepare_cpus()"), ("void state_list_prepare(", "half_cpus()"),
                      ("bool warm_libraries(", "half_cpus()"), ("void predict_run(", "usable_cpus()"),
                      ("void precompile_run(", "usable_cpus()")):
         text = body(draw, fn)

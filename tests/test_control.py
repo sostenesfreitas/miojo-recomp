@@ -4,7 +4,7 @@ commands, oversized lines, clients that disconnect mid-command or never read, to
 in the way (Linux) or the pipe's name and DACL (Windows), quit, and guest memory at each HOS_CONTROL_MEM level. Linux
 drives the Unix socket, Windows the named pipe.
 
-python -I -B tests/test_control.py [--cc gcc]
+python -I -B tests/test_control.py [--cc gcc] [--source-root OTHER_CHECKOUT]
 """
 import argparse
 import os
@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cc", default="gcc")
+    p.add_argument("--source-root", type=Path, default=ROOT, help="compile the bridge and its header from this checkout")
     a = p.parse_args()
     windows = os.name == "nt"
     # (Linux: a short folder, a Unix socket's path is at most 107 bytes: the temporary folder ($TMPDIR) when it is short
@@ -29,10 +30,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ctl-", dir=None if short else "/tmp") as tmp:
         exe = os.path.join(tmp, "control_test.exe" if windows else "control_test")
         libs = ["-ladvapi32"] if windows else ["-lpthread", "-lm"]
+        warnings = ["-Wno-format-truncation"] if "clang" not in Path(a.cc).name else []
         subprocess.run([a.cc, "-std=c11", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers",
-                        "-Wno-format-truncation", "-D_GNU_SOURCE", "-DHOS_CONTROL_NO_GAME",
-                        str(ROOT / "tests" / "control_test.c"), str(ROOT / "host" / "control.c"), "-o", exe] + libs,
-                       check=True)
+                        "-D_GNU_SOURCE", "-D_CRT_SECURE_NO_WARNINGS", "-DHOS_CONTROL_NO_GAME", "-I", str(a.source_root / "host"),
+                        str(ROOT / "tests" / "control_test.c"), str(a.source_root / "host" / "control.c"), "-o", exe]
+                       + warnings + libs, check=True)
         # (the general cases, quit, the level unit, and the memory cases at each HOS_CONTROL_MEM level)
         runs = [([], None), (["quit"], None), (["level"], None),
                 (["mem"], None), (["mem"], "ro"), (["mem"], "rw"), (["mem"], "bogus")]

@@ -102,7 +102,13 @@ def read_zs(romfs, rel, dictionary):
     import zstandard
     d = zstandard.ZstdDecompressor(dict_data=zstandard.ZstdCompressionDict(dictionary))
     with open(os.path.join(romfs, rel), "rb") as f:
-        return d.decompressobj().decompress(f.read())
+        data = f.read()
+    # one call into a buffer of the frame's stated size: decompressobj().decompress of the whole file grows its
+    # output a piece at a time, which on Windows took 81 s of CPU for the 244 MB Common.bntx (0.55 s this way; Linux's realloc
+    # hides it). A frame that states no size is read as a stream
+    if zstandard.frame_content_size(data) > 0:
+        return d.decompress(data)
+    return d.stream_reader(data).read()
 
 
 def size_table(romfs, dictionary, game_size, font_size):
@@ -557,6 +563,9 @@ def guide_frame_at(where, group):
     return cx, cy, max(max(abs(x - cx), abs(y - cy)) + r for x, y, r in pts) + 8   # (from the centre to a corner, as the game's)
 
 
+_WIDENED = {}   # (guide_route's last widened stays: {id: (the image, its 9x9 max as an array)}, the image held so its id stays its own)
+
+
 def guide_route(size, bar, row, where, pad, stays, frame=None):
     """the way (points, the lines' pixels) of a line from a bar's row to the pad input's part, round the picture's other parts and
     with the fewest bends, crossing the lines that stay (L) as little as it can: it comes to a stick's centre, to a part's edge
@@ -592,7 +601,15 @@ def guide_route(size, bar, row, where, pad, stays, frame=None):
             else:   # (the frame: a square on its corner, its sides 1.15 corners' distance off in x + y)
                 blocked |= np.abs(X - cx) + np.abs(Y - cy) < 1.15 * e + GUIDE_CLEAR
     blocked |= ((np.abs(X - BARS[0]) < 14) | (np.abs(X - BARS[1]) < 14)) & (Y != y0)   # (off the bars but on its own row)
-    st = np.asarray(stays.filter(ImageFilter.MaxFilter(9)))
+    # the lines that stay, widened: the same image for every pad input's line of a Switch button (17 and the
+    # frames), so widened once for them all. A 9x9 max over the whole texture was ~40% of a face's time, made ~180 times a face
+    hit = _WIDENED.get(id(stays))
+    if hit is not None and hit[0] is stays:
+        st = hit[1]
+    else:
+        st = np.asarray(stays.filter(ImageFilter.MaxFilter(9)))
+        _WIDENED.clear()
+        _WIDENED[id(stays)] = (stays, st)
     pen = np.where(st[np.clip(Y, 0, size[1] - 1), np.clip(X, 0, size[0] - 1)] > 0, GUIDE_CROSS, 0)
     dirs = ((1, 0), (-1, 0), (0, 1), (0, -1))
     goals = {}   # ((i, j, dir): (the end, extra cost)): the cell two before the end, coming the way it ends
@@ -1255,6 +1272,42 @@ def make_prompts(a, incremental=False):
     print(f"prompts: regenerated ({reason})", flush=True)
 
 
+def face_jobs(faces):
+    """processes for the faces' textures: HOOKSHOT_PROMPT_JOBS, else one a face, at most the CPU threads and one
+    per GB of available memory (each holds the 244 MB Common.bntx and its images)"""
+    if os.environ.get("HOOKSHOT_PROMPT_JOBS"):
+        return max(1, int(os.environ["HOOKSHOT_PROMPT_JOBS"]))
+    n = min(faces, os.cpu_count() or 1)
+    gb = None
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class Status(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong)] + [
+                    (k, ctypes.c_ulonglong) for k in ("total", "avail", "tpf", "apf", "tv", "av", "ae")]
+            st = Status()
+            st.length = ctypes.sizeof(st)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                gb = st.avail / (1 << 30)
+        else:
+            with open("/proc/meminfo", encoding="ascii") as f:
+                gb = next(int(l.split()[1]) / (1 << 20) for l in f if l.startswith("MemAvailable:"))
+    except (OSError, ValueError, StopIteration):
+        gb = None
+    return max(1, min(n, int(gb)) if gb is not None else n)
+
+
+def draw_face(job):
+    """(a worker of generate) one face's textures.bin, from the Common.bntx at bntx_path"""
+    bntx_path, face, otf, out = job
+    with open(bntx_path, "rb") as f:
+        textures = f.read()
+    tex = bntx_textures(textures)
+    write_textures(out, face_textures(textures, tex, face_layers(textures, tex, face, otf)))
+    return face
+
+
 def generate(a):
     dictionary = zs_dictionary(a.romfs)
     game_font = read_zs(a.romfs, FONT, dictionary)
@@ -1294,12 +1347,27 @@ def generate(a):
         os.makedirs(d, exist_ok=True)
         if hint:
             write_hint(os.path.join(d, "hint.bin"), widths[face], hint)
-        if textures and face != "keyboard":   # (the keyboard's: the Switch's textures, host/prompts.c texture_face)
+    drawn = [face for face in faces if textures and face != "keyboard"]   # (the keyboard's: the Switch's textures, host/prompts.c)
+    jobs = face_jobs(len(drawn)) if not a.dump else 1
+    if jobs > 1:
+        # each face's textures in a process of its own: ~25 s of one core each, five faces one after another were
+        # ~2 of the build's ~3-minute finish on a Ryzen 5 5600. Each worker reads the Common.bntx written above, as this one does
+        import concurrent.futures
+        import multiprocessing
+        bntx = os.path.join(a.out, "Common.bntx")
+        with concurrent.futures.ProcessPoolExecutor(jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
+            for face in pool.map(draw_face, [(bntx, face, otf, os.path.join(a.out, face, "textures.bin")) for face in drawn]):
+                print(f"prompts: {face}", file=sys.stderr)
+    else:
+        for face in drawn:
             layers = face_layers(textures, tex, face, otf)
-            write_textures(os.path.join(d, "textures.bin"), face_textures(textures, tex, layers))
+            write_textures(os.path.join(a.out, face, "textures.bin"), face_textures(textures, tex, layers))
             if a.dump:
                 dump(a.dump, face, textures, tex, layers)
-        print(f"prompts: {face}", file=sys.stderr)
+            print(f"prompts: {face}", file=sys.stderr)
+    for face in faces:
+        if face not in drawn:
+            print(f"prompts: {face}", file=sys.stderr)
     ring = ring_entries(blarc)
     if ring or hint:
         with open(os.path.join(a.out, "Common.blarc"), "wb") as f:

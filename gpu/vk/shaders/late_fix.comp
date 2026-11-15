@@ -1,0 +1,33 @@
+#version 460
+// (hookshot) The late pages' fix (vk_memory.cpp, "the late pages' fix"): a capture's page that a submission still on the GPU
+// writes back gets, in the capture's buffer, the mirror's words the write-back writes, before anything copies the page from
+// there: the words of a whole copy's range all, the diff pass's words where its stamp is newer than the capture's view of
+// the GPU (int(stamp - after) > 0). One workgroup a fix (a page, or a range in one), from a table the CPU wrote.
+// glslangValidator -V --target-env vulkan1.3 --vn LATE_FIX_COMP_SPV -o late_fix_comp_spv.h late_fix.comp
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 256) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words { uint w[]; };
+struct Fix {
+    uvec2 dst;      // (device addresses: the capture buffer's words, the mirror's, the stamps' (0: every word))
+    uvec2 src;
+    uvec2 stamps;
+    uint count;     // (words)
+    uint after;     // (the GPU's progress the capture saw, low 32 bits)
+};
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer Table { Fix f[]; };
+layout(push_constant) uniform P {
+    Table table;
+    uint count;
+} pc;
+void main() {
+    const uint fi = gl_WorkGroupID.x + gl_WorkGroupID.y * 65535u;
+    if (fi >= pc.count) return;
+    const Fix f = pc.table.f[fi];
+    Words d = Words(f.dst), s = Words(f.src);
+    const bool stamped = any(notEqual(f.stamps, uvec2(0u)));
+    for (uint i = gl_LocalInvocationID.x; i < f.count; i += 256u) {
+        if (stamped && int(Words(f.stamps).w[i] - f.after) <= 0) continue;
+        d.w[i] = s.w[i];
+    }
+}

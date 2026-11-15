@@ -1,0 +1,3 @@
+| Date | Build | OS / desktop | GPU / driver | CPU / RAM | Settings | Where | Result |
+|---|---|---|---|---|---|---|---|
+| 2026-11-14 | development base 514591a3 + psycho-scene-variants (matcher fix; measured header b20f94fdf355a01d) | Windows, build 26300, 26H2; windowed | NVIDIA RTX 4070 / 621.01 | Intel Core i7-13700F / 32 GB | Custom; 2560x1440, 16:9; Native HDR 200/1000 nits; PsychoV35; DLAA K; FG Off; game cap 61; RX_VK_PSYCHOV35_DLSS=1 | Lon Lon Ranch daylight alley, fresh copied checkpoint, two-pitch yaw sweep; run b2 (diagv2-fixed03) | 49 stable-play shader switches; 0 large chroma steps (>1 capture code, median over 98 blocks within +/-5 frames); median absolute step 0.03251, maximum 0.08876; 4793 complete capture records; no FPS claim |

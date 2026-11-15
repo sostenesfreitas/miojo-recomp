@@ -61,6 +61,7 @@ Options opts;
 int saves = 0, presets = 0;
 void save() { saves++; }
 void apply_pad_layout(int) {}
+int detect_pad_layout() { return opts.pad_layout; }
 void apply_preset(int) { presets++; }
 void sync_preset_budgets(int) {}
 void env_release(const int*) {}   // (the environment's hold on a row: none here)
@@ -74,6 +75,7 @@ int step_upscaler(int, int, bool) { return 0; }
 int step(int, int v, int dir) { return v + dir; }
 int snap(int, int v) { return v; }
 int snap_render(int, int v) { return v; }   // (the slider)
+bool full_scale(int) { return false; }   // (only the game's own upscaler here)
 int step_engine(int, int, unsigned) { return 0; }   // (the Upscaler by engine)
 void step_render(int up, int v, int dir, int* u, int* r) { *u = up, *r = v + dir; }
 }
@@ -95,6 +97,8 @@ void samplers_changed() {}
 int temporal_resets = 0;
 void temporal_reset_failure() { ++temporal_resets; }
 void prompts_at_once(const Row&) {}
+/* (the Debug tab's Descriptor reuse and Sampler cache rows, told to vk_draw.cpp in play: not what this checks) */
+void menu_debug_rows(bool, bool) {}
 // (set_row steps the Output row through vk_menu.cpp's step_output_choice (#1144): not what this checks)
 int step_output_choice(int id, int dir) { return id + dir; }
 // (the Aspect ratio row moves the Output resolution to one of its shape's sizes, output_for_aspect: not what this checks)

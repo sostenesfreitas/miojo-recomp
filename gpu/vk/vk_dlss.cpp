@@ -88,6 +88,7 @@ struct State {
     uint32_t feature_rw = 0, feature_rh = 0, feature_ow = 0, feature_oh = 0;   // (its largest render size, its output)
     uint32_t min_rw = 0, min_rh = 0;
     unsigned feature_preset = ~0u;   // (the preset it was made with: another one from the menu makes it again)
+    dlss_checks::PresetSettle settle;   // (... once the row has held it a moment: not one for each preset stepped past)
     // (made for the game's native HDR (the game presenting its own HDR10 picture: present_native_pq): its scene colour goes
     // past 1 there, and an LDR feature fed the colour clamped to 1 cut every highlight at the paper white, a flat, SDR-looking
     // picture. Then the feature takes HDR colour, linear, with its own exposure, and the chain does not clamp it: hdr())
@@ -322,7 +323,12 @@ unsigned wanted_preset() {
 int prepare(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool native_aa,
             uint32_t* in_w, uint32_t* in_h, const char** fail) {
     State& s = st();
-    const unsigned preset = wanted_preset();
+    // (the DLSS model row's preset once it has held it for half a second at 60 fps: stepping K to L (past M) makes L's
+    // feature alone, not M's too, whose video memory NGX would keep for seconds (issue 17). The feature drawing meanwhile
+    // keeps its own preset; the first feature, or one made again after being let go, takes the row's at once)
+    static constexpr uint64_t kPresetSettle = 30;
+    const unsigned preset = s.settle.pick(wanted_preset(), s.feature_preset, s.feature != nullptr, texture_frame_no(),
+                                          kPresetSettle);
     // (the game's native HDR: State::feature_hdr. What the game presents, not the option and the swapchain: with Native
     // picked and the game's picture not PQ, the scene is LDR, and an HDR feature would get LDR colour)
     // (RX_VK_DLSS_HDR=0: the LDR feature and the clamped colour with Native too, as before this; for comparisons)

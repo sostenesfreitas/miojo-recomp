@@ -7,9 +7,10 @@ Checked:
 
 - the report's folder holds report.txt, both logs and the picture, and nothing else; no file in it names the home folder,
   the user's name as a folder, or the game folder's path;
-- report.txt's sections are the issue form's (.github/ISSUE_TEMPLATE/1-game-problem.yml), and scripts/hardware_report.py
-  reads the GPU's vendor and class and the system from it as it reads an issue; its link fills in the form's own fields and
-  stays within 2000 characters (GitHub's sign-in page fails on longer ones): more switches than fit are counted, not listed;
+- report.txt's sections are the issue form's (.forgejo/ISSUE_TEMPLATE/1-game-problem.yml), and scripts/hardware_report.py
+  reads the GPU's vendor and class and the system from it as it reads an issue; its link fills in the form's own fields
+  (Forgejo's field:<id> query, for ids the form has) and stays within 2000 characters: more switches than fit are
+  counted, not listed;
 - where the player is comes from the last map line (host/hos_main.c logs them), the run before's crash line is named;
 - the switches set are listed by name, and a value only when it is a number, a size or on/off and its name holds none of
   TOKEN, KEY, ROOM, SECRET, PASS, SERVER, USER: paths, addresses, scripts and secrets are left out; other variables are not
@@ -34,6 +35,9 @@ import re
 import subprocess
 import tempfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
+
+RUN_ALL_ARGS = ["--cxx", "{cxx}"]
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = "v2.1.0-rc.3-39-gbdfe09c (source 763271ad)"
@@ -88,6 +92,18 @@ int main(int argc, char** argv) {
               "HOS_RELAY=192.168.1.5", "HOS_RELAY_HOST=relay.example.org:47732", "RX_VK_LONG=1234567890123"};
     if (mode == "many")   // (a long hookshot_env.txt: more switches than a link takes)
         for (int i = 0; i < 80; i++) in.env.push_back("RX_TEST_SWITCH_" + std::to_string(i) + "=" + std::string(20, 'v'));
+    if (mode == "context" || mode == "context-count") {
+        in.options.clear();
+        in.pc_options = "Aspect ratio: Monitor's shape (default depends on this PC)\n"
+                        "Upscaler: NVIDIA DLSS (default depends on this PC)\n";
+        if (mode == "context-count")
+            for (int i = 0; i < 80; ++i) in.options += "Authored fixed row " + std::to_string(i) + ": On (default: Off)\n";
+    }
+    if (mode == "context-long") {   // (the changes fit in a link, the rows that depend on this PC do not: only how many)
+        in.options = "Field of view: 110 (default: 100)\n";
+        in.pc_options.clear();
+        for (int i = 0; i < 80; ++i) in.pc_options += "Authored PC row " + std::to_string(i) + ": On (default depends on this PC)\n";
+    }
     in.game_dir = argv[2];
     in.current_log = argv[3];
     in.home = argv[4];
@@ -198,7 +214,7 @@ def wiring():
           "a prompt (the menu's, or the compact bar's) does not say Save for the row")
     save = menu[menu.index("void bug_report_save() {"):]
     save = save[:save.index("\n}\n")]
-    for call in ("fill_here(in)", "device_report_text()", "changed_rows_text()", "ini_path()", "bug_report::start("):
+    for call in ("fill_here(in)", "device_report_text()", "changed_rows_text(in.pc_options)", "ini_path()", "bug_report::start("):
         check(call in save, "bug_report_save does not call " + call)
     picture = menu[menu.index("bool bug_report_picture(const char* path, uint64_t ticket) {"):]
     picture = picture[:picture.index("\n}\n")]
@@ -232,8 +248,14 @@ def wiring():
     for label in ("Hookshot version", "Where in the game", "Graphics card and driver version", "CPU, RAM and operating system",
                   "Changes from the defaults", "hookshot_log.txt", "Screenshots or video"):
         check("label: " + label + "\n" in form, "the issue form has no field " + label)
-    for field in ("version", "where", "gpu", "system", "settings"):
+    # (every field the link fills is one of the form's, by the name Forgejo reads: field:<id>)
+    filled = re.findall(r'"&field:([a-z]+)="', report)
+    check(sorted(filled) == ["gpu", "settings", "system", "version", "where"], "the link fills in %s" % filled)
+    check(not re.search(r'"&(?!field:)[a-z]+="', report), "the link has a part Forgejo does not fill a field from")
+    for field in filled:
         check("id: " + field + "\n" in form, "the issue form has no field id " + field)
+    check('kForm = "https://git.notrexed.dev/Hookshot/Hookshot/issues/new?template=.github/ISSUE_TEMPLATE/1-game-problem.yml"'
+          in report, "the link does not open the game problem form")
 
 
 def main():
@@ -259,7 +281,8 @@ def main():
         game = str(game_path) + os.sep
         sep = "\\" if windows else "/"
         home_as = "%USERPROFILE%" if windows else "~"
-        now_log = game_path / "hookshot_log.txt"
+        (game_path / "logs").mkdir()   # (the game folder's logs/: host/game_layout.c)
+        now_log = game_path / "logs" / "hookshot_log.txt"
         now_log.write_text(
             "[hos host] hookshot " + VERSION + "\n"
             "[hos sead::MainThread] fs: mounted content: -> " + home + sep + "Games" + sep + "Hookshot" + sep + "romfs\n"
@@ -268,7 +291,7 @@ def main():
             "[hos Main] map: KokiriForest_Child (child)\n"
             "[hos host] Malice and alice123 stay, as /x/alice123/ does\n"
             "[hos Main] map: HyruleField_Child (child)\n", encoding="utf-8")
-        (game_path / "hookshot_log.1.txt").write_text(
+        (game_path / "logs" / "hookshot_log.1.txt").write_text(
             "[hos host] hookshot v2.0.14\n"
             "[hos sead::MainThread] fs: mounted content: -> " + home + sep + "Games" + sep + "Hookshot" + sep + "romfs\n"
             "[hos Main] map: Market_Child (child)\n"
@@ -312,9 +335,9 @@ def main():
         logs = section("hookshot_log.txt")
         check("hookshot v2.0.14" in logs and "CRASH: exception 0xc0000005" in logs, "the logs' section: " + logs)
         check("picture.png" in section("Screenshots or video"), "the picture is not named")
-        link = report[report.index("https://git.notrexed.dev/Hookshot/Hookshot/issues/new?template=1-game-problem.yml"):].split()[0]
-        for part in ("&version=v2.1.0-rc.3-39-gbdfe09c%20%28source%20763271ad%29", "&gpu=NVIDIA%20GeForce%20RTX%204090",
-                     "&where=HyruleField_Child%20%28child%29", "&system=", "&settings=Upscaler", "HOS_HEADLESS", "RX_VK_MENU_SCRIPT"):
+        link = report[report.index("https://git.notrexed.dev/Hookshot/Hookshot/issues/new?template=.github/ISSUE_TEMPLATE/1-game-problem.yml"):].split()[0]
+        for part in ("&field:version=v2.1.0-rc.3-39-gbdfe09c%20%28source%20763271ad%29", "&field:gpu=NVIDIA%20GeForce%20RTX%204090",
+                     "&field:where=HyruleField_Child%20%28child%29", "&field:system=", "&field:settings=Upscaler", "HOS_HEADLESS", "RX_VK_MENU_SCRIPT"):
             check(part in link, "the link does not fill in " + part)
         check("%3D" not in link and not any(v in link for v in ("93127", "58213", "hunter2", "192.168", "3840x2160", "1%3AINS")),
               "the link carries a switch's value: " + link)
@@ -370,11 +393,11 @@ def main():
         # switches there are; report.txt lists them all
         folders, out = run(exe, "many", game, str(now_log), home, user, windows)
         report = (game_path / folders[0] / "report.txt").read_text(encoding="utf-8")
-        link = report[report.index("https://git.notrexed.dev/Hookshot/Hookshot/issues/new?template=1-game-problem.yml"):].split()[0]
+        link = report[report.index("https://git.notrexed.dev/Hookshot/Hookshot/issues/new?template=.github/ISSUE_TEMPLATE/1-game-problem.yml"):].split()[0]
         check(len(link) <= 2000, "the link with 98 switches: %d characters" % len(link))
         settings = hw.section(report, "Changes from the defaults")
         listed = [ln for ln in settings.splitlines() if re.match(r"[A-Z_][A-Z0-9_]*=", ln)]
-        check("&settings=Upscaler%3A%20NVIDIA%20DLSS" in link and
+        check("&field:settings=Upscaler%3A%20NVIDIA%20DLSS" in link and
               "Switches%%20set%%3A%%20%d%%2C%%20listed%%20in%%20the%%20attached%%20report.txt" % len(listed) in link and
               "RX_TEST_SWITCH" not in link and "in short" in report, "the shortened link: " + link)
         check(all("RX_TEST_SWITCH_%d=(value left out)" % i in listed for i in range(80)) and "HOS_HEADLESS=1" in listed and
@@ -414,6 +437,45 @@ def main():
             folders, out = run(exe, "full", game, str(now_log), home, user, windows)
             said = next((ln for ln in out if "menu: bug report not written:" in ln), "")
             check(folders == [""] and "report.txt could not be written" in said, "a report on a full disk: %s" % out)
+
+        # PC-dependent values are not fixed-default changes, but they reach the issue: in the same answer, the form's
+        # "Changes from the defaults" (the form has no field of their own), under their own line after the changes, in the
+        # link too, as far as it takes them: their rows, else how many, before the changes go short
+        marker = "Depends on this PC (the values now, not counted as changes):"
+        for mode in ("context", "context-count", "context-long"):
+            folders, _ = run(exe, mode, game, str(now_log), home, user, windows)
+            report = (game_path / folders[0] / "report.txt").read_text(encoding="utf-8")
+            check("### Depends on this PC" not in report, "a heading the issue form has no field for")
+            changes = hw.section(report, "Changes from the defaults")
+            check(marker in changes and "Switches set" in changes and
+                  changes.index(marker) < changes.index("Switches set"), "the PC rows are not under their line: " + changes)
+            fixed = changes[:changes.index(marker)] if marker in changes else changes
+            context = changes[changes.index(marker):changes.index("Switches set")] if marker in changes else ""
+            check("Aspect ratio:" not in fixed and "Upscaler:" not in fixed and "Authored PC row" not in fixed,
+                  "PC values counted as changes")
+            if mode == "context-long":
+                check("Field of view: 110 (default: 100)" in fixed and
+                      all("Authored PC row %d: On (default depends on this PC)" % i in context.splitlines() for i in range(80)),
+                      "report.txt does not list every PC row: " + changes)
+            else:
+                check("Monitor's shape (default depends on this PC)" in context and
+                      "NVIDIA DLSS (default depends on this PC)" in context, "PC values/default uncertainty lost")
+            link = next(line for line in report.splitlines() if line.startswith("https://git.notrexed.dev/Hookshot/Hookshot/issues/new?"))
+            check(len(link) <= 2000, "the link: %d characters" % len(link))
+            settings = parse_qs(urlsplit(link).query)["field:settings"][0]
+            if mode == "context":
+                check("with a fixed default" in changes and "with a fixed default" in settings, "claims every option has a known default")
+                check(marker in settings and "Monitor's shape (default depends on this PC)" in settings and
+                      "NVIDIA DLSS (default depends on this PC)" in settings and
+                      settings.index("with a fixed default") < settings.index(marker), "the link drops the PC rows: " + settings)
+            elif mode == "context-count":
+                check("80 Insert menu options with fixed defaults changed, 2 whose defaults depend on this PC and " in settings,
+                      "link counted PC-dependent rows as changes, or left them out: " + settings)
+            else:
+                check(settings.startswith("Field of view: 110 (default: 100)\n") and
+                      "Depends on this PC: 80, listed in the attached report.txt." in settings and
+                      "Authored PC row" not in settings and "in short" in report,
+                      "the short link does not keep the changes first and count the PC rows: " + settings)
     print("bug report: ok (report.txt as the issue form, both logs redacted, the picture, the long log, the terminal start, "
           "switch values, NUL bytes, the folder's reason, a full disk)")
 

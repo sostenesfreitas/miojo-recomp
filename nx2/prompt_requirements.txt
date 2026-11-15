@@ -1,7 +1,7 @@
 # (hookshot) What nx2/prompt_assets.py draws the button prompts with, at build time only: the icon font (fontTools), the
 # controller pictures and leader lines (Pillow), and the textures' ASTC blocks (astc-encoder-py, texture2ddecoder). Without
 # them the game is built all the same and shows the Switch's icons. The tools' Python carries them: scripts/linux/deps.sh
-# (the AppImage) and scripts/release_parts.py package --python-packages (the Windows builder's Python part).
+# (the AppImage) and scripts/tools.py assemble python (the Windows builder's Python, tools.lock).
 fonttools==4.68.0
 pillow==13.0.0
 astc-encoder-py==0.1.12

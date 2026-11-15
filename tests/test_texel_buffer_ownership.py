@@ -31,7 +31,7 @@ def main():
     assert state.count("std::map<") == 2
     state = state.replace("std::map<", "FaultMap<")
     eviction = block(memory, "void imports_give_back()")
-    eviction = eviction[:eviction.index("    // (hookshot) Off by default")] + "}\n"
+    eviction = eviction[:eviction.index("    // (hookshot) Default by OS and vendor")] + "}\n"
     actual = "\n".join([
         state,
         block(texture, "void release_texel_buffer_views("),

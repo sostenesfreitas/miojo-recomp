@@ -1,5 +1,5 @@
 """scripts/ffx_sdk.py: its file table, the SHA-256 checks, the retries, the copy into a game folder and AMD's license accepted
-first (here, in make_game.py and in the Windows Builder), without the network.
+first (here and in make_game.py), without the network.
 
 Run with: python -I tests/test_ffx_sdk.py
 """

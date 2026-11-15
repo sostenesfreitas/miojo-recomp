@@ -54,6 +54,7 @@ void dav1d_av1_decode(void *m, const uint8_t *data, size_t n, int64_t pts,
                       void (*fn)(void *, const uint8_t *, const uint8_t *, int, int, int, int64_t), void *user);
 void dav1d_av1_flush(void *m);
 void dav1d_av1_close(void *m);
+int dav1d_av1_threads(int logical);
 void hos_log(const char *fmt, ...) { va_list a; va_start(a, fmt); vfprintf(stderr, fmt, a); va_end(a); fputc('\n', stderr); }
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); exit(1); } } while (0)
 enum { W = 64, H = 48, N = 12 };
@@ -76,6 +77,9 @@ static void picture(void *user, const uint8_t *y, const uint8_t *uv, int w, int 
 }
 int main(int argc, char **argv) {
     CHECK(argc == 2);
+    /* (4 logical processors or fewer: 2 threads, the rest the game's; more: dav1d's own count) */
+    CHECK(dav1d_av1_threads(1) == 1 && dav1d_av1_threads(2) == 2 && dav1d_av1_threads(4) == 2);
+    CHECK(dav1d_av1_threads(5) == 0 && dav1d_av1_threads(16) == 0 && dav1d_av1_threads(0) == 0);
     FILE *fp = fopen(argv[1], "rb");
     CHECK(fp);
     static uint8_t ivf[1 << 16];
@@ -135,8 +139,10 @@ def main():
                             "-c", str(c), "-o", objs[-1]], check=True)
         subprocess.run([cc] + objs + ["-o", str(exe)] + lib, check=True)
         run = args.run.split() + [str(exe), str(FIXTURE)]
-        for threads in ("1", "4"):
+        for threads in ("", "1", "4"):   # ("": the default for this PC's processors)
             env = dict(os.environ, HOS_DAV1D_THREADS=threads)
+            if not threads:
+                env.pop("HOS_DAV1D_THREADS")
             env.pop("HOS_NO_DAV1D", None)
             subprocess.run(run, check=True, env=env)
         off = subprocess.run(run, env=dict(os.environ, HOS_NO_DAV1D="1"), capture_output=True, text=True)

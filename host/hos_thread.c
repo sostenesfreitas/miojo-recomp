@@ -5,6 +5,8 @@
    there. TPIDRRO_EL0 (thread-local region): 0x200 bytes; the SDK's nn::os keeps the current ThreadType* at
    +0x1F8, so lifted SDK code that reads it inline finds the same thread the HLE knows. */
 #include "hos.h"
+#include "hos_crash_record.h"
+#include "hos_report_prefixes.h"
 #ifndef HOOKSHOT_ENV_H   /* (env_on: the switches' one rule) */
 #include "../gpu/vk/compat/hookshot_env.h"
 #endif
@@ -301,13 +303,26 @@ static void log_flush(void) {}
 
 void hos_log_flush(void) { log_flush(); }
 
-void hos_log(const char *fmt, ...) {
+/* (hookshot) A line's level as the log writes it: none for info, so the lines most of the log is stay as they were; "[trace] "
+   after the thread's tag for the rest, which the launcher's log reads to show info and above unless asked for more */
+static const char *log_level_tag(int level) {
+    switch (level) {
+    case HOS_LOG_ERROR: return "[error] ";
+    case HOS_LOG_WARN: return "[warn] ";
+    case HOS_LOG_DEBUG: return "[debug] ";
+    case HOS_LOG_TRACE: return "[trace] ";
+    default: return "";
+    }
+}
+
+static void hos_vlog(int level, const char *fmt, va_list ap) {
     char buf[1024], line[1100];
-    va_list ap;
-    va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
-    va_end(ap);
-    snprintf(line, sizeof line, "[hos %s] %s\n", cur ? cur->name : "host", buf);
+    if (!strncmp(buf, HOS_REPORT_DEVICE_LOST_PREFIX, sizeof HOS_REPORT_DEVICE_LOST_PREFIX - 1))
+        hos_crash_record_fatal(NULL, "device lost");
+    else if (!strncmp(buf, HOS_REPORT_FATAL_PREFIX, sizeof HOS_REPORT_FATAL_PREFIX - 1))
+        hos_crash_record_fatal(NULL, strstr(buf, "VK_ERROR_DEVICE_LOST") ? "device lost" : "Vulkan fatal");
+    snprintf(line, sizeof line, "[hos %s] %s%s\n", cur ? cur->name : "host", log_level_tag(level), buf);
     extern volatile int hos_control_on;   /* (control.c: log lines for its subscribers) */
     if (hos_control_on) {
         void hos_control_log(const char *line);
@@ -318,13 +333,28 @@ void hos_log(const char *fmt, ...) {
     fflush(stderr);
 }
 
+void hos_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    hos_vlog(HOS_LOG_INFO, fmt, ap);
+    va_end(ap);
+}
+
+void hos_log_at(int level, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    hos_vlog(level, fmt, ap);
+    va_end(ap);
+}
+
 void hos_fatal(Ctx *c, const char *fmt, ...) {
+    if (!c) c = hos_ctx();
+    hos_crash_record_fatal(c ? c->x : NULL, "hos_fatal");
     char buf[1024];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    if (!c) c = hos_ctx();
     log_flush();
     fprintf(stderr, "[hos %s] FATAL: %s", cur ? cur->name : "host", buf);
     if (c) fprintf(stderr, " (lr %#llx sp %#llx)", (unsigned long long)c->x[30], (unsigned long long)c->x[31]);
@@ -994,10 +1024,17 @@ uint64_t hos_reserved_cpus(void) {
     SYSTEM_LOGICAL_PROCESSOR_INFORMATION info[256];
     DWORD len = sizeof info;
     if (!GetLogicalProcessorInformation(info, &len)) return mask;
+    /* (hookshot) of the processors this process may run on. A process kept to some of them (taskset, a launcher's
+       affinity) had the PC's last core kept all the same, outside its set, and a thread may leave the set: the replay ran
+       there, beside whatever else did. A timed session kept to one CCD of a 7900X (CPUs 0-5,12-17) replayed on CPUs 11 and
+       23 of the other, with the builds: frames of 2-8 s whenever one ran, and a 13th core when none did. A core counts
+       when all its logical processors are allowed; with every processor allowed, the last core as before */
+    DWORD_PTR proc = 0, sys = 0;
+    if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) || !proc) proc = ~(DWORD_PTR)0;
     int logical = 0;
     uint64_t last = 0;
     for (DWORD i = 0; i < len / sizeof info[0]; i++)
-        if (info[i].Relationship == RelationProcessorCore) {
+        if (info[i].Relationship == RelationProcessorCore && !((uint64_t)info[i].ProcessorMask & ~(uint64_t)proc)) {
             logical += __builtin_popcountll((uint64_t)info[i].ProcessorMask);
             if ((uint64_t)info[i].ProcessorMask > last) last = (uint64_t)info[i].ProcessorMask;
         }

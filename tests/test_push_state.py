@@ -27,7 +27,7 @@ def main():
     if "RX_VK_PUSH_STATE_OLD" not in bind:
         raise SystemExit("the old bookkeeping has no switch")
     full = bind[: bind.index("static thread_local std::vector<VkWriteDescriptorSet> changed")]
-    if "ps.words.clear(), ps.at.clear()" not in full or "ps.n = dw().writes.size()" not in full:
+    if "ps.words.clear(), ps.at.clear()" not in full or "ps.n = wr.writes.size()" not in full:
         raise SystemExit("a full push does not remember its words")
     fixture = f'''#include <cstdint>
 #include <cstdio>

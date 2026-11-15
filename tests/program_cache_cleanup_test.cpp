@@ -75,6 +75,15 @@ int vkCreateShaderModule(uintptr_t device, const VkShaderModuleCreateInfo* info,
     CHECK(destroyed.emplace(*module, 0).second);
     return 0;
 }
+using VkResult = int;
+constexpr VkResult VK_SUCCESS = 0;
+struct IntelDriverGate { bool busy = false; explicit IntelDriverGate(bool = false) {} };   // (vk_internal.h's, never held here)
+thread_local uint64_t module_program = 0;
+bool driver_faulted_program(uint64_t) { return false; }
+void driver_faulted_module(uint64_t) {}
+VkResult extern_guarded_shader_module(const VkShaderModuleCreateInfo* ci, VkShaderModule* module) {
+    return vkCreateShaderModule(dev.device, ci, nullptr, module);
+}
 void vkDestroyShaderModule(uintptr_t device, VkShaderModule module, const void* allocator) {
     CHECK(device == dev.device && allocator == nullptr && module != VK_NULL_HANDLE);
     auto it = destroyed.find(module);

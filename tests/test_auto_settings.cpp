@@ -1,6 +1,5 @@
 // auto_settings (gpu/vk/auto_settings.h): the Quality preset "Auto (this PC)"'s rules. tests/test_auto_settings.py
 #include "../gpu/vk/auto_settings.h"
-#include "../gpu/vk/display_modes.h"
 #include "../gpu/vk/upscaler_rows.h"
 namespace ur = mkwvk::upscaler_rows;
 
@@ -26,9 +25,10 @@ int main() {
     Hardware h;
     h.vendor = NVIDIA, h.rtx = true, h.dlss_built = true, h.vram_mb = 12282, h.ram_mb = 32000, h.screen_w = 2560, h.screen_h = 1440;
     Choice c = choose(h);
-    expect(c.tier == 4 && c.upscaler == DLSS && c.resolution == RES_QUALITY && c.output_w == 2560 && c.output_h == 1440,
-           "RTX, 12 GB, 1440p: High, DLSS Quality, output 2560x1440");
-    expect(std::strstr(c.why, "DLSS Quality") && std::strstr(c.why, "2560x1440"), c.why);
+    expect(c.tier == 4 && c.upscaler == DLSS && c.resolution == RES_QUALITY,
+           "RTX, 12 GB, 1440p: High, DLSS Quality");
+    // (the Output resolution is not Auto's: the game's own or the player's, read at boot before the card is known)
+    expect(std::strstr(c.why, "DLSS Quality") && !std::strstr(c.why, "output"), c.why);
 
     h.dlss_built = false;
     c = choose(h);
@@ -37,19 +37,18 @@ int main() {
     Hardware amd;
     amd.vendor = AMD, amd.rdna4 = true, amd.fsr4_built = true, amd.vram_mb = 16368, amd.screen_w = 3840, amd.screen_h = 2160;
     c = choose(amd);
-    expect(c.tier == 5 && c.upscaler == FSR4 && c.resolution == RES_QUALITY && c.output_w == 3840 && c.output_h == 2160, "RX 9070 XT, 4K: Ultra, FSR 4, 4K");
+    expect(c.tier == 5 && c.upscaler == FSR4 && c.resolution == RES_QUALITY, "RX 9070 XT, 4K: Ultra, FSR 4");
 
     Hardware r6600;
     r6600.vendor = AMD, r6600.vram_mb = 8176, r6600.screen_w = 3840, r6600.screen_h = 2160;
     c = choose(r6600);
-    expect(c.tier == 3 && c.upscaler == GAME && c.output_w == 0, "8 GB on a 4K screen: Balanced, the game's output");
-    expect(std::strstr(c.why, "needs tier 4") != nullptr, c.why);
+    expect(c.tier == 3 && c.upscaler == GAME, "8 GB on a 4K screen: Balanced, the game's upscaler");
 
     Hardware six;
     six.vendor = NVIDIA, six.rtx = true, six.dlss_built = true, six.vram_mb = 6144, six.screen_w = 1920, six.screen_h = 1080;
     c = choose(six);
-    expect(c.tier == 2 && c.upscaler == DLSS && c.resolution == RES_PERFORMANCE && c.output_w == 1920 && c.output_h == 1080,
-           "RTX 6 GB, 1080p: Low, DLSS Performance, the screen's 1080p (fewer pixels than the game's own)");
+    expect(c.tier == 2 && c.upscaler == DLSS && c.resolution == RES_PERFORMANCE,
+           "RTX 6 GB, 1080p: Low, DLSS Performance");
 
     Hardware igpu;
     igpu.vendor = INTEL, igpu.integrated = true, igpu.vram_mb = 16000;
@@ -59,7 +58,7 @@ int main() {
     Hardware deck;
     deck.vendor = AMD, deck.handheld = true, deck.vram_mb = 1024, deck.screen_w = 1280, deck.screen_h = 800;
     c = choose(deck);
-    expect(c.tier == 1 && c.output_w == 1280 && c.output_h == 800 && std::strstr(c.why, "handheld"), "a Steam Deck: Minimum, its own 1280x800");
+    expect(c.tier == 1 && std::strstr(c.why, "handheld"), "a Steam Deck: Minimum");
 
     Hardware gtx;
     gtx.vendor = NVIDIA, gtx.mesh_native = false, gtx.vram_mb = 8192;
@@ -71,7 +70,7 @@ int main() {
     Hardware radv;
     radv.vendor = AMD, radv.vram_mb = 16368, radv.screen_w = 2560, radv.screen_h = 1440, radv.mesh_as_compute = true;
     c = choose(radv);
-    expect(c.tier == 5 && c.output_w == 2560, "RX 6800 on RADV, mesh shaders run as compute: Ultra, not Minimum");
+    expect(c.tier == 5, "RX 6800 on RADV, mesh shaders run as compute: Ultra, not Minimum");
     expect(std::strstr(c.why, "run as compute") && !std::strstr(c.why, "fallback"), c.why);
     Hardware radv_native = radv;
     radv_native.mesh_as_compute = false;
@@ -104,7 +103,7 @@ int main() {
     Hardware unknown;
     unknown.vram_mb = 24564;
     c = choose(unknown);
-    expect(c.tier == 5 && c.output_w == 0, "no screen known: the game's output");
+    expect(c.tier == 5, "no screen known: tier by memory");
 
     expect(fingerprint(h, 0x10de, 0x2782) != fingerprint(h, 0x10de, 0x2783), "another GPU: another fingerprint");
     Hardware moved = h;
@@ -210,31 +209,6 @@ int main() {
         u.steps = kMaxSteps;
         for (int i = 0; i < kWindows - 1; i++) tune(u, 25.0f, 900, 40, 60, true, true);
         expect(tune(u, 25.0f, 900, 40, 60, true, true) == KEEP, "restored at two steps: no third");
-    }
-
-    // (the output by size, #2566's list: the screen's own where the tier carries its pixels)
-    expect(output_tier(1366, 768) == 1 && output_tier(1920, 1080) == 1 && output_tier(1920, 1200) == 1 && output_tier(2560, 1440) == 3 && output_tier(2560, 1600) == 3 &&
-           output_tier(3440, 1440) == 4 && output_tier(5120, 1440) == 4 && output_tier(5120, 2880) == 5, "the tier each size needs");
-    {
-        Hardware uw;
-        uw.vendor = NVIDIA, uw.rtx = true, uw.dlss_built = true, uw.vram_mb = 12282, uw.screen_w = 3440, uw.screen_h = 1440;
-        Choice u = choose(uw);
-        expect(u.output_w == 3440 && u.output_h == 1440, "a 3440x1440 ultrawide at High: its own size");
-        uw.vram_mb = 8192;
-        u = choose(uw);
-        expect(u.output_w == 0 && std::strstr(u.why, "needs tier 4"), "the same screen at Balanced: the game's");
-    }
-    {   // (a screen whose sides are not multiples of 8: its size as the menu offers it, each side rounded down to 8)
-        namespace dm = mkwvk::display_modes;
-        const int screens[][4] = {{1366, 768, 1360, 768}, {1600, 900, 1600, 896}, {1680, 1050, 1680, 1048}};
-        for (const auto& s : screens) {
-            Hardware lap;
-            lap.vendor = NVIDIA, lap.rtx = true, lap.dlss_built = true, lap.vram_mb = 6144, lap.screen_w = s[0], lap.screen_h = s[1];
-            const Choice l = choose(lap);
-            const std::vector<dm::Size> menu = dm::offered({{(uint32_t)s[0], (uint32_t)s[1]}});
-            const bool listed = std::find(menu.begin(), menu.end(), dm::Size{(uint32_t)l.output_w, (uint32_t)l.output_h}) != menu.end();
-            expect(l.output_w == s[2] && l.output_h == s[3] && listed, "a screen not a multiple of 8: its size as the menu offers it");
-        }
     }
 
     if (failures) return EXIT_FAILURE;

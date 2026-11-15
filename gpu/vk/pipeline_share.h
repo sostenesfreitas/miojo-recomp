@@ -1,5 +1,5 @@
 /* (hookshot) Save my pipeline list (the Insert menu's Debug tab, vk_menu.cpp): the zip a player attaches to the "Submit your
-   pipelines" issue (#2034), as plain functions. No Vulkan, no menu, no files: tests/test_pipeline_share.py compiles this header.
+   pipelines" issue (#14), as plain functions. No Vulkan, no menu, no files: tests/test_pipeline_share.py compiles this header.
    The builders make the same zip with nx2/pipeline_share.py: the same two files, the same checks of the list (nx2/pipeline_states.py
    --check), the same template lines.
 
@@ -15,7 +15,7 @@
 
 namespace mkwvk::pipeline_share {
 
-constexpr const char* kIssueUrl = "https://github.com/NotRexed/Hookshot/issues/2034";
+constexpr const char* kIssueUrl = "https://git.notrexed.dev/Hookshot/Hookshot/issues/14";
 constexpr const char* kListName = "hookshot_pipeline_states.bin";
 constexpr const char* kReportName = "hookshot_pipeline_report.txt";
 // (the issue's template, its lines in its order: nx2/pipeline_share.py FIELDS, the same)
@@ -30,7 +30,7 @@ constexpr int kWhere = 6;   // (left for the player to fill in)
 inline long long check_list(const std::string& bytes, bool present, std::string* why) {
     auto no = [&](const std::string& text) { return *why = text, -1LL; };
     if (!present)
-        return no(std::string("No pipeline list yet: ") + kListName + " is not in the game folder. The game writes it as you play: "
+        return no(std::string("No pipeline list yet: ") + kListName + " is not in the game folder's cache folder. The game writes it as you play: "
                   "play a while, then save it again.");
     uint32_t size = 0;
     if (bytes.size() >= 12) std::memcpy(&size, bytes.data() + 8, 4);

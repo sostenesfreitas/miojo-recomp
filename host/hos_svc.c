@@ -26,7 +26,7 @@ static uint64_t get_info(uint32_t id0, uint64_t id1, int *ok) {
     case 4: return HOS_HEAP_BASE;                          /* HeapRegionAddress */
     case 5: return HOS_SPACE_END - HOS_HEAP_BASE;          /* HeapRegionSize */
     case 6: return hos_total_memory;                       /* TotalMemorySize */
-    case 7: return hos_program_size + hos_heap_size;       /* UsedMemorySize */
+    case 7: return hos_used_memory(hos_program_size);      /* UsedMemorySize: + heap + mapped pages (hos_mem.c) */
     case 8: return 0;                                      /* DebuggerAttached */
     case 11: return 0x5A3C9E1F0B7D2468ULL ^ (id1 * 0x9E3779B97F4A7C15ULL);   /* RandomEntropy */
     case 12: return 0x08000000ULL;                         /* AslrRegionAddress */
@@ -42,7 +42,7 @@ static uint64_t get_info(uint32_t id0, uint64_t id1, int *ok) {
         return ctx_page;
     }
     case 21: return hos_total_memory;                      /* TotalNonSystemMemorySize */
-    case 22: return hos_program_size + hos_heap_size;      /* UsedNonSystemMemorySize */
+    case 22: return hos_used_memory(hos_program_size);     /* UsedNonSystemMemorySize */
     case 23: return 1;                                     /* IsApplication */
     /* the Switch 2 SDK's (ids from Eglantine's svc_types.h / svc_info.cpp) */
     case 24: return 256;                                   /* FreeThreadCount */
@@ -373,6 +373,8 @@ void a64_svc(Ctx *c, uint32_t imm) {
     case 0x07:   /* ExitProcess */
         hos_log("svcExitProcess");
         hos_log_flush();
+        void hos_crash_clean_end(void);
+        hos_crash_clean_end();
         ExitProcess(0);
         return;
     case 0x0C: { /* GetThreadPriority(-, handle) -> (result, priority) */

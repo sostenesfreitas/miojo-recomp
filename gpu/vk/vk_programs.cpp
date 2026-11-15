@@ -343,7 +343,9 @@ PipelineSource& pipeline_source() {
 /// RX_VK_LOAD, or the default (load_default.h): create where the GPU has mesh shaders and no earlier session's first uses
 /// waited too long for loads, start otherwise. Decided once the device is up (vk_main.cpp); start until then
 std::atomic<int> load_mode{-1};
+std::atomic<bool> struck_last_session{false};   // (load_default.h: the session before this one left a strike)
 void programs_load_decide(bool native_mesh) {
+    struck_last_session = load_default::strike_take(load_fallback_path());
     const load_default::Choice c = load_default::choose(getenv("RX_VK_LOAD"), native_mesh, load_default::marker_there(load_fallback_path()),
                                                         env_on("RX_VK_PROGRAM_CACHE_ZSTD"));   // (as vk_progcache.cpp disk_init reads it)
     load_mode.store(c.create ? 1 : 0, std::memory_order_release);
@@ -352,20 +354,34 @@ void programs_load_decide(bool native_mesh) {
 }
 bool programs_load_at_create() { return load_mode.load(std::memory_order_acquire) == 1; }
 namespace {
-/// (a first use ran or waited for a load, ns) The safety net: one wait over load_default::kWorstMs, or over kTotalMs in all in
-/// this session, and the next start of this install loads before the title again (hookshot_load_start.txt; a preparation
-/// removes it). Loads at create are for PCs where a first use hardly ever meets one
-std::atomic<int64_t> wait_worst_ns{0};
-std::atomic<bool> wait_marked{false};
+/// (a first use ran or waited for a load, ns) The safety net (load_default.h waits_verdict): the waits longer than kLongMs, in
+/// this session. Over kNowMs of them, or over kStrikeMs in this session and in the one before it, and the next start of this
+/// install loads before the title again (hookshot_load_start.txt; a preparation removes it). Over kStrikeMs for the first
+/// time only leaves a strike for the next session to find. Loads at create are for PCs where a first use hardly ever meets one
+std::atomic<int64_t> wait_worst_ns{0}, wait_long_ns{0};
+std::atomic<bool> wait_marked{false}, wait_struck{false};
 void load_wait_note(int64_t ns) {
     int64_t worst = wait_worst_ns.load(std::memory_order_relaxed);
     while (ns > worst && !wait_worst_ns.compare_exchange_weak(worst, ns)) {}
-    const double worst_ms = std::max(worst, ns) / 1e6, total_ms = census.unit_wait_ns.load() / 1e6;
-    if (!load_default::too_slow(worst_ms, total_ms) || wait_marked.exchange(true)) return;
-    const bool wrote = load_default::marker_write(load_fallback_path(), worst_ms, total_ms);
-    logf("vk: first uses waited for loads for %.0f ms in this session (the longest %.0f ms): over %.0f ms at once or %.0f ms in "
-         "all, so the next start loads every listed program before the title again%s", total_ms, worst_ms,
-         load_default::kWorstMs, load_default::kTotalMs, wrote ? " (hookshot_load_start.txt)" : "; the marker did not write");
+    if (!load_default::counts(ns / 1e6)) return;
+    const double worst_ms = std::max(worst, ns) / 1e6, long_ms = (wait_long_ns += ns) / 1e6;
+    const load_default::Waits v = load_default::waits_verdict(long_ms, struck_last_session.load());
+    if (v == load_default::Waits::kFine) return;
+    if (v == load_default::Waits::kStrike) {
+        if (wait_struck.exchange(true)) return;
+        const bool wrote = load_default::strike_write(load_fallback_path(), long_ms);
+        logf("vk: first uses waited for loads for %.0f ms in this session (the longest %.0f ms; waits over %.0f ms counted): "
+             "over %.0f ms. Once is let pass; if the next session does the same, starts load every listed program before the "
+             "title again%s", long_ms, worst_ms, load_default::kLongMs, load_default::kStrikeMs,
+             wrote ? "" : "; the strike did not write");
+        return;
+    }
+    if (wait_marked.exchange(true)) return;
+    const bool wrote = load_default::marker_write(load_fallback_path(), worst_ms, long_ms);
+    logf("vk: first uses waited for loads for %.0f ms in this session (the longest %.0f ms; waits over %.0f ms counted): over "
+         "%.0f ms%s, so the next start loads every listed program before the title again%s", long_ms, worst_ms,
+         load_default::kLongMs, long_ms > load_default::kNowMs ? load_default::kNowMs : load_default::kStrikeMs,
+         long_ms > load_default::kNowMs ? "" : ", as the session before this one was", wrote ? " (hookshot_load_start.txt)" : "; the marker did not write");
 }
 }
 

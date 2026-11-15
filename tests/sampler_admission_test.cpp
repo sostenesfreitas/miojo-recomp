@@ -127,8 +127,8 @@ void vkDestroySampler(VkDevice, VkSampler sampler, const VkAllocationCallbacks*)
 /* ACTUAL */
 
 struct Program { bool push = true; VkPipelineLayout layout{}; VkDescriptorSetLayout set_layout{}; };
-struct DescriptorWrites { std::vector<VkWriteDescriptorSet> writes; } descriptor_writes;
-DescriptorWrites& dw() { return descriptor_writes; }
+struct DescWriter { std::vector<VkWriteDescriptorSet> writes; } descriptor_writes;   // (bind_descriptors names the type)
+DescWriter& dw() { return descriptor_writes; }
 struct Pushed;
 std::array<Pushed, 2>& pushed();
 struct Recording { VkDescriptorPool pool{}; std::vector<VkDescriptorPool> extra; } recording;

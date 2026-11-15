@@ -1,4 +1,4 @@
-"""Published WPF CLI: execute real startup and Runner with an authored child, never a game or GUI mode."""
+"""Published Windows Builder --cli: execute real startup and Runner with an authored child, never a game."""
 import argparse
 import ctypes
 import json
@@ -12,21 +12,21 @@ import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_ALL_ARGS = ["--dotnet", "{dotnet}"]
-RUN_ALL_SKIP = {"linux": "Windows Desktop WPF application startup"}
+RUN_ALL_SKIP = {"linux": "Windows Builder startup (a win-x64 self-contained program)"}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dotnet", default="dotnet")
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="portable-wpf-cli-") as folder:
+    with tempfile.TemporaryDirectory(prefix="portable-builder-cli-") as folder:
         root = Path(folder)
         project = root / "project"
         shutil.copytree(ROOT / "builder/HookshotBuilder", project, ignore=shutil.ignore_patterns("bin", "obj"))
         home = root / "Original ü, volume/HookshotBuilder"
         app = home / "versions/v-authored/HookshotBuilder"
         published = root / "published"
-        # Exercise the shipped self-contained package, not a Debug app that depends on an installed Desktop runtime.
+        # Exercise the shipped self-contained package, not a Debug app that depends on an installed .NET runtime.
         subprocess.run([args.dotnet, "publish", str(project / "HookshotBuilder.csproj"), "--configuration", "Release",
                         "-p:NuGetAudit=false", "--output", str(published), "--disable-build-servers", "-v", "quiet"], check=True)
         shutil.copytree(published, app)
@@ -43,7 +43,7 @@ def main():
         env.update(DOTNET_ROOT=str(runtime_root), DOTNET_ROOT_X64=str(runtime_root), DOTNET_MULTILEVEL_LOOKUP="0")
         runtime = json.loads((app / "HookshotBuilder.runtimeconfig.json").read_text(encoding="utf-8"))["runtimeOptions"]
         assert "includedFrameworks" in runtime and "framework" not in runtime and "frameworks" not in runtime
-        assert (app / "coreclr.dll").is_file() and (app / "PresentationFramework.dll").is_file()
+        assert (app / "coreclr.dll").is_file() and not (app / "PresentationFramework.dll").exists()   # (no WPF: no window)
         # The authored tools fixture uses the trusted interpreter running this check, not another PATH entry.
         env["PATH"] = str(Path(os.sys.executable).parent) + os.pathsep + env.get("PATH", "")
         scenarios = 0
@@ -86,7 +86,7 @@ def main():
         run({}, False)
         marker.unlink()
         run({"HOOKSHOT_SETUP_BASE": str(home), "HOOKSHOT_BUILDER_PORTABLE": "1"}, False)
-        print("Published WPF startup: %d CLI/child/relocation/error scenarios passed; DOS alias exercised: %s" %
+        print("Published Builder startup: %d CLI/child/relocation/error scenarios passed; DOS alias exercised: %s" %
               (scenarios, alias_available))
 
 

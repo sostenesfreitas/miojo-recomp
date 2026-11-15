@@ -162,13 +162,14 @@ def main():
     build = draw[draw.index("VkPipeline build_graphics(const Program& p, const NvnState& s, const Targets& at, "
                             "VkPrimitiveTopology topo, int part, bool* cold) {"):]
     build = build[:build.index("\n}\n")]
-    i_begin = build.find("fault_quarantine().begin(p.key, !cold)")
+    i_begin = build.find("fault_quarantine().begin(p.key, !cold && !quick_build)")
     i_end = build.find("fault_quarantine().end(p.key, r == kDriverFault)")
     # (the driver is reached through guarded_graphics, or graphics_with, which goes to it through the play caches, #1772)
     calls = [m.start() for m in re.finditer(r"\b(?:guarded_graphics|graphics_with)\(", build)]
     assert calls and 0 <= i_begin < calls[0] and calls[-1] < i_end, (i_begin, calls, i_end)   # (the AMD retry too, #1747)
     assert "driver_fault_note(p.key)" in build[i_end:]
-    assert re.search(r"kBusy\) return \*cold = true, VK_NULL_HANDLE;", build), "a busy program answers a cold probe as cold"
+    assert re.search(r"kBusy\) return gate_busy = true, cold \? \(\*cold = true, VK_NULL_HANDLE\) : VK_NULL_HANDLE;", build), \
+        "a busy program answers a cold probe as cold, and a quick build (which does not wait either) with none, both saying busy"
     # (#1747's retry without the optimizer followed the guard's VK_ERROR_UNKNOWN, which a fault was then: it still does)
     if "recovered with optimization disabled" in build:
         assert "(r == VK_ERROR_UNKNOWN || r == kDriverFault)" in build

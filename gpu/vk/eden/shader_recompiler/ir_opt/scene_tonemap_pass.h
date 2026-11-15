@@ -4,8 +4,8 @@
 // the same programs' fit at their decompiled source; here they are found in the IR, and nothing of the game's code is kept.
 //
 // What a scene mapping program does at its end, per channel: the scene (bloom added) times the exposure, a constant buffer
-// word; that through the game's Narkowicz fit, saturated; the channels' luminance (0.2989, 0.5866, 0.1144) for its native
-// HDR expansion; the colour written to target 0 under the peak, a word of the same bank. The pass finds each piece, and
+// word, optionally times a shared power-of-two exposure adjustment; that through the game's Narkowicz fit, saturated; the
+// channels' luminance (0.2989, 0.5866, 0.1144) for its native HDR expansion; the colour written to target 0 under the peak, a word of the same bank. The pass finds each piece, and
 // replaces only target 0's colour: PsychoV35 of the scene before the exposure, the exposure its midgray, the game's peak.
 
 #pragma once
@@ -153,6 +153,8 @@ inline const char* SceneToneMapPass(IR::Program& program) {
     // the fit's input, the scene times the exposure; the colour under the peak
     std::array<IR::F32, 3> scene;
     IR::F32 gain, peak;
+    IR::Value adaptation;
+    bool adapted = false;
     u32 bank = ~0u, gain_offset = ~0u;
     for (int c = 0; c < 3; c++) {
         const IR::Value x{by_channel[c]->Arg(0)};
@@ -160,8 +162,31 @@ inline const char* SceneToneMapPass(IR::Program& program) {
         if (mul->GetOpcode() != IR::Opcode::FPMul32) return "the fit's input is not a product";
         u32 b, o;
         int at = Cbuf(mul->Arg(1), b, o) ? 1 : Cbuf(mul->Arg(0), b, o) ? 0 : -1;
+        IR::Value scale;
+        bool scaled = false;
+        if (at < 0) {
+            // The adapted scene permutation multiplies (scene * base exposure) by exp2(adjustment).
+            // Keep that common multiplier in the exposure, rather than leaving this permutation on Vanilla.
+            for (size_t side = 0; side < 2; side++) {
+                const IR::Value extra{mul->Arg(1 - side)}, inner{mul->Arg(side)};
+                if (extra.IsImmediate() || inner.IsImmediate() ||
+                    extra.InstRecursive()->GetOpcode() != IR::Opcode::FPExp2 ||
+                    inner.InstRecursive()->GetOpcode() != IR::Opcode::FPMul32)
+                    continue;
+                const IR::Inst* product{inner.InstRecursive()};
+                const int base = Cbuf(product->Arg(1), b, o) ? 1 : Cbuf(product->Arg(0), b, o) ? 0 : -1;
+                if (base < 0) continue;
+                mul = product;
+                at = base;
+                scale = extra.Resolve();
+                scaled = true;
+                break;
+            }
+        }
         if (at < 0) return "the fit's input is not times a constant";
-        if (c > 0 && (b != bank || o != gain_offset)) return "the channels' exposures differ";
+        if (c > 0 && (b != bank || o != gain_offset || scaled != adapted || (scaled && scale != adaptation)))
+            return "the channels' exposures differ";
+        if (c == 0) adaptation = scale, adapted = scaled;
         bank = b, gain_offset = o;
         gain = IR::F32{mul->Arg(at)};
         scene[c] = IR::F32{mul->Arg(1 - at)};
@@ -188,6 +213,7 @@ inline const char* SceneToneMapPass(IR::Program& program) {
     auto& list{block->Instructions()};
     IR::IREmitter ir{*block, list.iterator_to(*last)};
     IrOps ops{ir};
+    if (adapted) gain = ir.FPMul(gain, IR::F32{adaptation});
     // (a peak under the paper white, or none: the game's SDR range)
     const IR::F32 safe_peak{ir.FPMax(peak, ir.Imm32(1.0f))};
     const auto out = PsychoV35::SceneToneMap(ops, scene, gain, safe_peak);

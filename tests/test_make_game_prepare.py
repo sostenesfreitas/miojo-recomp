@@ -89,7 +89,7 @@ class PrepareTests(unittest.TestCase):
             make_game.say("progress", "0.5")
             make_game.say("times", "1", "1", "-1")
             make_game.say("done", "o")
-        self.assertEqual(out.getvalue().splitlines(), ["progress 0.250 Compiling", "progress 0.600 Compiling", "progress 1.000 Done"])
+        self.assertEqual(out.getvalue().splitlines(), ["progress 0.260 Compiling", "progress 0.565 Compiling", "progress 1.000 Done"])
 
     def test_without_prepare_the_app_lines_are_unchanged(self):
         out = io.StringIO()

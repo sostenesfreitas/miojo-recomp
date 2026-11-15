@@ -25,6 +25,12 @@ inline Reason classify(bool shifted, bool overwritten) { return shifted ? DEAD :
 // came back empty before (issues 107, 386)
 inline bool texels_lost(bool gpu_written, bool overwritten, bool flushed) { return gpu_written && !overwritten && !flushed; }
 
+// A write-back before eviction puts an image's texels over all of its storage and marks those pages written. It is stale when
+// another image was drawn into that storage after this one's last drawing (other_written: the newest such drawing's frame, 0 for
+// none; vk_texture.cpp's drawn_others): that memory is the other image's now, and a finalized image there is uploaded from what
+// was written. A drawing in the same frame keeps the write-back: which of the two came last is not known
+inline bool write_back_stale(uint64_t last_written, uint64_t other_written) { return other_written > last_written; }
+
 struct Tally {
     uint32_t n[COUNT] = {};
     uint32_t lost = 0, lost_finalized = 0;   // (of lost: the ones the game had finalized, which keep_finalized is for)
