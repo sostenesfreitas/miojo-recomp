@@ -571,6 +571,7 @@ int build_mesh(Rt& r, VkCommandBuffer cmd, const RtDraw& d, Mesh& out) {
     bi.dstAccelerationStructure = out.as;
     const VkAccelerationStructureBuildRangeInfoKHR range{n / 3, 0, 0, 0};
     const VkAccelerationStructureBuildRangeInfoKHR* ranges = &range;
+    ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (miojo: the build goes through its own pointer, not vk_work.h: what the recorder holds reaches cmd first)
     r.build(cmd, 1, &bi, &ranges);
     note_work();
     full_barrier(cmd, "barrier (rt mesh)");
@@ -758,6 +759,7 @@ uint32_t build_skinned(Rt& r, VkCommandBuffer cmd, uint64_t now, int slot) {
     bi.dstAccelerationStructure = r.skin.as;
     const VkAccelerationStructureBuildRangeInfoKHR range{triangles, 0, 0, 0};
     const VkAccelerationStructureBuildRangeInfoKHR* ranges = &range;
+    ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (miojo: the build goes through its own pointer, not vk_work.h: what the recorder holds reaches cmd first)
     r.build(cmd, 1, &bi, &ranges);
     note_work();
     full_barrier(cmd, "barrier (rt actors)");
@@ -1599,6 +1601,7 @@ void rt_frame(VkCommandBuffer cmd, const float view_proj[16], VkImageView color,
     bi.dstAccelerationStructure = r.top.as;
     const VkAccelerationStructureBuildRangeInfoKHR range{n, 0, 0, 0};
     const VkAccelerationStructureBuildRangeInfoKHR* ranges = &range;
+    ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (miojo: the build goes through its own pointer, not vk_work.h: what the recorder holds reaches cmd first)
     r.build(cmd, 1, &bi, &ranges);
     note_work();
     full_barrier(cmd, "barrier (rt scene)");
